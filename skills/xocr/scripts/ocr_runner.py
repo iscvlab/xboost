@@ -148,20 +148,32 @@ def parse_page_selection(pages_arg, total_pages):
     if not pages_arg or pages_arg.strip().lower() in ("all", "*"):
         return list(range(total_pages))
     selected = set()
-    for part in pages_arg.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            bounds = part.split("-", 1)
-            start = max(1, int(bounds[0]))
-            end = min(total_pages, int(bounds[1]))
-            for p_num in range(start, end + 1):
-                selected.add(p_num - 1)
-        else:
-            p_num = int(part)
-            if 1 <= p_num <= total_pages:
-                selected.add(p_num - 1)
+    try:
+        for part in pages_arg.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                bounds = part.split("-", 1)
+                raw_start = int(bounds[0].strip())
+                raw_end = int(bounds[1].strip())
+                if raw_start < 1 or raw_end < raw_start:
+                    raise ValueError(f"Invalid page range '{part}'")
+                start = max(1, raw_start)
+                end = min(total_pages, raw_end)
+                for p_num in range(start, end + 1):
+                    selected.add(p_num - 1)
+            else:
+                p_num = int(part)
+                if p_num < 1:
+                    raise ValueError(f"Page number must be >= 1, got '{part}'")
+                if 1 <= p_num <= total_pages:
+                    selected.add(p_num - 1)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid --pages specification '{pages_arg}': "
+            f"expected 1-based page numbers or ranges (e.g. '1-5,8,10-12') ({exc})."
+        ) from exc
     return sorted(selected)
 
 
@@ -879,9 +891,10 @@ def run_vlm_engine(
         try:
             import urllib.request
 
-            with urllib.request.urlopen(
-                "http://127.0.0.1:10000/health", timeout=1.5
-            ) as resp:
+            req = urllib.request.Request("http://127.0.0.1:10000/health")
+            if not req.full_url.startswith(("http://", "https://")):
+                raise ValueError("Invalid URL scheme")
+            with urllib.request.urlopen(req, timeout=1.5) as resp:  # nosec B310
                 sglang_live = resp.status == 200
         except Exception:  # nosec B110
             sglang_live = False
@@ -1459,23 +1472,28 @@ def main():
         "vlm_backend": args.vlm_backend,
     }
 
-    if input_path.lower().endswith(".pdf"):
-        pdf_res = extract_pdf(
-            input_path,
-            output_dir,
-            mode=args.mode,
-            dpi=args.dpi,
-            pages_arg=args.pages,
-            workers=args.workers,
-            langs=langs,
-            vlm_backend=args.vlm_backend,
-        )
-        summary.update(pdf_res)
-    else:
-        img_res = extract_standalone_image(
-            input_path, output_dir, langs=langs, vlm_backend=args.vlm_backend
-        )
-        summary.update(img_res)
+    try:
+        if input_path.lower().endswith(".pdf"):
+            pdf_res = extract_pdf(
+                input_path,
+                output_dir,
+                mode=args.mode,
+                dpi=args.dpi,
+                pages_arg=args.pages,
+                workers=args.workers,
+                langs=langs,
+                vlm_backend=args.vlm_backend,
+            )
+            summary.update(pdf_res)
+        else:
+            img_res = extract_standalone_image(
+                input_path, output_dir, langs=langs, vlm_backend=args.vlm_backend
+            )
+            summary.update(img_res)
+    except ValueError as exc:
+        err = {"status": "error", "message": str(exc)}
+        print(json.dumps(err, ensure_ascii=False))
+        sys.exit(1)
 
     print(json.dumps(summary, ensure_ascii=False))
 

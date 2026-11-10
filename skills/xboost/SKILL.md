@@ -1,7 +1,7 @@
 ---
 name: xboost
 description: >
-  BoostX deep reasoning, Task × Project goal synthesis, and high-discipline problem solving (/xboost).
+  XBoost deep reasoning, Task × Project goal synthesis, and high-discipline problem solving (/xboost).
   Use when solving complex coding tasks, bugs, physics/CAD simulations, or architecture via falsifiable hypotheses,
   Ponytail × Deep Module ladder, red-green loops, Dual-OS/OneDrive/CLI parity, or with /goal.
   Do NOT use for trivial edits, syntax typos, or doc-only sync (use /xsync).
@@ -75,7 +75,7 @@ Cross the selected Task Row with the **Universal System Verification Dimensions*
 * **2. Live-Callable Behavioral & Perturbation Proof (`UL-05`, `UL-06`, `UL-08`)**: Import and execute the live production entrypoint and live input resolver directly, verify bidirectional counter-anchors (`A_pos ∧ A_neg`), verify non-tautological piece-wise branch reachability via a synthetic full-range sweep (`count(Branch_k) > 0`), and verify active-regime parameter sensitivity (`∃ x ∈ Active_Regime(X) : ΔY ≠ 0`, `N_processed == N_expected`, `source != "fallback"`).
 * **3. Partition, Bracketed Support & Step-Scaling Invariance (`UL-01`..`UL-04`, `UL-07`)**: Verify closed-system extensive partition & remainder conservation (`abs((∑ Child_k + Remainder) - Parent) <= max(1e-9 * max(1.0, abs(Parent)), 1e-9)`), bracketed interpolation (`x_left ≤ x ≤ x_right`), exact refinement (`S_exact ⊆ S_cand`), discretization step convergence (`Δμ → Δμ/2`), and read-only feature-stream decoupling (`0` `T(T(x))` cache compounding).
 * **4. Complexity, Concurrency & Non-Blocking Resource Bounds (`UL-08`)**: Verify `O(1)`/`O(log N)` inner-loop complexity, bounded FIFO/LRU cache eviction, and non-blocking execution bounds.
-* **5. Cross-Platform, Surface & Ecosystem Parity**: Enforce Dual-OS + OneDrive relative path safety, IDE/CLI hook parity, and optional composable sibling verification when applicable (`/ui-design-brain`, `/diagram-design`, [`/xcreate-skill`](../xcreate-skill/SKILL.md), [`/xpublish`](../xpublish/SKILL.md)).
+* **5. Cross-Platform, Surface & Ecosystem Parity**: Enforce Dual-OS + OneDrive relative path safety, IDE/CLI hook parity, and optional composable sibling verification when applicable (`/ui-design-brain`, `/diagram-design`, [`/xmouse`](../xmouse/SKILL.md), [`/xlearn`](../xlearn/SKILL.md), [`/xcreate-skill`](../xcreate-skill/SKILL.md), [`/xpublish`](../xpublish/SKILL.md)).
 
 State the 3-line contract concisely before mutating files:
 > **🎯 XBoost Goal Contract** — `[Task Archetype]` × `[Project Archetype]` (`Tier 1|2|3`)
@@ -141,13 +141,13 @@ Before implementing, use fast semantic triage ([`/xlaya`](../xlaya/SKILL.md) min
 
 ### Phase 4: Ruthless 3-Tier Verification (The Green Gate & Wave 2.5 Remediation Loop)
 
-An XBoost task is **only complete when terminal execution logs provide concrete runtime proof** (static compiler/linter output alone is strictly insufficient):
+An XBoost task is **only complete when terminal execution logs provide concrete runtime proof** (static compiler/linter output alone is strictly insufficient). **Zero "Draft-Only / Staging" Exemption**: User instructions that defer external side effects (`"don't push/commit/post yet"`, `"guide me for commenting"`, `"draft a reply"`, `"suggest only"`) gate external dispatch (`git push`, `gh pr`), **never** Phase 4 / Wave 2 verification before presenting Draft 1:
 
 1. **Tier 1: Before State (Repro / Baseline / 4-Axis Forensic Probe)**:
-  - Confirm the initial failure log (Track A), pre-flight baseline probe (Track B), analytical toy benchmark (Track C), or 4-Axis Forensic Audit baseline ([`references/deep_audit_protocol.md`](references/deep_audit_protocol.md)).
+  - Confirm the initial failure log (Track A), pre-flight baseline probe (Track B), analytical toy benchmark (Track C), or 4-Axis Forensic Audit baseline ([`references/deep_audit_protocol.md`](references/deep_audit_protocol.md)). Read the **entire enclosing `def`/`fn` body** (never a `±5`-line diff slice) before writing test assertions.
 2. **Tier 2: After State (Pass, Active-Regime Sensitivity `ΔX → ΔY ≠ 0` & Conservation Proof)**:
-  - Run the exact feedback signal on the updated code and demonstrate a clean **GREEN** pass.
-  - **Perturbation & Provenance Check**: Perturb at least one modified/critical input parameter `X → X'` inside its active operating regime (`x ∈ Active_Regime(X)`) and confirm non-zero, directionally valid output response (`ΔY ≠ 0`), full dataset coverage (`N_processed == N_expected`), and non-fallback provenance (`source != "fallback"`).
+  - Run the exact feedback signal on the updated code (stubbing only unavailable outer C/driver boundaries via `sys.modules` so the real target function executes—never hand-guessing `expected` values) and demonstrate a clean **GREEN** pass.
+  - **Perturbation, Provenance & Benchmark Hygiene Check**: Perturb at least one modified/critical input parameter `X → X'` inside its active operating regime (`x ∈ Active_Regime(X)`) and confirm non-zero, directionally valid output response (`ΔY ≠ 0`), full dataset coverage (`N_processed == N_expected`), non-fallback provenance (`source != "fallback"`), and—on steady-state hot-path benchmarks—an untimed warmup pass + `gc.collect()` before timing/`tracemalloc` with `sign(ΔMem_obs) == sign(Mem_added - Mem_freed)`.
   - **Conservation, Boundary & Mutation Check**: Verify at least one boundary edge case (null/empty input, zero-forcing equilibrium identity `Δx = 0 ⇒ Δy = 0.0 / y == y_eq` with zero `NaN`/`Inf`, extensive conservation `∑ Parts ≈ Whole`, or causal future-mutation invariance `0.0` diff) and confirm reverting the core fix causes the check to fail.
 3. **Tier 3: Wave 2.5 Surgical Remediation, Ponytail Bloat Strip & Anti-Hardcode Sweep**:
   - If Tier 2 uncovers any silent fallback, dead wiring, scale clipping, or regression, loop through **Wave 2.5 Surgical Coordinate-Wise Remediation** until `0` defects remain and lock a permanent regression test.
@@ -204,7 +204,7 @@ Whenever engineering across a multi-machine ecosystem (Windows, macOS, and Linux
 
 ### A. `/goal` & Multi-Turn Iterative Ratchet Contract
 When `/xboost` is paired with `/goal` or invoked across multiple iterative turns in the same session:
-1. **Unified Scratch Checkpoint Ledger (`<artifactDir>/scratch/boostx_state.md`)**: Across multi-stage, multi-wave, or multi-turn iterative runs, maintain a single unified `<artifactDir>/scratch/boostx_state.md` tracking:
+1. **Unified Scratch Checkpoint Ledger (`<artifactDir>/scratch/xboost_state.md`)**: Across multi-stage, multi-wave, or multi-turn iterative runs, maintain a single unified `<artifactDir>/scratch/xboost_state.md` tracking:
   - *Step 0 XBoost Goal Contract, Active Canonical `RESEARCH_<TOPIC>.md` Path, & Acceptance Criteria*
   - *Cumulative Ratchet Assertions (`Ratchet_Suite(1..t)`: pinned `A_pos ∧ A_neg` counterexamples & invariants that every subsequent turn `t+1` must keep `100%` Green)*
   - *Falsified Dead Ends & `Session_Touched_Vault_Notes` (flagging any note touched earlier in the session as `DIRTY_IN_SESSION` if subsequent turns modify its underlying formula/contract)*
@@ -214,10 +214,10 @@ When `/xboost` is paired with `/goal` or invoked across multiple iterative turns
 3. **Anti-Premature `GOAL_COMPLETE` Gate**:
   - Never emit `<!-- GOAL_COMPLETE -->` on the same turn a major code edit is written unless fresh Phase 4 verification (including `100%` pass on `Ratchet_Suite(1..t)`) has executed and passed *after* the final edit.
 
-### B. Composable `/xplan`, `/xdeep-research`, `/xultra` & Opt-In `/xobsidian` Rules (Zero Default Overhead)
+### B. Composable `/xplan`, `/xdeep-research`, `/xultra`, `/xlearn` & Opt-In `/xobsidian` Rules (Zero Default Overhead)
 * **Stay Local & Fast by Default**: Do **not** run external web/literature research, spawn multi-agent swarms, or touch any Obsidian vault on standard debugging, refactoring, or UI tasks unless the corresponding skill is triggered.
 * **Approved 3-Block Plan Bridge ([`/xplan`](../xplan/SKILL.md) → `/xboost`)**:
-  * When transitioning from an approved `implementation_plan.md` artifact created via [`/xplan`](../xplan/SKILL.md), lock all three plan blocks directly into Phase 1 and `boostx_state.md`: **(1) Header SSOT & `[FROZEN]`/`[DEFERRED]` Guardrails**, **(2) Section 1 Selected Grilling Options + Section 2 `Shared Seam Header` / SI Unit Bridge**, and **(3) Section 4 `Red → Green Verification Matrix` (including `UL-05` Bidirectional Counter-Anchors and `UL-08` Live-Callable Entrypoint checks)**.
+  * When transitioning from an approved `implementation_plan.md` artifact created via [`/xplan`](../xplan/SKILL.md), lock all three plan blocks directly into Phase 1 and `xboost_state.md`: **(1) Header SSOT & `[FROZEN]`/`[DEFERRED]` Guardrails**, **(2) Section 1 Selected Grilling Options + Section 2 `Shared Seam Header` / SI Unit Bridge**, and **(3) Section 4 `Red → Green Verification Matrix` (including `UL-05` Bidirectional Counter-Anchors and `UL-08` Live-Callable Entrypoint checks)**.
 * **Opt-In [`/xultra`](../xultra/SKILL.md) Multiplier (`/xboost /xultra` or `/xboost /xultra /goal`)**:
   * **Default (Without `/xultra`)**: Execute inline or via standard single-task delegation (`Engine A` / `Engine B`).
   * **With `/xultra`**: Normalize any multi-skill command into the Canonical Stage DAG (`Context → Research → Plan/Build → Sync/Ratchet`), route Phase 2–3 through `/xultra`'s **Elastic Cognitive Swarm (`N × K × C × T`)** (`Orthogonal K-Vector Tournament`, `Elastic Cognitive-Density Fleet` with Pre-Locked Shared Seam Header & Build-Lock Serialization, **4-Axis Forensic Audit Shards (`Truth`, `Criteria`, `Wiring`, `Perf`)** via [`references/deep_audit_protocol.md`](references/deep_audit_protocol.md), or `Evolutionary Ratchet Loop` across `T` generations), and enforce the Anti-Inline-Shortcut `Maker ≠ Checker` **Wave 2A Elastic Critic Shards (`C ≥ 1`) → Wave 2B Serialized Main Checker Gate** + **Wave 2.5 Surgical Coordinate-Wise Remediation Loop** in Phase 4.
@@ -226,8 +226,10 @@ When `/xboost` is paired with `/goal` or invoked across multiple iterative turns
   * When paired (`/xdeep-research /xboost` or `/xdeep-research /xboost /xultra`), bridge external primary-source/standard verification (`Wave 1–3` of `/xdeep-research`) directly into `/xboost`'s **4-Axis Internal Forensic Audit & Implementation** ([`references/deep_audit_protocol.md`](references/deep_audit_protocol.md)), locking the verified equation, SI unit bridge, or API signature into Phase 1 as the Red → Green verification gate, and updating the single canonical `RESEARCH_<TOPIC>.md` in-place across iterative rounds without forking duplicate files.
 * **Automatic [`/xocr`](../xocr/SKILL.md) PDF & Table Ingestion Rule**:
   * Whenever task input data, structured specification tables, or Phase 4 verification ground truth must be extracted from a `.pdf` or scanned document/table image, automatically route text/table extraction through [`/xocr`](../xocr/SKILL.md) ([`../xocr/scripts/ocr_runner.py`](../xocr/scripts/ocr_runner.py)) and verify `garble_ratio == 0.0` in `ocr_manifest.json` rather than writing ad-hoc `pypdf` snippets (use `read_file`/`view_file` directly when visually inspecting UI or CAD viewport screenshots).
+* **Post-Session Compound Learning Bridge ([`/xlearn`](../xlearn/SKILL.md))**:
+  * When paired with [`/xlearn`](../xlearn/SKILL.md) (`/xboost /xlearn`), distill verified bug root causes, AST/grep defect signatures, and `Before → After` benchmark receipts into `COMPOUND_LEARNING_PLAYBOOK.md` (`Tier 1`) or domain Playbooks (`Tier 2`) with automatic [`/xsync`](../xsync/SKILL.md) `--federated` mirror closure after Phase 4 passes.
 * **Strict Opt-In `/xobsidian` & Session Dirty-Note Coherency Rule**:
-  * **Without `/xobsidian`**: Never read from or write to any Obsidian vault (unless a vault note was already modified earlier in the *same* conversation and marked `DIRTY_IN_SESSION` in `boostx_state.md` after a subsequent code/math pivot).
+  * **Without `/xobsidian`**: Never read from or write to any Obsidian vault (unless a vault note was already modified earlier in the *same* conversation and marked `DIRTY_IN_SESSION` in `xboost_state.md` after a subsequent code/math pivot).
   * **With `/xobsidian` (`/xboost /xobsidian` or `/xdeep-research /xboost /xobsidian`)**: Dynamically resolve `VAULT_ROOT` via [`/xobsidian`](../xobsidian/SKILL.md) in Phase 1 (`00 *Index*.md` → `Hub - *.md`) to load reusable domain formulas, contracts, and invariants, and defer vault writes until **after** Phase 4 / Wave 2 passes (`0` verified defects), ratcheting converged patterns into `VAULT_ROOT` and verifying `BROKEN=0`, `ORPHANS=0`, `DUP_NEIGHBOR_GROUPS=0`.
 
 ### C. Anti-Hanging & Session Timeout Safety
@@ -249,4 +251,4 @@ Before declaring any XBoost task finished (and mandatory before `<!-- GOAL_COMPL
 - [ ] **Non-Interactive CLI Enforced**: Commands pass `-y` / `--no-input` / `PAGER=cat` to prevent session hanging.
 - [ ] **Green Signal, Perturbation (`ΔX → ΔY ≠ 0`) & Conservation Triad Verified**: Fresh runtime verification proves pass state, active-regime perturbation sensitivity (`0` dead wiring or silent fallback masking), `100%` expected row/record coverage, conservation/causality (`∑ Parts ≈ Whole`, `0.0` future leakage), and boundary safety (`NaN`/`Inf`/null guards).
 - [ ] **Zero Regressions & Anti-Hardcode Sweep**: Confirmed sibling modules intact; zero machine-specific user paths (`C:\Users\<User>\...`, `/Users/<username>/...`) or secrets in diff.
-- [ ] **Scratch Debris Cleaned & Knowledge Ratcheted**: Disposable scratch scripts removed while verified counterexample assertions (`UL-05`, `UL-08`) remain locked in the cumulative test suite; workspace docs/registries synced via [`/xsync`](../xsync/SKILL.md) (and if `/xobsidian` was included or session notes were marked `DIRTY_IN_SESSION`, reusable specs ratcheted to the vault with `0` broken links).
+- [ ] **Scratch Debris Cleaned & Knowledge Ratcheted**: Disposable scratch scripts removed while verified counterexample assertions (`UL-05`, `UL-08`) remain locked in the cumulative test suite; workspace docs/registries synced via [`/xsync`](../xsync/SKILL.md) or ratcheted via [`/xlearn`](../xlearn/SKILL.md) (and if `/xobsidian` was included or session notes were marked `DIRTY_IN_SESSION`, reusable specs ratcheted to the vault with `0` broken links).

@@ -1,25 +1,53 @@
 # Changelog
 
-## v3.4.0
+## v3.5.0
 
-- **Cross-Workspace Compound Learning Playbook (`docs/COMPOUND_LEARNING_PLAYBOOK.md`) & Two-Tier Autonomy Architecture (`Tier A` Auto-Ratchet vs. `Tier B` Human-Consent Gate)**:
-  - **Public Compound Learning Playbook (`docs/COMPOUND_LEARNING_PLAYBOOK.md`)**: Codified **17 Reusable Engineering Defect & Bottleneck Archetypes** (`PAT-VEC-01..03`, `PAT-SPARSE-01`, `PAT-GRAPH-01`, `PAT-STATE-01..02`, `PAT-NUM-01`, `PAT-GIS-01..02`, `PAT-3D-01`, `PAT-CAD-01`, `PAT-MCP-01`, `PAT-OCR-01`, `PAT-WEB-01`, `PAT-QUANT-01`, `PAT-IOT-01`, `PAT-ENV-01`, `PAT-GIT-01`), **7 Institutional CI Governance Fingerprints (`GOV-01..07`)**, and **4 False-Positive Mirage Guardrails (`FALS-01..04`)**, illustrated with a monochrome academic engineering workflow diagram.
-  - **Two-Tier Autonomy Boundary**: Separated **Tier A (`Autonomous Pattern & Doc Ratchet` across `COMPOUND_LEARNING_PLAYBOOK.md`, repository docs, and opt-in `/xobsidian` notes)** from **Tier B (`Report-First Human-Consent Gate` for global `SKILL.md` files, `UL-01..UL-08`, bundled `scripts/*.py`, and public upstream PR submissions)**.
-- **`S1–S4` Skill Protocol & CLI Upgrades (`/xbrief`, `/xsync`, `/xdeep-research`, `/xcreate-skill`, `/xpublish` — `5,458` Total CLI LOC)**:
-  - **`S1` (`/xbrief` + `/xsync` Bounded Up-Tree Playbook Discovery & Tier A Auto-Ratchet, `audit_workspace_docs.py` `462` LOC)**: Upgraded `/xbrief` to walk up to `2` ancestor levels under a safe stop-list to load `COMPOUND_LEARNING_PLAYBOOK.md` in Stage 1, and upgraded `/xsync` (`--federated`) + `audit_workspace_docs.py` (`454 → 462` LOC; `5,450 → 5,458` total CLI LOC across `8` engines) to autonomously ratchet verified `PAT-*` / `GOV-*` / `FALS-*` entries in Stage 4.
-  - **`S2` (`/xdeep-research` Wave 1 Live `HEAD` Verification, Enclosing-Scope AST Check & Unlinked-PR Collision Gate)**: Embedded `FALS-01` (Silent `HEAD` Fix check), `FALS-02` (upward `def`/`class` enclosing-method check), `FALS-03` (unlinked open PR scan), `FALS-04` (intersection `|` vs union `&` nodata semantics), and `GOV-01..07` into `/xdeep-research`.
-  - **`S3` (`/xcreate-skill` Mode C Tier B Human-Consent Gate)**: Locked the Report-First Human-Consent boundary requiring the 5-Gate Universal Law Falsification Sieve + Wave 2A Blind Counter-Domain Critic before editing any global skill.
-  - **`S4` (`/xpublish --platform pr` Mixed `CRLF` / `LF` Upstream Line-Ending Parity Guard — `PAT-GIT-01`)**: Upgraded `/xpublish` and `references/github_readme_protocol.md` to verify `b'\r\n' in git show origin/<base>:<file>` before committing upstream PRs, preventing accidental whole-file line-ending diffs.
-- **18 Empirical Upstream Open-Source Contributions (`Batch 0` + `Group A` + `Group B`, `4.0×` – `1,735.6×` Verified Speedups)**:
-  - **Batch 0 (`xerj-org/xerj` `#2922–#2927` & `scb-10x/typhoon-ocr` `#15`)**: `4 MERGED` PRs + `3 OPEN` PRs/benchmarks (`-35.9%` vision token bloat, `1,912/1,954` Windows MSVC tests passing, `25/25` Thai PDF PUA tests passing).
-  - **Group A — Geospatial & Vision (`5` Contributions)**: `opengeos/geoai #960` (CodeRabbit `APPROVED`), `opengeos/segment-geospatial #569` (CodeRabbit `APPROVED`), `martibosch/pylandstats #77` (`4.0×` vectorized `np.bincount` patch centroids), `Weecology/DeepForest #1440`, and `gboeing/osmnx #1405`.
-  - **Group B — Climate Risk, ESG & Urban Physics (`6` Contributions across `5` Ecosystems)**: `os-climate/physrisk #651` (`32.5×` & `1,669.6×` speedups), `ladybug-tools/uwg #292` (`1,735.6×` deep-soil speedup + `Fixes #291`), `Deltares/hydromt #1566` (`27.5×` `shapely.box` speedup + `Fixes #1563`), `CLIMADA-project/climada_python #1349 & #1350` (`69.3×` & `14.0×` speedups + `Fixes #1331`), and `natcap/invest #2813 & #2829` (`23.4×` UCM & `19.2×` UFRM speedups).
+- **Suite Rename to `XBoost` (`iscvlab/xboost`) & Expansion to `15 Composable /x* Skills` + `9 Deterministic CLI Engines` (`7,652` Total LOC)**:
+  - **Canonical `XBoost` (`iscvlab/xboost`) Identity**: Unified the suite name and repository slug to **`XBoost` (`iscvlab/xboost`)** so the brand name aligns 1:1 with the `/x*` slash-command prefix (`xboost`, `xbrief`, `xcontext`, `xcreate-skill`, `xdeep-research`, `xkickoff`, `xlaya`, `xlearn`, `xmouse`, `xobsidian`, `xocr`, `xplan`, `xpublish`, `xsync`, `xultra`).
+  - **Dedicated `/xlearn` Compound Learning & 5-Gate Universal Law Ratchet (`skills/xlearn/SKILL.md`)**: Carved `Mode C` (`Post-Session Skill Evolution & Universal Law Ratchet`) out of [`/xcreate-skill`](skills/xcreate-skill/SKILL.md) into a dedicated Stage 4 skill [**`/xlearn`**](skills/xlearn/SKILL.md) (`/xlearn`, `/learn`). Separates greenfield skill scaffolding (`/xcreate-skill` Modes A & B) from post-session compound learning (`/xlearn`), routing **Tier A** verified `PAT-*` / `GOV-*` / `FALS-*` entries autonomously across the **3-Tier Playbook Cascade** with built-in automatic [`/xsync`](skills/xsync/SKILL.md) (`--federated`) closure, while enforcing the **Tier B** 5-Gate Universal Law Falsification Sieve (`3-Domain Translation Proof Table` + `9-Point Mathematical Boundary Table`) + Wave 2A Blind Counter-Domain Critic and Report-First Human-Consent Gate before editing any global `SKILL.md` or [`UL-01..UL-08`](skills/xboost/references/deep_audit_protocol.md).
+  - **Dedicated `/xmouse` Non-Intrusive Ghost Mouse & Multi-Agent Visual Cursor HUD (`skills/xmouse/SKILL.md` + `scripts/xmouse_cli.py` `1,891` LOC)**: Added [**`/xmouse`**](skills/xmouse/SKILL.md) and its bundled zero-dependency Python CLI & FastMCP sidecar [`skills/xmouse/scripts/xmouse_cli.py`](skills/xmouse/scripts/xmouse_cli.py) (`1,891` LOC), delivering background Win32 `PostMessageW` Ghost Click/Type/Scroll (`0 px` physical cursor hijack), `SendInput` instant save/restore fallback, Windows UI Automation (UIA) COM tree inspection, Set-of-Mark (SoM) vision grid annotation, and a `60 FPS` Click-Through Multi-Agent Visual Cursor HUD (`WS_EX_LAYERED | WS_EX_TRANSPARENT`).
+- **3-Tier Compound Learning Playbook Cascade (`4` Synchronized Playbooks `< 35 KB` Each)**:
+  - Restructured [`docs/COMPOUND_LEARNING_PLAYBOOK.md`](docs/COMPOUND_LEARNING_PLAYBOOK.md) (`34,954` bytes, `< 35 KB` single-pass `read_file` budget) into **19 Cross-Domain Engineering Defect & Bottleneck Archetypes (`PAT-*` across `16` families)**, **7 Institutional CI Governance Fingerprints (`GOV-01..07`)**, and **11 Universal Falsification & Mirage Guardrails (`FALS-01..11`)**, linked via a **3-Tier Bridge Cascade** to 3 specialized Tier 2 domain playbooks:
+    - **Tier 2A (`GitHub PR & OSS Protocol`)**: Upstream PR lifecycle, review-bot convergence, and `22`-contribution ledger (`5 MERGED`, `9 OPEN PRs`, `4 OPEN Issues`, `4 Staged/Withdrawn`).
+    - **Tier 2B (`Plant Allometry & 3D Botanical Modeling Protocol`)**: `PAT-PLANT-01..07` allometric scaling, pipe-model area conservation, and dual-visual parity gates (`FALS-PLANT-01..05`).
+    - **Tier 2C (`Quant Trading & Evolution Ratchet Protocol`)**: `PAT-QUANT-01..12` execution realism, regime hysteresis, and evolutionary ratchet falsification gates (`FALS-QUANT-01..06`).
+- **9 Deterministic CLI Engine Hardening Fixes (`7,652` Total LOC across `9` Engines, `100.0%` Red-Team Recall in `6.79 ms`)**:
+  - **[`audit_engine.py`](skills/xpublish/scripts/audit_engine.py) (`1,069` LOC) & [`package_qgis.py`](skills/xpublish/scripts/package_qgis.py) (`567` LOC)**: Added `(?<![a-zA-Z]:)` negative lookbehind on macOS `/Users/` path regexes to prevent duplicate dual-matches on Windows `C:/Users/...`, upgraded secret scanning to `pat.finditer()` so multi-token lines report every match when placeholder tokens co-occur, disabled `%` interpolation via `ConfigParser(interpolation=None)`, added multi-skill suite root recursion `(target / "skills").glob("*/SKILL.md")`, and anchored `EXCLUDE_PATTERNS` (`^...$`).
+  - **[`check_qt6.py`](skills/xpublish/scripts/check_qt6.py) (`499` LOC)**: Anchored `DEFAULT_IGNORES` with `^...$` so `build_vector_layer.py` / `dist_matrix.py` are never skipped, and added `QDialog.DialogCode`, `QDialogButtonBox.StandardButton` / `ButtonRole`, and `QAbstractItemView` to `KNOWN_QT_SCOPED_ENUMS`.
+  - **[`laya_triage.py`](skills/xlaya/scripts/laya_triage.py) (`649` LOC)**: Fixed `should_split` chunk boundary calculation, implemented continuation sub-chunking with repeated leading Markdown table headers (`| <col1> | ... (cont.)`) so wide Playbook tables suffer `0` character truncation (`845` chunks across `27` specs in `17.71 ms`), fixed `fallback_evaluate` contradiction polarity, and raised `--max-chunks` default to `2048`.
+  - **[`audit_workspace_docs.py`](skills/xsync/scripts/audit_workspace_docs.py) (`480` LOC)**: Added `"learnx"` and `"mousex"` to `LEGACY_GHOST_SKILLS`, separated repo-local `skills/` directories from host agent skill roots (`~/.gemini/config/skills`, `~/.agents/skills`, etc.), skipped `_audit*` / `scratch` / nested `.git` clones, and auto-discovered all 4 Compound Learning Playbooks in `--federated` mode.
+  - **[`check_context.py`](skills/xcontext/scripts/check_context.py) (`651` LOC), [`verify_evidence.py`](skills/xdeep-research/scripts/verify_evidence.py) (`256` LOC) & [`ocr_runner.py`](skills/xocr/scripts/ocr_runner.py) (`1,490` LOC)**: Added `sys.dont_write_bytecode = True` and `.system_generated/logs` UUID unwrapping in `check_context.py`; added malformed `--year-range` blocking error and double-backtick strip in `verify_evidence.py`; added graceful `ValueError` handling in `parse_page_selection` and URL scheme validation in `ocr_runner.py`.
+- **22 Empirical Upstream Open-Source Contributions (`5 MERGED`, `9 OPEN PRs`, `4.0×` – `1,735.6×` Verified Speedups)**:
+  - **5 Merged Upstream PRs**: [`scb-10x/typhoon-ocr #15`](https://github.com/scb-10x/typhoon-ocr/pull/15) (`MERGED`), [`xerj-org/xerj #2925`](https://github.com/xerj-org/xerj/pull/2925) (`MERGED`), [`martibosch/pylandstats #77`](https://github.com/martibosch/pylandstats/pull/77) (`4.0×` speedup, `MERGED`), [`ladybug-tools/uwg #292`](https://github.com/ladybug-tools/uwg/pull/292) (`1,735.6×` speedup, `MERGED`), and [`opengeos/geoai #960`](https://github.com/opengeos/geoai/pull/960) (`MERGED` as `0b13f11`).
+  - **New & Expanded Live PRs (`v3.5.0`)**: [`Weecology/DeepForest #1449`](https://github.com/Weecology/DeepForest/pull/1449) (`74.4×` – `421.3×` vectorized `shapely.box` & `STRtree` speedups, closes `#1447`), [`gboeing/osmnx #1412`](https://github.com/gboeing/osmnx/pull/1412) (`40.2×` speedup & zero-length self-loop guard in `stats.circuity_avg`, closes `#1410`), and [`mufeedvh/code2prompt #348`](https://github.com/mufeedvh/code2prompt/pull/348) (`9/9` `cargo test` PASS).
 
 ### Install
 
-See README. Tag: `v3.4.0`.
+See [README.md](README.md). Tag: `v3.5.0`.
 ```bash
-git clone --branch v3.4.0 https://github.com/iscvlab/boostx.git
+git clone --branch v3.5.0 https://github.com/iscvlab/xboost.git
+```
+
+## v3.4.0
+
+- **Cross-Workspace Compound Learning Playbook ([`docs/COMPOUND_LEARNING_PLAYBOOK.md`](docs/COMPOUND_LEARNING_PLAYBOOK.md)) & Two-Tier Autonomy Architecture (`Tier A` Auto-Ratchet vs. `Tier B` Human-Consent Gate)**:
+  - **Public Compound Learning Playbook ([`docs/COMPOUND_LEARNING_PLAYBOOK.md`](docs/COMPOUND_LEARNING_PLAYBOOK.md))**: Codified **17 Reusable Engineering Defect & Bottleneck Archetypes** (`PAT-VEC-01..03`, `PAT-SPARSE-01`, `PAT-GRAPH-01`, `PAT-STATE-01..02`, `PAT-NUM-01`, `PAT-GIS-01..02`, `PAT-3D-01`, `PAT-CAD-01`, `PAT-MCP-01`, `PAT-OCR-01`, `PAT-WEB-01`, `PAT-QUANT-01`, `PAT-IOT-01`, `PAT-ENV-01`, `PAT-GIT-01`), **7 Institutional CI Governance Fingerprints (`GOV-01..07`)**, and **4 False-Positive Mirage Guardrails (`FALS-01..04`)**, illustrated with a monochrome academic engineering workflow diagram.
+  - **Two-Tier Autonomy Boundary**: Separated **Tier A (`Autonomous Pattern & Doc Ratchet` across [`docs/COMPOUND_LEARNING_PLAYBOOK.md`](docs/COMPOUND_LEARNING_PLAYBOOK.md), repository docs, and opt-in [`/xobsidian`](skills/xobsidian/SKILL.md) notes)** from **Tier B (`Report-First Human-Consent Gate` for global `SKILL.md` files, [`UL-01..UL-08`](skills/xboost/references/deep_audit_protocol.md), bundled `scripts/*.py`, and public upstream PR submissions)**.
+- **`S1–S4` Skill Protocol & CLI Upgrades ([`/xbrief`](skills/xbrief/SKILL.md), [`/xsync`](skills/xsync/SKILL.md), [`/xdeep-research`](skills/xdeep-research/SKILL.md), [`/xcreate-skill`](skills/xcreate-skill/SKILL.md), [`/xpublish`](skills/xpublish/SKILL.md) — `5,458` Total CLI LOC)**:
+  - **`S1` ([`/xbrief`](skills/xbrief/SKILL.md) + [`/xsync`](skills/xsync/SKILL.md) Bounded Up-Tree Playbook Discovery & Tier A Auto-Ratchet, [`audit_workspace_docs.py`](skills/xsync/scripts/audit_workspace_docs.py) `462` LOC)**: Upgraded `/xbrief` to walk up to `2` ancestor levels under a safe stop-list to load `COMPOUND_LEARNING_PLAYBOOK.md` in Stage 1, and upgraded `/xsync` (`--federated`) + `audit_workspace_docs.py` (`454 → 462` LOC; `5,450 → 5,458` total CLI LOC across `8` engines) to autonomously ratchet verified `PAT-*` / `GOV-*` / `FALS-*` entries in Stage 4.
+  - **`S2` ([`/xdeep-research`](skills/xdeep-research/SKILL.md) Wave 1 Live `HEAD` Verification, Enclosing-Scope AST Check & Unlinked-PR Collision Gate)**: Embedded `FALS-01` (Silent `HEAD` Fix check), `FALS-02` (upward `def`/`class` enclosing-method check), `FALS-03` (unlinked open PR scan), `FALS-04` (intersection `|` vs union `&` nodata semantics), and `GOV-01..07` into `/xdeep-research`.
+  - **`S3` ([`/xcreate-skill`](skills/xcreate-skill/SKILL.md) Mode C Tier B Human-Consent Gate)**: Locked the Report-First Human-Consent boundary requiring the 5-Gate Universal Law Falsification Sieve + Wave 2A Blind Counter-Domain Critic before editing any global skill.
+  - **`S4` ([`/xpublish`](skills/xpublish/SKILL.md) `--platform pr` Mixed `CRLF` / `LF` Upstream Line-Ending Parity Guard — `PAT-GIT-01`)**: Upgraded `/xpublish` and [`references/github_readme_protocol.md`](skills/xpublish/references/github_readme_protocol.md) to verify `b'\r\n' in git show origin/<base>:<file>` before committing upstream PRs, preventing accidental whole-file line-ending diffs.
+- **18 Empirical Upstream Open-Source Contributions (`Batch 0` + `Group A` + `Group B`, `4.0×` – `1,735.6×` Verified Speedups)**:
+  - **Batch 0 ([`xerj-org/xerj` `#2922–#2927`](https://github.com/xerj-org/xerj/pulls?q=is%3Apr+author%3Anapattan) & [`scb-10x/typhoon-ocr` `#15`](https://github.com/scb-10x/typhoon-ocr/pull/15))**: `2 MERGED` PRs (`typhoon-ocr#15`, `xerj#2925`) + open PRs/benchmarks (`-35.9%` vision token bloat, `1,912/1,954` Windows MSVC tests passing, `25/25` Thai PDF PUA tests passing).
+  - **Group A — Geospatial & Vision (`5` Contributions)**: [`opengeos/geoai #960`](https://github.com/opengeos/geoai/pull/960) (CodeRabbit `APPROVED`), [`opengeos/segment-geospatial #569`](https://github.com/opengeos/segment-geospatial/pull/569) (CodeRabbit `APPROVED`), [`martibosch/pylandstats #77`](https://github.com/martibosch/pylandstats/pull/77) (`4.0×` vectorized `np.bincount` patch centroids), [`Weecology/DeepForest #1440`](https://github.com/Weecology/DeepForest/issues/1440), and [`gboeing/osmnx #1405`](https://github.com/gboeing/osmnx/issues/1405).
+  - **Group B — Climate Risk, ESG & Urban Physics (`6` Contributions across `5` Ecosystems)**: [`os-climate/physrisk #651`](https://github.com/os-climate/physrisk/pull/651) (`32.5×` & `1,669.6×` speedups), [`ladybug-tools/uwg #292`](https://github.com/ladybug-tools/uwg/pull/292) (`1,735.6×` deep-soil speedup + `Fixes #291`), [`Deltares/hydromt #1566`](https://github.com/Deltares/hydromt/pull/1566) (`27.5×` `shapely.box` speedup + `Fixes #1563`), [`CLIMADA-project/climada_python #1349`](https://github.com/CLIMADA-project/climada_python/pull/1349) & [`#1350`](https://github.com/CLIMADA-project/climada_python/pull/1350) (`69.9×` & `11.7×` speedups + `Fixes #1331`), and [`natcap/invest #2813`](https://github.com/natcap/invest/issues/2813) & [`#2829`](https://github.com/natcap/invest/pull/2829) (`23.1×` UCM & `18.1×` UFRM speedups).
+
+### Install
+
+See [README.md](README.md). Tag: `v3.4.0`.
+```bash
+git clone --branch v3.4.0 https://github.com/iscvlab/xboost.git
 ```
 
 ## v3.3.0
@@ -54,7 +82,7 @@ git clone --branch v3.4.0 https://github.com/iscvlab/boostx.git
 
 See README. Tag: `v3.3.0`.
 ```bash
-git clone --branch v3.3.0 https://github.com/iscvlab/boostx.git
+git clone --branch v3.3.0 https://github.com/iscvlab/xboost.git
 ```
 
 ## v3.2.0
@@ -96,7 +124,7 @@ git clone --branch v3.3.0 https://github.com/iscvlab/boostx.git
 
 See README. Tag: `v3.2.0`.
 ```bash
-git clone --branch v3.2.0 https://github.com/iscvlab/boostx.git
+git clone --branch v3.2.0 https://github.com/iscvlab/xboost.git
 ```
 
 ## v3.1.0
@@ -121,7 +149,7 @@ git clone --branch v3.2.0 https://github.com/iscvlab/boostx.git
 
 See README. Tag: `v3.1.0`.
 ```bash
-git clone --branch v3.1.0 https://github.com/iscvlab/boostx.git
+git clone --branch v3.1.0 https://github.com/iscvlab/xboost.git
 ```
 
 ## v3.0.0
@@ -156,7 +184,7 @@ git clone --branch v3.1.0 https://github.com/iscvlab/boostx.git
 
 See README. Tag: `v3.0.0`.
 ```bash
-git clone --branch v3.0.0 https://github.com/iscvlab/boostx.git
+git clone --branch v3.0.0 https://github.com/iscvlab/xboost.git
 ```
 
 ## v2.0.0
@@ -185,7 +213,7 @@ git clone --branch v3.0.0 https://github.com/iscvlab/boostx.git
 
 See README. Tag: `v2.0.0`.
 ```bash
-git clone --branch v2.0.0 https://github.com/iscvlab/boostx.git
+git clone --branch v2.0.0 https://github.com/iscvlab/xboost.git
 ```
 
 ## v1.3.0
@@ -205,7 +233,7 @@ git clone --branch v2.0.0 https://github.com/iscvlab/boostx.git
 
 See README. Tag: `v1.3.0`.
 ```bash
-git clone --branch v1.3.0 https://github.com/iscvlab/boostx.git
+git clone --branch v1.3.0 https://github.com/iscvlab/xboost.git
 ```
 
 ## v1.2.0
@@ -221,7 +249,7 @@ git clone --branch v1.3.0 https://github.com/iscvlab/boostx.git
 
 See README. Tag: `v1.2.0`.
 ```bash
-git clone --branch v1.2.0 https://github.com/iscvlab/boostx.git
+git clone --branch v1.2.0 https://github.com/iscvlab/xboost.git
 ```
 
 ## v1.1.0
@@ -233,7 +261,7 @@ git clone --branch v1.2.0 https://github.com/iscvlab/boostx.git
 
 See README. Tag: `v1.1.0`.
 ```bash
-git clone --branch v1.1.0 https://github.com/iscvlab/boostx.git
+git clone --branch v1.1.0 https://github.com/iscvlab/xboost.git
 ```
 
 ## v1.0.0
@@ -265,5 +293,5 @@ First tagged public line of this skill suite.
 
 See README. Tag: `v1.0.0`.
 ```bash
-git clone --branch v1.0.0 https://github.com/iscvlab/boostx.git
+git clone --branch v1.0.0 https://github.com/iscvlab/xboost.git
 ```

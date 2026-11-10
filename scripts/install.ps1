@@ -1,5 +1,5 @@
-# BoostX Composable Agent Skills Installer (Windows PowerShell)
-# Copies the 13-skill BoostX (/x*) suite into host skill roots that exist on this machine.
+# XBoost Composable Agent Skills Installer (Windows PowerShell) - iscvlab/xboost
+# Copies the 15-skill XBoost (/x*) suite into host skill roots that exist on this machine.
 
 param(
     [switch]$Antigravity,
@@ -19,14 +19,14 @@ $SkillsSrc = Join-Path $ScriptDir "skills"
 $LegacyDirs = @(
     "xpublish-audit", "xpublish-qgis",
     "boostx", "briefx", "contextx", "create-skillx", "deep-researchx",
-    "kickoffx", "layax", "obsidianx", "ocrx", "planx", "publishx-audit",
+    "kickoffx", "layax", "learnx", "mousex", "obsidianx", "ocrx", "planx", "publishx-audit",
     "publishx-qgis", "researchx", "syncx", "ultrax", "unlimited-ocr",
     "brief", "context", "create-skill", "deep-research", "kickoff", "laya",
     "obsidian-vault", "ocr", "publish-audit", "publish-qgis", "research", "update-doc"
 )
 
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  * BoostX Agent Skills (v3.3.0) - Windows Installer" -ForegroundColor Cyan
+Write-Host "  * XBoost Agent Skills (v3.5.0) - Windows Installer" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "Source: $SkillsSrc"
 
@@ -178,5 +178,5 @@ if (-not [string]::IsNullOrEmpty($Workspace) -and (Test-Path $Workspace)) {
 }
 
 Write-Host "`n============================================================" -ForegroundColor Cyan
-Write-Host "  [OK] BoostX v3.3.0 Installation Complete! All 13 /x* skills ready." -ForegroundColor Green
+Write-Host "  [OK] XBoost v3.5.0 Installation Complete! All 15 /x* skills ready." -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Cyan

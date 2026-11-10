@@ -13,7 +13,7 @@ Prepare a seamless, zero-loss transition from a compacted or ending conversation
 This skill performs a three-way bridge:
 1. **Doc Sync Verification**: Ensures decisions made in this session are committed to documentation before exiting.
 2. **Strategic Options Formulation**: Analyzes active roadmaps to offer orthogonal, roadmap-grounded next-step paths.
-3. **Pristine Kickoff Prompt Generation**: Assembles a self-contained prompt block containing locked invariants, active file paths, and task-matched `/x...` slash commands (`/xbrief`, `/xplan`, `/xdeep-research`, `/xlaya`, `/xobsidian`, `/xboost`, [`/xultra`](../xultra/SKILL.md), `/goal`) for the new chat.
+3. **Pristine Kickoff Prompt Generation**: Assembles a self-contained prompt block containing locked invariants, active file paths, and task-matched XBoost `/x...` slash commands ([`/xbrief`](../xbrief/SKILL.md), [`/xplan`](../xplan/SKILL.md), [`/xdeep-research`](../xdeep-research/SKILL.md), [`/xlaya`](../xlaya/SKILL.md), [`/xobsidian`](../xobsidian/SKILL.md), [`/xboost`](../xboost/SKILL.md), [`/xlearn`](../xlearn/SKILL.md), [`/xultra`](../xultra/SKILL.md), `/goal`) for the new chat.
 
 Portable across any AI coding agent (cloud, IDE, CLI, or local LLM) across Windows, macOS, and Linux.
 
@@ -43,6 +43,7 @@ Red failure modes to prevent:
 | Create an implementation plan inside an active session | [`/xplan`](../xplan/SKILL.md) |
 | Run primary-source or 5-wave deep research | [`/xdeep-research`](../xdeep-research/SKILL.md) |
 | Author or distill a skill | [`/xcreate-skill`](../xcreate-skill/SKILL.md) |
+| Ratchet session bug/optimization patterns into Playbooks or evolve universal laws | [`/xlearn`](../xlearn/SKILL.md) |
 | Regular task briefing inside an active chat | [`/xbrief`](../xbrief/SKILL.md) |
 
 ---
@@ -55,7 +56,7 @@ Before formulating the next session's work, verify that the current conversation
 
 1. Check `git status --short` (or recent file edits) to identify modified, untracked, or staged files.
 2. Verify that active documentation accurately reflects the latest decisions made in this session (and check for any forked duplicate `RESEARCH_*.md` files in `docs/`).
-3. If documents were edited or quantitative metrics/schemas were recalculated, confirm that [`/xsync`](../xsync/SKILL.md) verification has been completed (and if `/xobsidian` was used in the session—or if `<artifactDir>/scratch/boostx_state.md` lists any `DIRTY_IN_SESSION` vault notes—confirm those notes are synced and pass `BROKEN=0, ORPHANS=0, DUP_NEIGHBOR_GROUPS=0`).
+3. If documents were edited or quantitative metrics/schemas were recalculated, confirm that [`/xsync`](../xsync/SKILL.md) (or [`/xlearn`](../xlearn/SKILL.md) for Playbook updates) verification has been completed (and if [`/xobsidian`](../xobsidian/SKILL.md) was used in the session—or if `<artifactDir>/scratch/xboost_state.md` lists any `DIRTY_IN_SESSION` vault notes—confirm those notes are synced and pass `BROKEN=0, ORPHANS=0, DUP_NEIGHBOR_GROUPS=0`).
 4. *Sync Guard*: If uncommitted or unsynced state exists, advise the user or sync it before finalizing handoff.
 
 ---
@@ -90,20 +91,28 @@ Select the exact `/x...` slash command pipeline for the bottom of the Kickoff Pr
 
 | Next Session Task Archetype | Recommended Command Line to Generate |
 | :--- | :--- |
-| **Standard Build / Debug / Solver / UI** *(Target files already pinned)* | `/xbrief "[Topic Name]" /xboost /goal` |
-| **Architecture & Design Decision First** *(Needs inline grilling plan)* | `/xbrief "[Topic Name]" /xplan` |
-| **Primary-Source API / Formula / DB Lookup → Implementation** | `/xbrief "[Topic Name]" /xdeep-research /xboost /goal` |
-| **Multi-File Doc Sync / Semantic Conflict Audit** | `/xbrief "[Topic Name]" /xsync /xlaya` |
-| **Large Unpinned Corpus / Deep Research / Dataset Triage** | `/xdeep-research /xlaya "[Topic Name]" /xboost /goal` *(or `/xbrief /xlaya`)* |
-| **Elastic Cognitive Swarm / Orthogonal K-Vector Tournament / Evolutionary Ratchet Loop** | Append [`/xultra`](../xultra/SKILL.md) (e.g., `/xbrief "[Topic Name]" /xboost /xultra /goal` or `/xdeep-research /xboost /xultra /goal`) |
-| **Any Task Reading or Ratcheting Second Brain Knowledge** | Append `/xobsidian` (e.g., `/xbrief "[Topic Name]" /xboost /xobsidian /goal`) |
+| **Standard Build / Debug / Solver / UI** *(Target files already pinned)* | [`/xbrief`](../xbrief/SKILL.md) `"[2-3 Word Title]"` [`/xboost`](../xboost/SKILL.md) `/goal` |
+| **Architecture & Design Decision First** *(Needs inline grilling plan)* | [`/xbrief`](../xbrief/SKILL.md) `"[2-3 Word Title]"` [`/xplan`](../xplan/SKILL.md) |
+| **Primary-Source API / Formula / DB Lookup → Implementation** | [`/xbrief`](../xbrief/SKILL.md) `"[2-3 Word Title]"` [`/xdeep-research`](../xdeep-research/SKILL.md) [`/xboost`](../xboost/SKILL.md) `/goal` |
+| **Multi-File Doc Sync / Semantic Conflict Audit** | [`/xbrief`](../xbrief/SKILL.md) `"[2-3 Word Title]"` [`/xsync`](../xsync/SKILL.md) [`/xlaya`](../xlaya/SKILL.md) |
+| **Post-Session Compound Learning / Playbook Ratchet** | [`/xbrief`](../xbrief/SKILL.md) `"[2-3 Word Title]"` [`/xlearn`](../xlearn/SKILL.md) [`/xlaya`](../xlaya/SKILL.md) |
+| **Large Unpinned Corpus / Deep Research / Dataset Triage** | [`/xdeep-research`](../xdeep-research/SKILL.md) [`/xlaya`](../xlaya/SKILL.md) `"[2-3 Word Title]"` [`/xboost`](../xboost/SKILL.md) `/goal` *(or `/xbrief /xlaya`)* |
+| **Elastic Cognitive Swarm / Orthogonal K-Vector Tournament / Evolutionary Ratchet Loop** | Append [`/xultra`](../xultra/SKILL.md) (e.g., `/xbrief "[2-3 Word Title]" /xboost /xultra /goal` or `/xdeep-research /xboost /xultra /goal`) |
+| **Any Task Reading or Ratcheting Second Brain Knowledge** | Append [`/xobsidian`](../xobsidian/SKILL.md) (e.g., `/xbrief "[2-3 Word Title]" /xboost /xobsidian /goal`) |
 
-#### B. 5-Part Kickoff Prompt Architecture
+#### B. Sidebar Title Rule (`2–3 Short Words, ≤ 22 Chars`) & 5-Part Kickoff Prompt Architecture
+
+To prevent IDE conversation sidebars from truncating titles at ~24 characters (`Phase 5 Architecture Plannin...`, `Phase 0 PR Sweep And Bottl...`):
+1. **Line 1 (`# [2–3 Short Word Title]`, `≤ 22 chars`)**: Put the **distinguishing subject/module noun first** in **2–3 short words** (`≤ 22 characters`). **NEVER** start Line 1 or `/xbrief "..."` with generic filler prefixes (`Objective:`, `Phase X`, `Architecture Planning`, `Forensic Audit`, `Comprehensive Study`). Good examples: `# DeepForest Walkthrough`, `# Group A Bottlenecks`, `# QuantEngine V6`, `# Ramintra Thesis`.
+2. **Line 2 (`**Objective**: ...`)**: Place the full 1-sentence task objective on Line 2 right below the short `#` title.
+3. **Bottom Command Sync**: Pass the **exact same 2–3 word title** inside `/xbrief "[2-3 Word Title]"` at the bottom of the prompt so the IDE's title generator locks onto the short name.
+
 Generate a self-contained, copy-pasteable prompt block formatted inside a fenced markdown code block:
 
 ````markdown
 ```markdown
-# Objective: [Concise Task Title]
+# [2–3 Short Word Title]
+**Objective**: [Detailed 1-sentence task objective]
 
 ## Role & Operating Protocol
 Operate as a Principal [Domain / Systems] Architect & Lead Engineer.
@@ -124,7 +133,7 @@ Operate as a Principal [Domain / Systems] Architect & Lead Engineer.
 [Detailed, actionable instructions for what the agent should accomplish first in this new session].
 
 ## Recommended Execution Command
-[Selected Task-Smart Command from Table 3.A, e.g.: /xbrief "[Topic Name]" /xboost /goal]
+[Selected Task-Smart Command from Table 3.A using the exact same 2–3 word title, e.g.: /xbrief "[2-3 Word Title]" /xboost /goal]
 ```
 ````
 
@@ -141,8 +150,9 @@ Deliver the final instructions to the user:
 ## Quality Rubric
 
 - [ ] Current session state verified against `git status` and documentation.
+- [ ] **Sidebar Title Rule (`2–3 Short Words, ≤ 22 Chars`) enforced**: Line 1 (`# [2–3 Short Word Title]`) and `/xbrief "[2-3 Word Title]"` use 2–3 short words with the domain noun first and zero generic prefixes (`Objective:`, `Phase X...`), while the full sentence sits on Line 2 (`**Objective**: ...`).
 - [ ] **Smart Hybrid 2A Routing enforced**:
   - If explicit topic given → wrote Kickoff Prompt immediately in 1 turn without redundant option questioning.
   - If bare `/xkickoff` given → presented Options A/B/C first (`ask_question` or concise list) and waited for selection before generating the Kickoff Prompt.
 - [ ] **Strict Terminal-Session Guardrail enforced**: Never executed the chosen option inside the current chat; treated option selection strictly as a directive to write/rewrite the Kickoff Prompt.
-- [ ] **Task-Smart Command Selector applied**: Included `/xlaya`, `/xplan`, `/xdeep-research`, `/xultra`, or `/xobsidian` when matched to the next session's workload, while keeping pinned-file build kickoffs lean (`/xbrief "[Topic]" /xboost /goal`).
+- [ ] **Task-Smart Command Selector applied**: Included `/xlaya`, `/xplan`, `/xdeep-research`, `/xultra`, or `/xobsidian` when matched to the next session's workload, while keeping pinned-file build kickoffs lean (`/xbrief "[2-3 Word Title]" /xboost /goal`).

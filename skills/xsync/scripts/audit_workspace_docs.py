@@ -68,15 +68,23 @@ def strip_code_regions(text: str, suffix: str) -> str:
 def discover_doc_files(workspace_root: Path, include_obsidian: bool = False) -> list:
     """Discover active .md and .html files in workspace, respecting /xsync exclusion boundaries."""
     docs = []
+    ws_resolved = workspace_root.resolve()
     for root, dirs, files in os.walk(workspace_root):
         root_path = Path(root)
+        if root_path.resolve() != ws_resolved and (root_path / ".git").exists():
+            dirs[:] = []
+            continue
         # Skip Obsidian vaults unless --include-obsidian is explicitly enabled
         if not include_obsidian and (root_path / ".obsidian").is_dir():
             dirs[:] = []
             continue
         dirs[:] = [
             d for d in dirs
-            if d not in EXCLUDED_DIRS and (include_obsidian or not (root_path / d / ".obsidian").is_dir())
+            if d not in EXCLUDED_DIRS
+            and not d.startswith("_audit")
+            and d.lower() != "scratch"
+            and not (root_path / d / ".git").exists()
+            and (include_obsidian or not (root_path / d / ".obsidian").is_dir())
         ]
         for fname in files:
             fpath = root_path / fname
@@ -87,29 +95,27 @@ def discover_doc_files(workspace_root: Path, include_obsidian: bool = False) -> 
 
 LEGACY_GHOST_SKILLS = {
     "xpublish-audit", "xpublish-qgis", "boostx", "briefx", "contextx",
-    "create-skillx", "deep-researchx", "kickoffx", "layax", "obsidianx",
-    "ocrx", "planx", "publishx-audit", "publishx-qgis", "researchx",
-    "syncx", "ultrax", "unlimited-ocr",
+    "create-skillx", "deep-researchx", "kickoffx", "layax", "learnx",
+    "mousex", "obsidianx", "ocrx", "planx", "publishx-audit",
+    "publishx-qgis", "researchx", "syncx", "ultrax", "unlimited-ocr",
 }
 
 
 def discover_agent_skill_roots() -> list:
-    """Discover all installed global AI agent skill roots on the host machine."""
+    """Discover all installed global AI agent skill roots on the host machine (excluding repo source tree)."""
     home = Path.home()
     script_root = Path(__file__).resolve().parents[2]
     env_root = os.environ.get("AGENT_SKILLS_DIR", "").strip()
     candidates = []
-    if (script_root / "xsync").is_dir() and (script_root / "xpublish").is_dir():
-        candidates.append(script_root)
     if env_root:
         candidates.append(Path(env_root))
     candidates.extend([
+        home / ".gemini" / "config" / "skills",
         home / ".agents" / "skills",
         home / ".claude" / "skills",
         home / ".codex" / "skills",
         home / ".cursor" / "skills",
         home / ".grok" / "skills",
-        home / ".gemini" / "config" / "skills",
     ])
     for dot_dir in sorted(home.glob(".*")):
         if dot_dir.is_dir():
@@ -117,11 +123,18 @@ def discover_agent_skill_roots() -> list:
                 candidates.append(dot_dir / "skills")
             if (dot_dir / "config" / "skills").is_dir():
                 candidates.append(dot_dir / "config" / "skills")
+    repo_skills_resolved = (
+        script_root.resolve()
+        if (script_root.parent / ".git").exists() and script_root.name == "skills"
+        else None
+    )
     roots = []
     seen = set()
     for c in candidates:
         if c.is_dir():
             rp = c.resolve()
+            if repo_skills_resolved and rp == repo_skills_resolved:
+                continue
             if rp not in seen:
                 seen.add(rp)
                 roots.append(c)
@@ -133,82 +146,138 @@ def discover_federated_context(ws_root: Path, include_obsidian: bool = False) ->
     extra_docs = []
     auto_mirrors = []
     ghost_errors = []
-    parent = ws_root.parent
+    script_root = Path(__file__).resolve().parents[2]
     agent_roots = discover_agent_skill_roots()
-    global_skills = agent_roots[0] if agent_roots else (Path.home() / ".agents" / "skills")
-    proto_master = global_skills / "xpublish" / "references" / "github_readme_protocol.md"
+    primary_host_root = agent_roots[0] if agent_roots else (Path.home() / ".gemini" / "config" / "skills")
+    proto_master = (
+        (ws_root / "skills" / "xpublish" / "references" / "github_readme_protocol.md")
+        if (ws_root / "skills" / "xpublish" / "references" / "github_readme_protocol.md").is_file()
+        else (script_root / "xpublish" / "references" / "github_readme_protocol.md")
+        if (script_root / "xpublish" / "references" / "github_readme_protocol.md").is_file()
+        else (primary_host_root / "xpublish" / "references" / "github_readme_protocol.md")
+    )
 
-    # Cross-check all installed local agent skill roots against primary global_skills SSOT
-    for aroot in agent_roots[1:]:
+    # Check all installed local agent skill roots for legacy deprecated skill directories
+    for aroot in agent_roots:
         for sdir in sorted(aroot.iterdir()):
             if not sdir.is_dir() or sdir.name.startswith("."):
                 continue
             if sdir.name in LEGACY_GHOST_SKILLS:
                 ghost_errors.append(
-                    f"[{aroot}/skills/{sdir.name}] Legacy deprecated skill directory still present"
+                    f"[{aroot}/{sdir.name}] Legacy deprecated skill directory still present"
                 )
-                continue
-            gdir = global_skills / sdir.name
-            if gdir.is_dir():
-                for gfile in sorted(gdir.rglob("*")):
-                    if not gfile.is_file() or "__pycache__" in gfile.parts or gfile.suffix == ".pyc":
-                        continue
-                    rel_f = gfile.relative_to(gdir)
-                    auto_mirrors.append((gfile, sdir / rel_f))
 
-    is_safe_parent = (
-        parent != ws_root
-        and parent != Path.home()
-        and parent.name.lower() not in UNSAFE_PARENT_NAMES
-    )
+    ancestors = []
+    cur_anc = ws_root.parent
+    for _ in range(2):
+        if (
+            cur_anc != ws_root
+            and cur_anc != cur_anc.parent
+            and cur_anc != Path.home()
+            and cur_anc.name.lower() not in UNSAFE_PARENT_NAMES
+        ):
+            ancestors.append(cur_anc)
+            cur_anc = cur_anc.parent
+        else:
+            break
+
     candidates = [ws_root]
-    if is_safe_parent:
-        for pfile in sorted(parent.glob("*.md")):
+    seen_candidates = {ws_root.resolve()}
+    for anc in ancestors:
+        for pfile in sorted(anc.glob("*.md")):
             if pfile.is_file() and any(
-                k in pfile.name.upper() for k in ("PLAYBOOK", "PROTOCOL", "PLAN", "PORTFOLIO")
+                k in pfile.name.upper() for k in ("PLAYBOOK", "PROTOCOL", "PLAN", "PORTFOLIO", "STANDARD")
             ):
                 extra_docs.append(pfile)
                 if pfile.name == "GITHUB_PUBLISHING_PROTOCOL.md" and proto_master.is_file():
                     if pfile.resolve() != proto_master.resolve():
                         auto_mirrors.append((proto_master, pfile))
-        for sib in sorted(parent.iterdir()):
-            if not sib.is_dir() or sib == ws_root or sib.name.startswith(".") or sib.name in EXCLUDED_DIRS:
+        for sib in sorted(anc.iterdir()):
+            if (
+                not sib.is_dir()
+                or sib.resolve() in seen_candidates
+                or sib.name.startswith(".")
+                or sib.name.startswith("_audit")
+                or sib.name.lower() == "scratch"
+                or sib.name in EXCLUDED_DIRS
+            ):
                 continue
             if not include_obsidian and (sib / ".obsidian").is_dir():
                 continue
+            seen_candidates.add(sib.resolve())
             candidates.append(sib)
 
     org_profile_docs = []
     org_profile_mirrors = []
+    seen_skill_names = set()
 
     for cand in candidates:
-        # 1. Skill Tree Mirrors (skills/<name>/** <-> <GLOBAL_SKILLS_ROOT>/<name>/**)
+        # 1. Skill Tree Mirrors (skills/<name>/** <-> matching installed host agent skill roots)
         skills_sub = cand / "skills"
-        if skills_sub.is_dir() and global_skills.is_dir() and skills_sub.resolve() != global_skills.resolve():
-            if cand != ws_root:
+        if skills_sub.is_dir():
+            unclaimed_skills = [
+                sdir for sdir in sorted(skills_sub.iterdir())
+                if sdir.is_dir() and not sdir.name.startswith(".") and sdir.name not in seen_skill_names
+            ]
+            if cand != ws_root and unclaimed_skills:
                 extra_docs.extend(discover_doc_files(cand, include_obsidian=include_obsidian))
-            for sdir in sorted(skills_sub.iterdir()):
-                if not sdir.is_dir() or sdir.name.startswith("."):
-                    continue
-                gdir = global_skills / sdir.name
-                if not gdir.is_dir():
+            for sdir in unclaimed_skills:
+                seen_skill_names.add(sdir.name)
+                if sdir.name in LEGACY_GHOST_SKILLS:
                     ghost_errors.append(
-                        f"[{cand.name}/skills/{sdir.name}] Ghost skill directory not present in global skills root"
+                        f"[{cand.name}/skills/{sdir.name}] Legacy deprecated skill directory still present"
                     )
                     continue
-                for gfile in sorted(gdir.rglob("*")):
-                    if not gfile.is_file() or "__pycache__" in gfile.parts or gfile.suffix == ".pyc":
-                        continue
-                    rel_f = gfile.relative_to(gdir)
-                    auto_mirrors.append((gfile, sdir / rel_f))
+                matching_host_dirs = [
+                    aroot / sdir.name
+                    for aroot in agent_roots
+                    if (aroot / sdir.name).is_dir() and (aroot / sdir.name).resolve() != sdir.resolve()
+                ]
+                if (
+                    cand == ws_root
+                    and primary_host_root.is_dir()
+                    and primary_host_root.resolve() != skills_sub.resolve()
+                    and not (primary_host_root / sdir.name).is_dir()
+                ):
+                    ghost_errors.append(
+                        f"[{cand.name}/skills/{sdir.name}] Skill directory not installed in primary host root"
+                    )
+                    continue
+                if not matching_host_dirs and agent_roots:
+                    ghost_errors.append(
+                        f"[{cand.name}/skills/{sdir.name}] Ghost skill directory not present in any host skills root"
+                    )
+                    continue
+                for hdir in matching_host_dirs:
+                    for sfile in sorted(sdir.rglob("*")):
+                        if not sfile.is_file() or "__pycache__" in sfile.parts or sfile.suffix == ".pyc":
+                            continue
+                        rel_f = sfile.relative_to(sdir)
+                        auto_mirrors.append((sfile, hdir / rel_f))
 
         # 2. Canonical Root Protocol Mirrors (GITHUB_PUBLISHING_PROTOCOL.md)
         cand_proto = cand / "GITHUB_PUBLISHING_PROTOCOL.md"
         if cand_proto.is_file():
             if cand != ws_root:
-                extra_docs.extend(discover_doc_files(cand, include_obsidian=include_obsidian))
+                extra_docs.append(cand_proto)
             if proto_master.is_file() and cand_proto.resolve() != proto_master.resolve():
                 auto_mirrors.append((proto_master, cand_proto))
+
+        # 2b. Compound Learning Playbooks, Protocols & Standards across sibling workspaces
+        playbook_scan_dirs = [
+            cand,
+            cand / "docs",
+            cand / "03_simulations" / "grasshopper_simulations" / "plant_studio",
+        ]
+        for s_dir in playbook_scan_dirs:
+            if s_dir.is_dir():
+                for md_f in sorted(s_dir.glob("*.md")):
+                    if (
+                        md_f.is_file()
+                        and md_f.name.upper() != "UI_THEME_PROTOCOL.MD"
+                        and any(k in md_f.name.upper() for k in ("PLAYBOOK", "PROTOCOL", "STANDARD"))
+                    ):
+                        extra_docs.append(md_f)
 
         # 3. Organization Profile README Mirrors (docs/GITHUB_ORG_PROFILE_README.md <-> */profile/README.md)
         doc_prof = cand / "docs" / "GITHUB_ORG_PROFILE_README.md"
@@ -223,7 +292,7 @@ def discover_federated_context(ws_root: Path, include_obsidian: bool = False) ->
         if cand != ws_root and (cand / ".git").exists() and readme_p.is_file():
             try:
                 rtxt = readme_p.read_text(encoding="utf-8", errors="ignore")
-                if any(k in rtxt for k in ("boostx", "mcp-bridges", "/xpublish")):
+                if any(k in rtxt for k in ("xboost", "boostx", "mcp-bridges", "/xpublish")):
                     extra_docs.append(readme_p)
             except OSError:
                 pass

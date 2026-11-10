@@ -1,7 +1,7 @@
 ---
 name: xplan
 description: >
-  BoostX architectural & implementation planner (/xplan, /plan).
+  XPlan architectural & implementation planner (/xplan, /plan).
   Use when the user runs /xplan or /plan, or requests an implementation plan with inline structured grilling questions,
   Ponytail × Deep Module options, Mermaid diagrams, and a Red → Green verification matrix without asking questions in chat.
   Do NOT use for direct code execution (/xboost) or doc sync (/xsync).
@@ -29,6 +29,9 @@ Red failure modes to prevent:
 | Read workspace docs and execute a non-planning task immediately | [`/xbrief`](../xbrief/SKILL.md) |
 | Primary-source API/SDK/DB lookup or 5-wave precedent harvesting | [`/xdeep-research`](../xdeep-research/SKILL.md) |
 | Synchronize documentation and metrics after an implementation | [`/xsync`](../xsync/SKILL.md) |
+| Ratchet post-session bug/optimization patterns into Playbooks or evolve universal laws | [`/xlearn`](../xlearn/SKILL.md) |
+| Author or distill a new global agent skill | [`/xcreate-skill`](../xcreate-skill/SKILL.md) |
+| Pre-flight security/AST audit, QGIS packaging, or upstream PR shipping | [`/xpublish`](../xpublish/SKILL.md) |
 | Generate an end-of-session handoff prompt for a fresh chat | [`/xkickoff`](../xkickoff/SKILL.md) |
 
 ---
@@ -50,8 +53,10 @@ graph TD
 
 #### 1. Composable Pre-Flight Hooks (Zero Default Overhead)
 * **Workspace SSOT & Boundary Check ([`/xbrief`](../xbrief/SKILL.md) Mindset)**:
-  * Perform a bounded read of pinned files and top-authority specs (`README.md`, `AGENTS.md`, latest `*_vLatest.md`) using Pass A (headings/cardinality) → Pass B (relevant sections).
+  * Perform a bounded read of pinned files, parent-umbrella `*PLAYBOOK*.md` / `*PROTOCOL*.md` files ([`/xlearn`](../xlearn/SKILL.md)), and top-authority specs (`README.md`, `AGENTS.md`, latest `*_vLatest.md`) using Pass A (headings/cardinality) → Pass B (relevant sections).
   * Record any `[FROZEN]`, `[DO NOT EDIT]`, or `[DEFERRED]` zones so the plan strictly respects them.
+* **Automatic [`/xocr`](../xocr/SKILL.md) PDF & Image Specification Ingestion**:
+  * When a user-pinned specification, reference architecture, or table exists only as a `.pdf` or raster image, automatically invoke [`/xocr`](../xocr/SKILL.md) ([`../xocr/scripts/ocr_runner.py`](../xocr/scripts/ocr_runner.py) with `--pages` slicing) to extract `extracted_document.md` and `table_p*.csv` before drafting the plan.
 * **Primary-Source & Manifest Lock ([`/xdeep-research`](../xdeep-research/SKILL.md) Hook)**:
   * Check local manifests (`package.json`, `pyproject.toml`, `*.csproj`, `metadata.txt`) and target source files via `read_file` so proposed APIs match exact pinned versions and line ranges.
 * **Strict Opt-In [`/xobsidian`](../xobsidian/SKILL.md) Combinator (`/xplan /xobsidian`)**:
@@ -66,7 +71,7 @@ graph TD
 Cross the active **Task Intent** (`BUILD / FEATURE`, `REFACTOR / SIMPLIFY`, `SIMULATE / SOLVER`, `OPTIMIZE / SCALE`, `SHIP / RELEASE`) with the **Project Domain Harness** (`Backend / APIs / Distributed Systems`, `Web UI / Figma / Diagrams`, `Data / Cloud / ML`, `Numerical Solvers / Simulation / CAD / GIS`, `Agent Skills / CLI / Configs`) across [`/xboost`](../xboost/SKILL.md)'s 3 complexity tiers:
 * **Tier 1 Plan (1–2 files, localized tactical change)**: Compact seam diff + inline grilling decisions (if any) + 1 Red → Green command.
 * **Tier 2 Plan (Multi-file architectural feature, refactor, solver, or UI)**: Full `mermaid` architecture diagram + Deep Module interface spec + component-by-component change matrix.
-* **Tier 3 Plan (Multi-subsystem / `/goal` marathon initiative)**: Multi-wave execution roadmap, persistent `boostx_state.md` ratchet checkpoints, and cross-subsystem verification gates.
+* **Tier 3 Plan (Multi-subsystem / `/goal` marathon initiative)**: Multi-wave execution roadmap, persistent `xboost_state.md` ratchet checkpoints, and cross-subsystem verification gates.
 * **`SIMULATE / SOLVER` Overlay (Any Tier — Physics, Numerical, Scientific)**: Attach a mandatory **SI Unit & Step-Measure Bridge Table** (source schema units & discretization step `Δμ` ↔ SI `m`/`kg`/`s`/`N`/`W/m²`, `deg` ↔ `rad`), stability bounds (`dt`, convergence `ε`, max iterations), and the **Physics & Numerical Triad** verification plan (zero-forcing equilibrium identity `Δx = 0 ⇒ Δy = 0.0 / y == y_eq` with no `NaN`/`Inf`, 1D analytical toy benchmark, conservation/step-scaling convergence `UL-01..UL-08`).
 
 ---
@@ -164,7 +169,7 @@ flowchart LR
      *"Reply with your option choices (e.g. `1A, 2A`) or click **Proceed** to execute via `/xboost`."*
 3. **Conditional Stage 3A → 3B Bridge (`/xplan` → [`/xboost`](../xboost/SKILL.md))**:
    * **When Open Grilling Decisions Exist (`Decision 1..M`) and `/goal` is Not Active**: Halt after saving `implementation_plan.md` so the user can select options or click **Proceed**.
-   * **When User Approves OR When Chained (`/xplan /xboost`) with `0` Open Ambiguities (or with `/goal`)**: Lock all 3 plan blocks—**(1) Header `[FROZEN]`/`[DEFERRED]` Guardrails**, **(2) Selected Options + `Shared Seam Header` / SI Unit Bridge**, and **(3) Section 4 `Red → Green Verification Matrix` (`UL-05` + `UL-08`)**—into `<artifactDir>/scratch/boostx_state.md` and execute [`/xboost`](../xboost/SKILL.md) immediately.
+   * **When User Approves OR When Chained (`/xplan /xboost`) with `0` Open Ambiguities (or with `/goal`)**: Lock all 3 plan blocks—**(1) Header `[FROZEN]`/`[DEFERRED]` Guardrails**, **(2) Selected Options + `Shared Seam Header` / SI Unit Bridge**, and **(3) Section 4 `Red → Green Verification Matrix` (`UL-05` + `UL-08`)**—into `<artifactDir>/scratch/xboost_state.md` and execute [`/xboost`](../xboost/SKILL.md) immediately.
 
 ---
 

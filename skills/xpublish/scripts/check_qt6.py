@@ -209,6 +209,31 @@ KNOWN_QT_SCOPED_ENUMS: Dict[str, Dict[str, Set[str]]] = {
         "Mode": {
             "StandardMode", "FullPageMode"
         }
+    },
+    "QDialog": {
+        "DialogCode": {
+            "Accepted", "Rejected"
+        }
+    },
+    "QDialogButtonBox": {
+        "StandardButton": {
+            "Ok", "Cancel", "Apply", "Close", "Yes", "No", "Reset", "Help", "Save", "Discard"
+        },
+        "ButtonRole": {
+            "AcceptRole", "RejectRole", "ApplyRole", "ResetRole", "YesRole", "NoRole", "ActionRole", "HelpRole"
+        }
+    },
+    "QAbstractItemView": {
+        "SelectionMode": {
+            "NoSelection", "SingleSelection", "MultiSelection", "ExtendedSelection", "ContiguousSelection"
+        },
+        "SelectionBehavior": {
+            "SelectItems", "SelectRows", "SelectColumns"
+        },
+        "EditTrigger": {
+            "NoEditTriggers", "CurrentChanged", "DoubleClicked", "SelectedClicked",
+            "EditKeyPressed", "AnyKeyPressed", "AllEditTriggers"
+        }
     }
 }
 
@@ -221,12 +246,14 @@ REMOVED_OR_RENAMED_APIS = {
 }
 
 DEFAULT_IGNORES = [
-    r"__pycache__",
-    r"\.git",
-    r"\.github",
-    r"dist",
-    r"build",
-    r"tests?",
+    r"^__pycache__$",
+    r"^\.git$",
+    r"^\.github$",
+    r"^\.vscode$",
+    r"^\.idea$",
+    r"^build$",
+    r"^dist$",
+    r"^tests?$",
     r"^test_.*\.py$"
 ]
 

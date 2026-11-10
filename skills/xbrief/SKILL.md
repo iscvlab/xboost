@@ -30,7 +30,9 @@ Red failure modes to prevent:
 | Pre-flight security checks, upstream PRs, or QGIS plugin packaging | [`/xpublish`](../xpublish/SKILL.md) |
 | Check conversation context compaction health | [`/xcontext`](../xcontext/SKILL.md) |
 | Author or distill a global agent skill | [`/xcreate-skill`](../xcreate-skill/SKILL.md) |
+| Ratchet post-session bug/optimization patterns into Playbooks or evolve universal laws | [`/xlearn`](../xlearn/SKILL.md) |
 | Extract text and CSV tables from standalone PDFs or scanned images | [`/xocr`](../xocr/SKILL.md) |
+| Non-intrusive desktop GUI automation (`Ghost Click` / `UIA` / `Set-of-Mark`) | [`/xmouse`](../xmouse/SKILL.md) |
 | Write an end-of-session kickoff handoff prompt | [`/xkickoff`](../xkickoff/SKILL.md) |
 
 If the task is exclusively one of these standalone workflows without needing a workspace doc briefing first, delegate to that skill and halt.
@@ -56,9 +58,9 @@ Extract core nouns, identifiers, and status words from the prompt, discarding ge
 
 Search `*.md` in the current workspace, including hidden skill or configuration directories when host permissions allow.
 
-* **Bounded Up-Tree Parent-Umbrella Discovery (Symmetric with [`/xsync`](../xsync/SKILL.md) `--federated`)**:
+* **Bounded Up-Tree Parent-Umbrella Discovery (Symmetric with [`/xsync`](../xsync/SKILL.md) `--federated` & [`/xlearn`](../xlearn/SKILL.md))**:
   * Inspect outbound relative links (`../`, `../../`) in root Markdown files and check the immediate parent directory (`..`).
-  * When `cwd.parent` is a multi-repo umbrella directory (i.e., `cwd.parent != cwd`, `cwd.parent != ~`, and `cwd.parent.name.lower()` is **not** in `{desktop, documents, downloads, users, home, root, tmp, temp, var, etc}`), include top-level parent umbrella SSOTs (`../*PLAYBOOK*.md`, `../*PROTOCOL*.md`, `../*PLAN*.md`, `../*PORTFOLIO*.md`) in candidate discovery so shared cross-workspace pattern playbooks and architectural guardrails are automatically inherited.
+  * When `cwd.parent` is a multi-repo umbrella directory (i.e., `cwd.parent != cwd`, `cwd.parent != ~`, and `cwd.parent.name.lower()` is **not** in `{desktop, documents, downloads, users, home, root, tmp, temp, var, etc}`), include top-level parent umbrella SSOTs (`../*PLAYBOOK*.md`, `../*PROTOCOL*.md`, `../*PLAN*.md`, `../*PORTFOLIO*.md` maintained via [`/xlearn`](../xlearn/SKILL.md)) in candidate discovery so shared cross-workspace pattern playbooks and architectural guardrails are automatically inherited.
 * **Exclusions**: `.git`, `node_modules`, `dist`, `build`, `__pycache__`, `.venv`, vendor bundles, and **any directory containing an `.obsidian/` subfolder** (so Obsidian Second Brain notes never pollute or consume the 8-file Repository SSOT cap during standard `/xbrief` runs).
 * **Strict Opt-In [`/xobsidian`](../xobsidian/SKILL.md) Combinator Rule (`/xbrief /xobsidian`)**:
   * **Default (Without `/xobsidian`)**: Do **not** read or query any Obsidian vault.

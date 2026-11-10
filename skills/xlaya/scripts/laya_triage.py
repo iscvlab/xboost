@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 laya_triage.py — System 1 Semantic Decision, Heading Chunker & Contradiction Triage CLI Engine
-Part of the BoostX Agent Skill Framework (/xlaya).
+Part of the XBoost Agent Skill Framework (/xlaya).
 
 Features:
 1. Fence-Safe Heading-Aware Chunking (<= 1,200 chars / ~300 tokens) with exact #L<start>-L<end> line tracking,
@@ -164,11 +164,49 @@ def chunk_markdown_file(
         for offset, s_line in enumerate(s_lines):
             cur_ln = start_ln + offset
             line_len = len(s_line) + 1
-            should_split = (
-                bool(buf_lines)
-                and (buf_chars + line_len > budget)
-                and (not s_line.strip() or buf_chars >= budget * 0.7)
-            )
+            if len(s_line) > budget:
+                if buf_lines:
+                    body = "\n".join(buf_lines).strip()
+                    if body:
+                        chunks.append(
+                            {
+                                "file": str(file_path.as_posix()),
+                                "name": file_path.name,
+                                "heading": heading,
+                                "start_line": chunk_start,
+                                "end_line": cur_ln - 1,
+                                "ref": f"{file_path.name}#L{chunk_start}-L{cur_ln - 1}",
+                                "text": (prefix + body)[:max_chars],
+                            }
+                        )
+                    buf_lines = []
+                    buf_chars = 0
+
+                s_strip = s_line.lstrip()
+                if s_strip.startswith("|") and len(s_strip.split("|")) > 1:
+                    row_head = ("|" + s_strip.split("|")[1] + " | ")[:60]
+                else:
+                    row_head = ""
+
+                slice_budget = max(128, max_chars - len(prefix) - len(row_head))
+                for pos in range(0, len(s_line), slice_budget):
+                    segment = s_line[pos: pos + slice_budget]
+                    seg_text = (prefix + segment) if pos == 0 else (prefix + row_head + segment)
+                    chunks.append(
+                        {
+                            "file": str(file_path.as_posix()),
+                            "name": file_path.name,
+                            "heading": heading,
+                            "start_line": cur_ln,
+                            "end_line": cur_ln,
+                            "ref": f"{file_path.name}#L{cur_ln}-L{cur_ln}",
+                            "text": seg_text[:max_chars],
+                        }
+                    )
+                chunk_start = cur_ln + 1
+                continue
+
+            should_split = bool(buf_lines) and (buf_chars + line_len > budget)
             if should_split:
                 body = "\n".join(buf_lines).strip()
                 if body:
@@ -263,7 +301,11 @@ def fallback_evaluate(
     labels: Dict[str, str],
 ) -> List[Dict[str, Any]]:
     """Deterministic pure-Python fallback when `laya` is not installed."""
+    ssot_or_query = ssot or query
     query_terms = [t.lower() for t in re.findall(r"\w+", query or ssot) if len(t) > 2]
+    ssot_nums = set(re.findall(r"\b\d+(?:\.\d+)?\b", ssot_or_query))
+    negation_markers = {"not", "never", "false", "deprecated", "legacy", "old", "fail"}
+    ssot_negations = set(re.findall(r"\b[a-z]+\b", ssot_or_query.lower())) & negation_markers
     results: List[Dict[str, Any]] = []
 
     for ch in chunks:
@@ -279,7 +321,19 @@ def fallback_evaluate(
             results.append({**ch, "score": score_val, "noul": 0.0, "confidence": 0.5, "engine": "fallback"})
         elif mode == "contradiction":
             hits = sum(1 for t in query_terms if t in text_lower)
-            noul_val = round(min(1.0, hits / max(1, len(query_terms))), 3)
+            overlap_ratio = hits / max(1, len(query_terms))
+            chunk_nums = set(re.findall(r"\b\d+(?:\.\d+)?\b", text_lower))
+            chunk_words = set(re.findall(r"\b[a-z]+\b", text_lower))
+            has_conflicting_nums = bool(ssot_nums and chunk_nums and not ssot_nums.issubset(chunk_nums))
+            has_extra_negation = bool((chunk_words & negation_markers) - ssot_negations)
+            if hits > 0 and (has_conflicting_nums or has_extra_negation):
+                noul_val = (
+                    round(min(1.0, max(0.65, overlap_ratio)), 3)
+                    if overlap_ratio >= 0.25
+                    else round(overlap_ratio, 3)
+                )
+            else:
+                noul_val = round(0.15 * overlap_ratio, 3)
             results.append({**ch, "score": 0.0, "noul": noul_val, "confidence": 0.5, "engine": "fallback"})
         elif mode == "classify":
             best_label = next(iter(labels.keys()), "unknown")
@@ -418,7 +472,7 @@ def run_laya_inference(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="BoostX /xlaya System 1 Semantic Triage & Heading Chunker CLI Engine"
+        description="XBoost /xlaya System 1 Semantic Triage & Heading Chunker CLI Engine"
     )
     parser.add_argument(
         "paths",
@@ -476,8 +530,8 @@ def main() -> int:
     parser.add_argument(
         "--max-chunks",
         type=int,
-        default=512,
-        help="Maximum number of chunks to evaluate in one pass (default: 512)",
+        default=2048,
+        help="Maximum number of chunks to evaluate in one pass (default: 2048)",
     )
     parser.add_argument(
         "--top-k",

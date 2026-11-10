@@ -10,18 +10,18 @@ Part of the /xcontext skill. Cross-platform (Windows, macOS, Linux).
 Zero external dependencies (Python stdlib only).
 """
 
-import argparse
-import collections
-import datetime
-import json
-import os
-import sqlite3
 import sys
-import time
-
 sys.dont_write_bytecode = True
 
-# BoostX UTF-8 stream guards
+import argparse  # noqa: E402
+import collections  # noqa: E402
+import datetime  # noqa: E402
+import json  # noqa: E402
+import os  # noqa: E402
+import sqlite3  # noqa: E402
+import time  # noqa: E402
+
+# XBoost UTF-8 stream guards
 if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 if sys.stderr and hasattr(sys.stderr, "reconfigure"):
@@ -200,6 +200,8 @@ def find_active_conversation_dir(conv_id=None):
         for d in os.listdir(bdir):
             full_p = os.path.join(bdir, d)
             transcript_p = os.path.join(full_p, ".system_generated", "logs", "transcript.jsonl")
+            if not os.path.isfile(transcript_p):
+                transcript_p = os.path.join(full_p, ".system_generated", "logs", "transcript_full.jsonl")
             if os.path.isdir(full_p) and not d.startswith(".") and os.path.isfile(transcript_p):
                 mtime = os.path.getmtime(transcript_p)
                 all_entries.append((mtime, full_p))
@@ -217,10 +219,26 @@ def analyze_transcript(conv_dir_or_file):
     """Parse transcript.jsonl (or any agent JSONL session log + companion SQLite .db) for context & token metrics."""
     if os.path.isfile(conv_dir_or_file):
         transcript_path = conv_dir_or_file
-        conv_dir = os.path.dirname(conv_dir_or_file)
+        conv_dir = os.path.dirname(os.path.abspath(conv_dir_or_file))
+        if (
+            os.path.basename(conv_dir) == "logs"
+            and os.path.basename(os.path.dirname(conv_dir)) == ".system_generated"
+        ):
+            conv_dir = os.path.dirname(os.path.dirname(conv_dir))
     else:
-        conv_dir = conv_dir_or_file
+        conv_dir = os.path.abspath(conv_dir_or_file)
+        if (
+            os.path.basename(conv_dir) == "logs"
+            and os.path.basename(os.path.dirname(conv_dir)) == ".system_generated"
+        ):
+            conv_dir = os.path.dirname(os.path.dirname(conv_dir))
+        elif os.path.basename(conv_dir) == ".system_generated":
+            conv_dir = os.path.dirname(conv_dir)
         transcript_path = os.path.join(conv_dir, ".system_generated", "logs", "transcript.jsonl")
+        if not os.path.isfile(transcript_path):
+            full_candidate = os.path.join(conv_dir, ".system_generated", "logs", "transcript_full.jsonl")
+            if os.path.isfile(full_candidate):
+                transcript_path = full_candidate
     if not os.path.isfile(transcript_path):
         return None
 
@@ -238,7 +256,8 @@ def analyze_transcript(conv_dir_or_file):
             total_steps = step_num
             try:
                 data = json.loads(line)
-            except Exception:
+            except Exception as exc:
+                _ = exc
                 continue
 
             msg_type = data.get("type", "")
@@ -388,14 +407,15 @@ def _scan_transcript_tokens(transcript_path, cutoff_ts=0):
                 stats["steps"] += 1
                 try:
                     obj = json.loads(line)
-                except Exception:
+                except Exception as exc:
+                    _ = exc
                     continue
                 stats["input_tokens"] += int(obj.get("input_tokens", 0) or 0)
                 stats["output_tokens"] += int(obj.get("output_tokens", 0) or 0)
                 stats["cache_read_tokens"] += int(obj.get("cache_read_tokens", 0) or 0)
                 if obj.get("type") == "PLANNER_RESPONSE":
                     for tc in obj.get("tool_calls", []) or []:
-                        if isinstance(tc, dict) and tc.get("name") == "invoke_subagent":
+                        if isinstance(tc, dict) and tc.get("name") in ("invoke_subagent", "Task"):
                             stats["subagents"] += 1
     except Exception:
         return stats
@@ -427,7 +447,8 @@ def aggregate_cross_platform_telemetry(days=None, all_time=False):
                 db_p = os.path.join(conv_db_dir, fname)
                 try:
                     mtime = os.path.getmtime(db_p)
-                except Exception:
+                except Exception as exc:
+                    _ = exc
                     continue
                 if cutoff_ts > 0 and mtime < cutoff_ts:
                     continue
@@ -452,6 +473,8 @@ def aggregate_cross_platform_telemetry(days=None, all_time=False):
                 if cid.startswith("."):
                     continue
                 tp = os.path.join(brain_dir, cid, ".system_generated", "logs", "transcript.jsonl")
+                if not os.path.isfile(tp):
+                    tp = os.path.join(brain_dir, cid, ".system_generated", "logs", "transcript_full.jsonl")
                 if not os.path.isfile(tp):
                     continue
                 tr_st = _scan_transcript_tokens(tp, cutoff_ts=cutoff_ts)

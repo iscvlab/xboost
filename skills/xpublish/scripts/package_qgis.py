@@ -47,23 +47,40 @@ REQUIRED_METADATA_FIELDS = [
 ]
 
 EXCLUDE_PATTERNS = [
-    r"__pycache__",
-    r"\.py[cod]$",
-    r"\.git",
-    r"\.github",
-    r"\.vscode",
-    r"\.idea",
-    r"dist",
-    r"build",
-    r"\.ds_store",
-    r"thumbs\.db",
-    r"desktop\.ini",
+    r"^__pycache__$",
+    r"\.pyc$",
+    r"\.pyo$",
+    r"\.pyd$",
+    r"^\.git$",
+    r"^\.github$",
+    r"^\.gitignore$",
+    r"^\.gitattributes$",
+    r"^\.vscode$",
+    r"^\.idea$",
+    r"^\.pytest_cache$",
+    r"^\.mypy_cache$",
+    r"^\.ruff_cache$",
+    r"^\.tox$",
+    r"^\.venv$",
+    r"^venv$",
+    r"^env$",
+    r"^node_modules$",
+    r"^dist$",
+    r"^build$",
+    r"^\.ds_store$",
+    r"^thumbs\.db$",
+    r"^desktop\.ini$",
+    r"\.zip$",
+    r"\.tar\.gz$",
+    r"\.bak$",
+    r"\.tmp$",
+    r"~$",
     r"^test_.*\.py$",
     r"^scratch.*",
-    r"\.flake8$",
-    r"\.bandit$",
-    r"\.secrets\.baseline$",
-    r"\.env$",
+    r"^\.flake8$",
+    r"^\.bandit$",
+    r"^\.secrets\.baseline$",
+    r"^\.env$",
     r"^install_plugin\.py$",
     r"^generate_icons\.py$",
 ]
@@ -105,7 +122,10 @@ SECRET_PATTERNS = [
 
 PATH_PATTERNS = [
     ("Windows User Path", re.compile(r"(?i)\b([a-z]:[/\\]users[/\\](?!<)[a-zA-Z0-9_\-\.]+)")),
-    ("macOS User Path", re.compile(r"(?:^|[\s\"'`=:(])(/Users/(?!<|shared\b|runner\b)[a-zA-Z0-9_\-\.]+/)")),
+    (
+        "macOS User Path",
+        re.compile(r"(?:^|[\s\"'`=:(])(?<![a-zA-Z]:)(/Users/(?!<|shared\b|runner\b)[a-zA-Z0-9_\-\.]+/)"),
+    ),
     ("Linux Home Path", re.compile(r"(?:^|[\s\"'`=:(])(/home/(?!<)[a-zA-Z0-9_\-\.]+)")),
 ]
 
@@ -153,7 +173,7 @@ def validate_metadata(meta_path: Path) -> dict:
                     f"to prevent server `InterpolationSyntaxError`."
                 )
 
-    cp = configparser.ConfigParser()
+    cp = configparser.ConfigParser(interpolation=None)
     cp.read(str(meta_path), encoding="utf-8")
 
     if not cp.has_section("general"):
@@ -201,14 +221,28 @@ def audit_security_and_privacy(plugin_dir: Path) -> list:
                         if clean_line.startswith("#") and "pattern" in clean_line.lower():
                             continue
                         for label, pat in SECRET_PATTERNS:
-                            m = pat.search(clean_line)
-                            if m:
+                            for m in pat.finditer(clean_line):
                                 val = m.group(0)
+                                low_val = val.lower()
+                                if label == "Generic Secret Assignment" and any(
+                                    ph in low_val
+                                    for ph in (
+                                        "your_",
+                                        "_here",
+                                        "placeholder",
+                                        "example",
+                                        "dummy",
+                                        "changeme",
+                                        "replace_",
+                                        "xxxx",
+                                        "todo",
+                                    )
+                                ):
+                                    continue
                                 masked = val[:4] + "..." + val[-4:] if len(val) > 8 else "***"
                                 issues.append(f"Secret Leak ({label}) at {rel}:{line_no}: `{masked}`")
                         for label, pat in PATH_PATTERNS:
-                            m = pat.search(clean_line)
-                            if m:
+                            for m in pat.finditer(clean_line):
                                 matched_path = m.group(1).lower()
                                 if not any(allowed in matched_path for allowed in EXCLUDED_PATH_ALLOWLIST):
                                     issues.append(
@@ -334,8 +368,8 @@ def resolve_package_slug(plugin_dir: Path, output_dir: Path, explicit_slug: str 
                         prev_slug = list(prefixes)[0]
                         if prev_slug and prev_slug != "dist":
                             return prev_slug, f"previous release archive ({z.name})"
-            except Exception:
-                continue
+            except Exception as exc:
+                _ = exc
 
     folder_name = plugin_dir.name.strip()
     clean_name = folder_name

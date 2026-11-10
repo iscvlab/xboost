@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# BoostX Composable Agent Skills (v3.3.0) - Universal Installer (macOS & Linux)
-# Links the 13-skill BoostX (/x*) suite into Claude Code (~/.claude/skills), Grok (~/.grok/skills),
+# XBoost Composable Agent Skills (v3.5.0) - Universal Installer (macOS & Linux) - iscvlab/xboost
+# Links the 15-skill XBoost (/x*) suite into Claude Code (~/.claude/skills), Grok (~/.grok/skills),
 # Gemini/Antigravity (~/.gemini/config/skills), and Cursor/Codex (~/.agents/skills).
 
 set -e
@@ -11,14 +11,14 @@ SKILLS_SRC="$SCRIPT_DIR/skills"
 LEGACY_DIRS=(
     "xpublish-audit" "xpublish-qgis"
     "boostx" "briefx" "contextx" "create-skillx" "deep-researchx"
-    "kickoffx" "layax" "obsidianx" "ocrx" "planx" "publishx-audit"
+    "kickoffx" "layax" "learnx" "mousex" "obsidianx" "ocrx" "planx" "publishx-audit"
     "publishx-qgis" "researchx" "syncx" "ultrax" "unlimited-ocr"
     "brief" "context" "create-skill" "deep-research" "kickoff" "laya"
     "obsidian-vault" "ocr" "publish-audit" "publish-qgis" "research" "update-doc"
 )
 
 echo "============================================================"
-echo "  ⚡ BoostX Agent Skills (v3.3.0) - Universal Installer"
+echo "  ⚡ XBoost Agent Skills (v3.5.0) - Universal Installer"
 echo "============================================================"
 echo "Source: $SKILLS_SRC"
 
@@ -137,5 +137,5 @@ fi
 
 echo ""
 echo "============================================================"
-echo "  ✓ BoostX v3.3.0 Installation Complete! All 13 /x* skills ready."
+echo "  ✓ XBoost v3.5.0 Installation Complete! All 15 /x* skills ready."
 echo "============================================================"

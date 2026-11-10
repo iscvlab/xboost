@@ -28,6 +28,8 @@ Red failure modes to prevent:
 | Construct an implementation plan | [`/xplan`](../xplan/SKILL.md) |
 | Run primary-source or 5-wave deep research | [`/xdeep-research`](../xdeep-research/SKILL.md) |
 | Author or distill a new skill | [`/xcreate-skill`](../xcreate-skill/SKILL.md) |
+| Ratchet post-session bug/optimization patterns into Playbooks or evolve universal laws | [`/xlearn`](../xlearn/SKILL.md) |
+| Execute complex multi-file coding, debugging, or simulation tasks | [`/xboost`](../xboost/SKILL.md) |
 | General documentation briefing | [`/xbrief`](../xbrief/SKILL.md) |
 | Fast System 1 local semantic triage | [`/xlaya`](../xlaya/SKILL.md) |
 | Offload heavy multi-file work or tournaments into isolated subagent windows so the main thread stays at Round 0 | [`/xultra`](../xultra/SKILL.md) |

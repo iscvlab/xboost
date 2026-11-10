@@ -1,4 +1,4 @@
-# GitHub Repository Publishing, Visual README & Upstream PR Protocol (`v1.3`)
+# GitHub Repository Publishing, Visual README & Upstream PR Protocol (`v1.4`)
 
 > **Scope**: Universal, domain-agnostic standard for authoring high-impact open-source GitHub repositories across **Agent Skills**, **MCP Server Bridges**, **Desktop GIS/CAD Plugins (QGIS / Rhino / Grasshopper)**, and **CLI / Compute Engines**, plus cross-account profile synchronization and Upstream Pull Requests (`PRs`) via `/xpublish` (`audit_engine.py`, `package_qgis.py`, `check_qt6.py`).  
 > **Core Philosophy**: **Executive Scannability in `< 5 Seconds`**, **Zero-Iframe Visual Bar Charts (`0 ms` Render)**, **White-Mode Minimalist Mermaid Diagrams (`< 30 KB` SVG)**, **Viewport-Safe Table Geometry (`≤ 4` Prose Columns)**, **Zero-Mojibake `UTF-16LE` Clipboard Automation**, **Single-Pass Review-Bot Convergence (`--platform pr`)**, and **Progressive Disclosure (`<details>`)**.
@@ -89,7 +89,7 @@ When a viewer opens GitHub in Dark Mode, default Mermaid diagrams often render w
    ```
 
 ### B. The 4 Hard GitHub Mermaid Lexer Guardrails (Mandatory)
-To prevent GitHub's `Unable to render rich display` error and keep SVG payloads under `35 KB`:
+To prevent GitHub's `Unable to render rich display` error and keep SVG payloads under `30 KB`:
 
 | # | Forbidden Pattern inside ` ```mermaid ` | Why It Breaks GitHub's Renderer | Mandatory Clean Replacement |
 | :---: | :--- | :--- | :--- |
@@ -269,11 +269,11 @@ def launch_prefilled_github_pr(upstream_repo: str, org_fork: str, branch: str, t
 
 When contributing to external upstream repositories, enforce these four rules before and after opening a PR:
 
-1. **Issue-Claim Etiquette, Live `HEAD` Repro & Maintainer Governance Check**:
+1. **Issue-Claim Etiquette, Live `HEAD` / Feature-Branch Repro & Maintainer Reply Package**:
    - Before opening an upstream PR or posting a public comment, inspect `CONTRIBUTING.md`, `.github/PULL_REQUEST_TEMPLATE*`, `.github/workflows/*`, `.releaserc*`, `AI_POLICY.md`, issue assignees, and linked open PRs via GitHub API/CLI (`Law 1`).
-   - **Live `HEAD` Reproduction & Target Branch Pre-Gate**: Before writing code for an older open issue, verify on a fresh clone of the repository's actual default/integration branch (`gh api repos/<owner>/<repo> --jq .default_branch` or `CONTRIBUTING.md` target branch such as `develop` vs. `main`) that the issue has **not** already been silently resolved at `HEAD`. Check whether the repo enforces **DCO sign-off (`git commit -s` / `Signed-off-by:`)**, **Conventional Commits** (`fix:` / `feat:` / `perf:`), or an **entry in `docs/changelog.rst` / `CHANGELOG.md`**.
+   - **Live `HEAD`, Active Feature-Branch & External Test-Data Pre-Gate**: Before writing code for an older open issue, verify on a fresh clone of the repository's actual default/integration branch (`gh api repos/<owner>/<repo> --jq .default_branch` or `CONTRIBUTING.md` target branch such as `develop` vs. `main`) **and** any active `feature/*` branch referenced in the issue thread (`git log --all -S "<symbol>"`) that the issue has **not** already been resolved. When a test references data files absent from the git tree, inspect `Makefile`, `conftest.py`, and `.github/workflows/*` for external test-data archives pinned by commit hash. Check whether the repo enforces **DCO sign-off (`git commit -s` / `Signed-off-by:`)**, **Conventional Commits** (`fix:` / `feat:` / `perf:`), or an **entry in `docs/changelog.rst` / `CHANGELOG.md`**.
    - **Direct-PR Repos**: If the issue is unassigned, reproducible at `HEAD`, has no competing open PR, and `CONTRIBUTING.md` does not mandate prior approval, implement the fix + regression test on a clean feature branch and open the PR directly.
-   - **Discussion-First Repos**: If `CONTRIBUTING.md` or maintainer norms require discussing before opening a PR (or when proposing an unsolicited proactive optimization on a conservative academic/institutional repository), prepare and verify the local branch first, then post a concise 3-line technical root-cause / benchmark receipt comment on the issue (or open a Benchmark Issue) and wait for maintainer sign-off before pushing the PR.
+   - **Discussion-First Repos & High-Signal Maintainer Reply Package (`I`/`my` Voice + Complete Scripts from Draft 1)**: If `CONTRIBUTING.md` or maintainer norms require discussing before opening a PR (or when replying to maintainer feedback on a benchmark/bug issue), prepare and verify the local branch first. Draft comments using first-person singular (**`I` / `my`**, never `"we"` / `"our"`) with **short, scannable top-level prose** (`Summary Table` → `Key Takeaway` → `Summary of Options for the PR` → `Unit Test`) followed immediately in **Draft 1** by collapsible `<details>` blocks containing **100% of proposed code diffs (`git diff`) and the complete self-contained benchmark/verification script reproducing every reported metric** (zero gatekeeping or making the user/maintainer ask for missing scripts later).
    - **Human-Consent Gate for Public Posts**: Always obtain explicit user approval before posting public comments or opening PRs under the user's GitHub identity.
 2. **Closing Keyword Parity (`Fixes #N` vs. `Part of #N` / `Addresses #N`)**:
    - Write auto-closing keywords (`Fixes #N`, `Closes #N`, `Resolves #N`) **only** when the PR satisfies `100%` of the issue's stated sub-requirements, acceptance checkboxes, and target platforms.
@@ -308,7 +308,7 @@ Before pushing any `README.md`, benchmark report, or Upstream PR to GitHub, run 
   - `0` occurrences of `--` inside quoted Mermaid labels `["..."]`
   - `0` occurrences of chained `&` edges (`A & B --> C`)
   - `0` multi-byte emojis inside ` ```mermaid ` blocks
-- [ ] **Live `mermaid.ink` Compiler Check**: Does every Mermaid block compile via `https://mermaid.ink/svg/pako:...` with `HTTP 200`, `role="flowchart-v2"`, `SyntaxError=False`, and SVG size `< 45 KB`?
+- [ ] **Live `mermaid.ink` Compiler Check**: Does every Mermaid block compile via `https://mermaid.ink/svg/pako:...` with `HTTP 200`, `role="flowchart-v2"`, `SyntaxError=False`, and SVG size `< 30 KB`?
 - [ ] **Viewport-Safe Table Width (`≤ 4` Prose Columns)**: Do all explanatory/fix tables have `≤ 4` columns (`# & Target` merged) so the rightmost column never clips inside an `840px` GitHub PR box?
 - [ ] **Zero-Mojibake Encoding Check**: Were all clipboard/file writes executed via UTF-8 (`encoding="utf-8"`) or Win32 `CF_UNICODETEXT` (`UTF-16LE`) with `0` replacement characters (`\ufffd`)?
 - [ ] **Link, Diff & Mirror Integrity**: Do `audit_workspace_docs.py --allow-latex` and `audit_engine.py --platform <github|pr>` pass with `0` blocking issues and `0` advisory warnings?

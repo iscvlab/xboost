@@ -65,7 +65,10 @@ SECRET_PATTERNS = [
 # ---------------------------------------------------------------------------
 PATH_PATTERNS = [
     ("Windows Absolute User Path", re.compile(r"(?i)\b([a-z]:[/\\]users[/\\](?!<)[a-zA-Z0-9_\-\.]+)")),
-    ("macOS Absolute User Path", re.compile(r"(?:^|[\s\"'`=:(])(/Users/(?!<|shared\b|runner\b)[a-zA-Z0-9_\-\.]+/)")),
+    (
+        "macOS Absolute User Path",
+        re.compile(r"(?:^|[\s\"'`=:(])(?<![a-zA-Z]:)(/Users/(?!<|shared\b|runner\b)[a-zA-Z0-9_\-\.]+/)"),
+    ),
     ("Linux Absolute Home Path", re.compile(r"(?:^|[\s\"'`=:(])(/home/(?!<)[a-zA-Z0-9_\-\.]+)")),
 ]
 
@@ -111,8 +114,7 @@ def scan_line_for_secrets_and_paths(line: str, file_str: str, line_no: int, resu
         return
 
     for label, pat in SECRET_PATTERNS:
-        match = pat.search(clean_line)
-        if match:
+        for match in pat.finditer(clean_line):
             matched_val = match.group(0)
             low_val = matched_val.lower()
             if label == "Generic Secret Assignment" and any(
@@ -134,8 +136,7 @@ def scan_line_for_secrets_and_paths(line: str, file_str: str, line_no: int, resu
             result.add_blocking(f"Potential {label} detected: `{masked}`", file_str, line_no)
 
     for label, pat in PATH_PATTERNS:
-        match = pat.search(clean_line)
-        if match:
+        for match in pat.finditer(clean_line):
             matched_path = match.group(1).lower()
             if not any(allowed in matched_path for allowed in EXCLUDED_PATH_ALLOWLIST):
                 result.add_blocking(
@@ -473,16 +474,37 @@ def audit_pr_diff_invariants(
         if fname in FORBIDDEN_FILES or fpath.suffix.lower() in FORBIDDEN_EXTS or fname.startswith("scratch"):
             result.add_blocking(f"Forbidden build or scratch artifact in PR diff: `{fpath.name}`", str(fpath))
 
-        # Check CRLF injection on text files
+        # Check accidental CRLF injection on text files (compare against base blob EOL)
         if fpath.suffix.lower() in content_suffixes and fpath.suffix.lower() != ".ps1":
             try:
                 raw_bytes = fpath.read_bytes()
                 if b"\r\n" in raw_bytes:
-                    result.add_blocking(
-                        "CRLF (`\\r\\n`) line endings detected in modified file. "
-                        "Normalize to LF (`\\n`) before PR push.",
-                        str(fpath),
+                    rel_git = fpath.resolve().relative_to(target.resolve()).as_posix()
+                    ref_for_blob = base_ref if base_ref else "HEAD"
+                    blob_proc = subprocess.run(
+                        ["git", "-C", str(target), "show", f"{ref_for_blob}:{rel_git}"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        check=False,
                     )
+                    base_has_crlf = blob_proc.returncode == 0 and (b"\r\n" in (blob_proc.stdout or b""))
+                    eol_proc = subprocess.run(
+                        ["git", "-C", str(target), "ls-files", "--eol", "--", rel_git],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        check=False,
+                    )
+                    eol_out = (eol_proc.stdout or "").strip()
+                    index_is_lf = "i/lf" in eol_out
+                    if not base_has_crlf and not index_is_lf:
+                        result.add_blocking(
+                            "CRLF (`\\r\\n`) line endings injected into LF-based file. "
+                            "Normalize to LF (`\\n`) before PR push.",
+                            str(fpath),
+                        )
             except OSError as exc:
                 result.add_warning(f"Unable to inspect line endings: {exc}", str(fpath))
 
@@ -521,7 +543,7 @@ def audit_qgis_metadata(path: Path, result: AuditResult):
                     str(path), line_no
                 )
 
-    cp = configparser.ConfigParser()
+    cp = configparser.ConfigParser(interpolation=None)
     try:
         cp.read(str(path), encoding="utf-8")
         if not cp.has_section("general"):
@@ -718,8 +740,14 @@ def run_audit(
 
 
 def audit_skill_invariants(target: Path, result: AuditResult):
-    """Audit agent skill directory against /xcreate-skill standards (frontmatter, links, invariants)."""
+    """Audit agent skill directory against /xcreate-skill and /xlearn standards (frontmatter, links, invariants)."""
     skill_md = target / "SKILL.md"
+    if not skill_md.is_file() and (target / "skills").is_dir():
+        child_skills = sorted((target / "skills").glob("*/SKILL.md"))
+        if child_skills:
+            for child_md in child_skills:
+                audit_skill_invariants(child_md.parent, result)
+            return
     if not skill_md.exists():
         result.add_blocking("Missing mandatory `SKILL.md` in skill directory", str(target))
         return
@@ -770,10 +798,25 @@ def audit_skill_invariants(target: Path, result: AuditResult):
         import yaml
         fm_data = yaml.safe_load("\n".join(fm_lines)) or {}
     except Exception:
+        cur_key = None
+        cur_parts = []
         for fm_line in fm_lines:
-            if ":" in fm_line:
+            if re.match(r"^[a-zA-Z0-9_-]+\s*:", fm_line):
+                if cur_key is not None:
+                    fm_data[cur_key] = " ".join(p for p in cur_parts if p).strip()
                 k, v = fm_line.split(":", 1)
-                fm_data[k.strip()] = v.strip()
+                cur_key = k.strip()
+                v_clean = re.sub(r"^[>|]\s*", "", v.strip()).strip("\"'")
+                if v_clean.lower() in ("true", "false"):
+                    fm_data[cur_key] = v_clean.lower() == "true"
+                    cur_key = None
+                    cur_parts = []
+                else:
+                    cur_parts = [v_clean] if v_clean else []
+            elif cur_key is not None:
+                cur_parts.append(fm_line.strip())
+        if cur_key is not None:
+            fm_data[cur_key] = " ".join(p for p in cur_parts if p).strip()
 
     if not isinstance(fm_data, dict):
         result.add_blocking("YAML frontmatter must be a valid key-value mapping", str(skill_md))
@@ -906,7 +949,7 @@ def audit_skill_invariants(target: Path, result: AuditResult):
             if m_ovf:
                 result.add_warning(
                     f"Potential over-specific session equation/probe detected: `{m_ovf.group(0)}`. "
-                    "Apply the 5-Gate Universal Law Falsification Protocol in /xcreate-skill "
+                    "Apply the 5-Gate Universal Law Falsification Protocol in /xcreate-skill and /xlearn "
                     "(use Zero-Forcing Equilibrium `Δx = 0 => Δy = 0`, baseline-subtracted `ΔY(α) = Y(α) - Y(0)`, "
                     "Prefix Causality / finite lookback `W`, and wrapper-safe live entrypoint calls).",
                     str(skill_md),
@@ -918,7 +961,8 @@ def audit_skill_invariants(target: Path, result: AuditResult):
     for md_file in target.rglob("*.md"):
         try:
             md_text = md_file.read_text(encoding="utf-8", errors="replace")
-        except Exception:
+        except Exception as exc:
+            _ = exc
             continue
 
         clean_md = re.sub(r"(`{3,}|~{3,})[\s\S]*?\1", "", md_text)

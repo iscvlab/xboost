@@ -27,10 +27,11 @@ Operates on **Dual-Process Cognitive Architecture**:
 
 | Need | Action |
 |:---|:---|
-| **Fast semantic contradiction hunting across docs** | Chain `/xsync /xlaya` (`laya_triage.py --mode contradiction --ssot "..."`) |
-| **Shortlisting relevant `#L<start>-L<end>` sections in a large doc corpus** | Chain `/xbrief /xlaya` or `/xplan /xlaya` (`laya_triage.py --mode shortlist --query "..."`) |
-| **Scoring documentation completeness or filtering scraped candidates** | Chain `/xdeep-research /xlaya` (`laya_triage.py --mode rubric`) |
-| **Pre-flight public claim verification (`LIVE` vs `PREPARED`)** | Chain `/xpublish /xlaya` (`laya_triage.py --mode contradiction`) |
+| **Fast semantic contradiction hunting across docs** | Chain [`/xsync`](../xsync/SKILL.md) `/xlaya` (`laya_triage.py --mode contradiction --ssot "..."`) |
+| **Shortlisting relevant `#L<start>-L<end>` sections in a large doc corpus** | Chain [`/xbrief`](../xbrief/SKILL.md) `/xlaya` or [`/xplan`](../xplan/SKILL.md) `/xlaya` (`laya_triage.py --mode shortlist --query "..."`) |
+| **Scoring documentation completeness or filtering scraped candidates** | Chain [`/xdeep-research`](../xdeep-research/SKILL.md) `/xlaya` (`laya_triage.py --mode rubric`) |
+| **Deduplicating & triaging compound learning Playbook patterns** | Chain [`/xlearn`](../xlearn/SKILL.md) `/xlaya` (`laya_triage.py --mode shortlist` & `contradiction`) |
+| **Pre-flight public claim verification (`LIVE` vs `PREPARED`)** | Chain [`/xpublish`](../xpublish/SKILL.md) `/xlaya` (`laya_triage.py --mode contradiction`) |
 | **Large-scale bilingual (Thai + English) text classification / scoring** | Run `/xlaya` standalone (`--mode classify` or Python API, auto-routed via `laya.is_english()`) |
 | **Text generation, rewriting prose, or authoring code** | Do NOT use `/xlaya` (Delegate to Host Agent System 2 / [`/xboost`](../xboost/SKILL.md)) |
 | **Exact keyword, symbol, or regex lookup** | Do NOT use `/xlaya` (Use native grep / `rg` / `Select-String`) |
@@ -157,6 +158,11 @@ Invoke [`scripts/laya_triage.py`](scripts/laya_triage.py) on the target file/dir
 - **Role Division**:
   - `/xlaya` executes Law 1 deterministic pre-filtering (`laya_triage.py --mode shortlist`, `contradiction`, or `rubric`) in milliseconds with `0` LLM output tokens, pruning clean or low-signal chunks before any subagent is spawned.
   - `/xultra` then fans out System 2 Builder/Critic shards strictly on the high-signal or flagged `#L<start>-L<end>` targets.
+
+### 5.6 [`/xlearn`](../xlearn/SKILL.md) & [`/xocr`](../xocr/SKILL.md) + `/xlaya` (`/xlearn /xlaya`, `/xocr /xlaya`)
+- **Role Division**:
+  - Paired with [`/xlearn`](../xlearn/SKILL.md), `/xlaya` shortlists existing `OPT-*`/`FALS-*`/`GOV-*` rows across the 3-Tier Playbooks so session findings merge cleanly without duplicate rows.
+  - Paired with [`/xocr`](../xocr/SKILL.md), `/xlaya` shortlists high-signal `## Page N` sections from `extracted_document.md` in milliseconds before System 2 reading.
 
 ---
 

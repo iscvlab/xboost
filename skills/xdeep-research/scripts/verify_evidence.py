@@ -137,9 +137,27 @@ def audit_json_dataset(path: Path, args, blocking: list, warnings: list):
     req_fields = [f.strip() for f in args.required_fields.split(",") if f.strip()] if args.required_fields else []
     year_min, year_max = None, None
     if args.year_range:
-        parts = args.year_range.split(":")
-        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
-            year_min, year_max = int(parts[0]), int(parts[1])
+        if ":" not in args.year_range:
+            err_msg = (
+                f"[CLI Flag Error] Invalid --year-range '{args.year_range}': "
+                "expected 'MIN:MAX' format (e.g. '2020:2026')."
+            )
+            if err_msg not in blocking:
+                blocking.append(err_msg)
+        else:
+            parts = args.year_range.split(":", 1)
+            try:
+                year_min, year_max = int(parts[0].strip()), int(parts[1].strip())
+                if year_min > year_max:
+                    raise ValueError("min > max")
+            except ValueError:
+                err_msg = (
+                    f"[CLI Flag Error] Invalid --year-range '{args.year_range}': "
+                    "expected 'MIN:MAX' format (e.g. '2020:2026')."
+                )
+                if err_msg not in blocking:
+                    blocking.append(err_msg)
+                year_min, year_max = None, None
 
     for idx, rec in enumerate(records):
         if not isinstance(rec, dict):
@@ -184,9 +202,25 @@ def main():
     blocking = []
     warnings = []
 
+    if args.year_range:
+        parts = args.year_range.split(":", 1) if ":" in args.year_range else []
+        valid_yr = False
+        if len(parts) == 2:
+            try:
+                y0, y1 = int(parts[0].strip()), int(parts[1].strip())
+                valid_yr = y0 <= y1
+            except ValueError:
+                valid_yr = False
+        if not valid_yr:
+            blocking.append(
+                f"[CLI Flag Error] Invalid --year-range '{args.year_range}': "
+                "expected 'MIN:MAX' format (e.g. '2020:2026')."
+            )
+
     # 1. Placeholder Scan (strip fenced code blocks and inline code spans in Markdown first)
     if target_path.suffix.lower() == ".md":
         scan_text = re.sub(r"(`{3,}|~{3,})[\s\S]*?\1", "", text)
+        scan_text = re.sub(r"``[^\n]+?``", "", scan_text)
         scan_text = re.sub(r"`[^`\n]+`", "", scan_text)
     else:
         scan_text = text

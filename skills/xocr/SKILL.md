@@ -125,15 +125,17 @@ Every run emits pure JSON telemetry on `stdout` and writes four deterministic ar
 
 ---
 
-## 4. Automatic Ecosystem Routing (`/xdeep-research`, `/xbrief`, `/xboost`, `/xobsidian`, `/xultra`)
+## 4. Automatic Ecosystem Routing (`/xdeep-research`, `/xbrief`, `/xplan`, `/xlaya`, `/xboost`, `/xlearn`, `/xobsidian`, `/xultra`)
 
-Other BoostX `/x*` skills automatically invoke [`scripts/ocr_runner.py`](scripts/ocr_runner.py) whenever they encounter a `.pdf` or raster image table - even when the user does not explicitly type `/xocr`:
+Other XBoost `/x*` skills automatically invoke [`scripts/ocr_runner.py`](scripts/ocr_runner.py) whenever they encounter a `.pdf` or raster image table - even when the user does not explicitly type `/xocr`:
 
 | Chained / Calling Skill | Automatic `/xocr` Ingestion & Verification Handoff |
 |:---|:---|
 | **`/xdeep-research`** | **Primary-Source PDF & Table Harvester (Law 1)**: Automatically runs `ocr_runner.py` (with `--pages` when targeted) on technical PDFs, regulatory filings, and academic papers, citing exact rows from `table_p*.csv` and `extracted_document.md` with `ocr_manifest.json` receipts. |
 | **`/xbrief`** | **PDF Specification Briefing**: When a user-pinned or canonical workspace specification exists only as a `.pdf` or image plate, runs `ocr_runner.py` first to load structural headings (`## Page N`) and tables into the Briefing Table. |
+| **`/xplan`** | **PDF & Image Specification Planning**: Extracts `extracted_document.md` and `table_p*.csv` from PDF/image specs in Phase 1 before authoring `implementation_plan.md`. |
 | **`/xlaya`** | **Sub-Second Section Shortlisting**: Passes `extracted_document.md` headings into `/xlaya` (`shortlist` / `score`) to pinpoint high-signal pages in milliseconds before LLM reading. |
 | **`/xboost`** | **Zero-Error Quantitative Verification**: Checks `ocr_manifest.json` (`garble_ratio == 0.0`, `tables_extracted > 0`) and cross-verifies CSV column sums (`df.sum()`) against printed "Total" rows. |
+| **`/xlearn`** | **Vision & OCR Pattern Ratchet (`Tier 1B`)**: Distills verified vector `booktabs`, Thai PUA/Sara-Am glyph normalization, and VLM HTML table extraction patterns into `COMPOUND_LEARNING_PLAYBOOK.md` (`Tier 1B`). |
 | **`/xobsidian`** | **Clean Second-Brain Distillation**: Runs `ocr_runner.py` before distilling PDF papers or technical reports into atomic vault notes so `0%` glyph/encoding corruption or collapsed tables enter `VAULT_ROOT`. |
 | **`/xultra`** | **Sharded Multi-PDF / Page-Range Swarm (`Pointer-Not-Payload`)**: Shards massive PDF corpora or multi-hundred-page volumes across workers by **disjoint PDF files** or **disjoint `--pages` ranges** (`--pages 1-50`, `--pages 51-100`) writing to isolated `--output` folders and returning Compact Pointer Receipts (`ocr_manifest.json` + `table_p*.csv` paths). |
