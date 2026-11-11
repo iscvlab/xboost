@@ -1,28 +1,48 @@
 #!/usr/bin/env python3
 """
-laya_triage.py — System 1 Semantic Decision, Heading Chunker & Contradiction Triage CLI Engine
-Part of the XBoost Agent Skill Framework (/xlaya).
+laya_triage.py — 3-Stage System 1 → System 1.5 Semantic Triage & Conformal Cascade Engine
+Part of the XBoost Agent Skill Framework (/xlaya v2.0.0).
 
-Features:
-1. Fence-Safe Heading-Aware Chunking (<= 1,200 chars / ~300 tokens) with exact #L<start>-L<end> line tracking,
-   preventing silent truncation inside ModernBERT-large's 512-token window (512 - 192 head = 320 state tokens)
-   and ignoring `#` comments inside fenced code blocks.
-2. Automatic English vs Multilingual model routing via laya.is_english() (zero-overhead script detection).
-3. Four operational modes:
-   - rubric        : 5-level (0..4) ordinal technical completeness scoring + optional noul check
-   - contradiction : Calibrated noul contradiction hunting against a canonical SSOT statement
-   - shortlist     : Top-K section shortlisting (#L<start>-L<end>) for /xbrief and /xplan
-   - classify      : Categorical classification via choice (auto-shortlists via embeddings if >20 labels)
-4. Graceful pure-Python fallback if `laya` is not installed in the active Python environment.
+Architecture:
+- Stage 0 (Deterministic Chunker + Lexical Engine):
+  • 4-backtick/tilde fence-safe Markdown parser with 6-level #{1,6} breadcrumb stack
+  • Script-aware token budget estimator (English ≤ 380 est. tokens, Multilingual ≤ 780 est. tokens)
+  • Multi-format structured chunking (.md, .txt, .html/.htm, .jsonl, .json, .csv) with disambiguated refs
+  • Stdlib BM25 + code-span / CLI-flag / identifier bonus + overlapping Thai character 3-grams
+- Stage 1 (ModernBERT Neural System 1):
+  • Thread-safe resident model cache (_MODEL_CACHE) + offline-first local HF snapshot resolution
+  • Per-chunk English vs Multilingual routing conservation + Head-Language Guard
+  • 2-question joint contradiction calibration (is_relevant × contradicts_ssot)
+  • Elimination tournament routing via laya.predict_tournament for >20 choice labels
+- Stage 2 (VegaML Conformal System 1.5 Escalation):
+  • Opt-in --vega conformal prediction sets, abstention flags, and route reasons on top finalists
 """
 
+from __future__ import annotations
+
 import argparse
+import contextlib
+import csv
+import fnmatch
+import gc
+import html
+import importlib.metadata
+import importlib.util
+import io
 import json
+import math
+import os
 import re
 import sys
+import tempfile
+import threading
+import time
 import warnings
+from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+__version__ = "2.0.0"
 
 sys.dont_write_bytecode = True
 if hasattr(sys.stdout, "reconfigure"):
@@ -30,11 +50,54 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
-warnings.filterwarnings("ignore", category=RuntimeWarning, module="laya")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+if os.name == "nt":
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
-HEADING_RE = re.compile(r"^(#{1,3})\s+(.+?)\s*$")
-FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
-THAI_OR_NON_ASCII_RE = re.compile(r"[\u0E00-\u0E7F\u3000-\u9FFF\u0600-\u06FF\u0400-\u04FF]")
+HEADING_RE = re.compile(r"^ {0,3}(#{1,6})\s+(.+?)\s*$")
+FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+HTML_HEADING_RE = re.compile(r"<h([1-6])\b[^>]*>(.*?)</h\1>", re.IGNORECASE | re.DOTALL)
+HTML_NOISE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
+HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+THAI_RUN_RE = re.compile(r"[\u0E00-\u0E7F]+")
+CJK_RUN_RE = re.compile(r"[\u3040-\u30FF\u4E00-\u9FFF]+")
+NON_ENGLISH_SCRIPT_RE = re.compile(
+    r"[\u0E00-\u0E7F\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF\u0600-\u06FF\u0400-\u04FF\u0900-\u097F]"
+)
+LATIN_TOKEN_RE = re.compile(r"[a-z0-9]+")
+BACKTICK_SPAN_RE = re.compile(r"`([^`\n]{2,80})`")
+CLI_FLAG_RE = re.compile(r"(?:^|(?<=\s))(--[a-zA-Z0-9][a-zA-Z0-9_-]*)")
+IDENT_RE = re.compile(
+    r"\b(?:[a-zA-Z0-9]+_[a-zA-Z0-9_]+|[a-z]+(?:[A-Z][a-z0-9]+)+|"
+    r"[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+|v?\d+\.\d+(?:\.\d+)?|"
+    r"[A-Za-z]+-[A-Za-z0-9.-]+)\b"
+)
+NUMBER_TOKEN_RE = re.compile(r"\b\d+(?:\.\d+)?\b")
+LINE_INDEX_PREFIX_RE = re.compile(r"^\s*\d+\.\s+")
+
+STOPWORDS = frozenset(
+    {
+        "the", "and", "for", "that", "this", "with", "from", "are", "was", "were",
+        "have", "has", "had", "not", "but", "what", "which", "when", "where", "who",
+        "how", "why", "can", "will", "into", "about", "than", "then", "them", "they",
+        "their", "there", "here", "does", "did", "its", "any", "all", "only", "also",
+    }
+)
+
+EXCLUDED_DIRS = frozenset(
+    {
+        ".git", "node_modules", ".venv", "venv", "env", "dist", "build",
+        "__pycache__", ".obsidian", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    }
+)
+
+DEFAULT_PATTERN = "*.md,*.html,*.txt,*.json,*.jsonl,*.csv"
+DEFAULT_LABELS_SPEC = (
+    "architecture:Architecture & specs|cli:CLI scripts & commands|docs:General prose & guides"
+)
 
 DEFAULT_RUBRIC_CRITERIA = [
     "Single-sentence stub lacking concrete versions, CLI commands, or architectural details",
@@ -52,236 +115,1463 @@ DEFAULT_RELEVANCE_CRITERIA = [
     "Primary authoritative specification directly answering the target query",
 ]
 
+VALID_MODES = frozenset({"rubric", "contradiction", "shortlist", "classify"})
 
-def chunk_markdown_file(
-    file_path: Path,
-    max_chars: int = 1200,
-    min_merge_chars: int = 220,
-    whole_file: bool = False,
-) -> List[Dict[str, Any]]:
-    """Split a file into fence-safe, heading-aware chunks (<= max_chars) with 1-based line ranges."""
+_CACHE_LOCK = threading.RLock()
+_MODEL_CACHE: Dict[str, Tuple[Any, str]] = {}
+
+
+# ---------------------------------------------------------------------------
+# Runtime Environment, Device & Model Cache Management
+# ---------------------------------------------------------------------------
+
+
+def _pkg_version(dist_name: str, module_name: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+    mod = module_name or dist_name
+    spec = importlib.util.find_spec(mod)
+    if spec is None:
+        return False, None
     try:
-        raw_text = file_path.read_text(encoding="utf-8", errors="replace")
+        return True, importlib.metadata.version(dist_name)
+    except importlib.metadata.PackageNotFoundError:
+        return True, "unknown"
+
+
+def _recommended_cpu_threads() -> int:
+    env_val = os.environ.get("LAYA_THREADS", "").strip()
+    if env_val.isdigit() and int(env_val) >= 1:
+        return int(env_val)
+    return max(1, min(10, (os.cpu_count() or 2) // 2))
+
+
+def _configure_cpu_threads(torch_mod: Any) -> int:
+    target = _recommended_cpu_threads()
+    try:
+        if torch_mod.get_num_threads() != target:
+            torch_mod.set_num_threads(target)
+    except RuntimeError as exc:
+        print(f"[XLaya] Warning: could not set torch CPU threads: {exc}", file=sys.stderr)
+    return int(torch_mod.get_num_threads())
+
+
+def _resolve_device(device: str = "auto") -> str:
+    req = (device or "auto").strip().lower()
+    try:
+        import torch  # type: ignore
+    except ImportError:
+        return "cpu"
+
+    mps_ok = bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+    if req in ("", "auto"):
+        resolved = "cuda" if torch.cuda.is_available() else ("mps" if mps_ok else "cpu")
+    elif req.startswith("cuda") and not torch.cuda.is_available():
+        print("[XLaya] Warning: CUDA requested but unavailable; falling back to CPU.", file=sys.stderr)
+        resolved = "cpu"
+    elif req == "mps" and not mps_ok:
+        print("[XLaya] Warning: MPS requested but unavailable; falling back to CPU.", file=sys.stderr)
+        resolved = "cpu"
+    else:
+        resolved = req
+
+    if resolved == "cpu":
+        _configure_cpu_threads(torch)
+    return resolved
+
+
+def _normalize_model_key(name: str) -> str:
+    raw = name.strip().lower()
+    if raw in ("en", "english"):
+        return "english"
+    if raw in ("multi", "multilingual", "ml"):
+        return "multilingual"
+    if raw.startswith("vega:"):
+        return raw
+    raise ValueError(f"Unsupported model key {name!r}; expected 'en', 'english', 'multi', or 'multilingual'.")
+
+
+def _has_valid_laya_checkpoint(snap_dir: str, subfolder: Optional[str]) -> bool:
+    base = Path(snap_dir) / subfolder if subfolder else Path(snap_dir)
+    return (base / "rl_agent_config.json").is_file() and (base / "model.safetensors").is_file()
+
+
+def _resolve_local_laya_snapshot(subfolder: Optional[str]) -> Optional[str]:
+    prefix = f"{subfolder}/" if subfolder else ""
+    hf_cache = os.environ.get("HF_HUB_CACHE") or os.path.join(
+        os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface"),
+        "hub",
+    )
+    repo_dir = Path(hf_cache) / "models--convaiinnovations--laya"
+    snaps_dir = repo_dir / "snapshots"
+
+    if snaps_dir.is_dir():
+        ref_main = repo_dir / "refs" / "main"
+        if ref_main.is_file():
+            try:
+                rev = ref_main.read_text(encoding="utf-8").strip()
+                cand = snaps_dir / rev
+                if cand.is_dir() and _has_valid_laya_checkpoint(str(cand), subfolder):
+                    return str(cand)
+            except OSError as exc:
+                print(f"[XLaya] Warning: could not read HF refs/main: {exc}", file=sys.stderr)
+
+        try:
+            candidates = sorted(
+                (p for p in snaps_dir.iterdir() if p.is_dir()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for cand in candidates:
+                if _has_valid_laya_checkpoint(str(cand), subfolder):
+                    return str(cand)
+        except OSError as exc:
+            print(f"[XLaya] Warning: could not scan HF snapshots: {exc}", file=sys.stderr)
+
+    try:
+        from huggingface_hub import snapshot_download  # type: ignore
+
+        allow = [prefix + p for p in ("rl_agent_config.json", "model.safetensors", "tokenizer/*", "encoder/*")]
+        snap_dir = snapshot_download(
+            "convaiinnovations/laya",
+            local_files_only=True,
+            allow_patterns=allow,
+        )
+        if snap_dir and _has_valid_laya_checkpoint(snap_dir, subfolder):
+            return snap_dir
+    except Exception:  # nosec B110 - offline snapshot miss falls back cleanly to laya.load
+        return None
+    return None
+
+
+def _load_laya_checkpoint(canon_key: str, resolved_device: str, cache: bool = True) -> Any:
+    import laya  # type: ignore
+
+    with _CACHE_LOCK:
+        cached = _MODEL_CACHE.get(canon_key)
+        if cached is not None and cached[1] == resolved_device:
+            return cached[0]
+
+        subfolder = None if canon_key == "english" else "multilingual"
+        local_snap = _resolve_local_laya_snapshot(subfolder)
+        target_id = local_snap if local_snap is not None else "convaiinnovations/laya"
+
+        with warnings.catch_warnings(), contextlib.redirect_stdout(sys.stderr):
+            warnings.simplefilter("ignore", RuntimeWarning)
+            warnings.simplefilter("ignore", UserWarning)
+            try:
+                agent = laya.load(target_id, subfolder=subfolder, device=resolved_device)
+            except Exception as exc:
+                if local_snap is not None:
+                    print(
+                        f"[XLaya] Local snapshot load failed ({exc}); retrying via repo id.",
+                        file=sys.stderr,
+                    )
+                    agent = laya.load("convaiinnovations/laya", subfolder=subfolder, device=resolved_device)
+                else:
+                    raise
+
+        if cache:
+            _MODEL_CACHE[canon_key] = (agent, resolved_device)
+        return agent
+
+
+def _resolve_local_vega_snapshot(vega_model: str) -> Optional[str]:
+    variant_map = {"0.8b": "", "08b": "", "4b": "Qwen3.5-4B", "gemma-1b": "gemma-3-1b-it"}
+    key = (vega_model or "0.8b").strip().lower()
+    if key not in variant_map:
+        return None
+    subfolder = variant_map[key]
+    hf_cache = os.environ.get("HF_HUB_CACHE") or os.path.join(
+        os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface"),
+        "hub",
+    )
+    snaps_dir = Path(hf_cache) / "models--nandakishorm--vega-U" / "snapshots"
+    if not snaps_dir.is_dir():
+        return None
+    try:
+        candidates = sorted(
+            (p for p in snaps_dir.iterdir() if p.is_dir()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+        for cand in candidates:
+            target = cand / subfolder if subfolder else cand
+            if (target / "vega_config.json").is_file() and (target / "engine.safetensors").is_file():
+                return str(target)
     except OSError as exc:
+        print(f"[XLaya] Warning: could not scan Vega HF snapshots: {exc}", file=sys.stderr)
+    return None
+
+
+def _load_vega_checkpoint(vega_model: str, resolved_device: str, cache: bool = True) -> Any:
+    import laya  # type: ignore
+
+    cache_key = f"vega:{vega_model}"
+    with _CACHE_LOCK:
+        cached = _MODEL_CACHE.get(cache_key)
+        if cached is not None and cached[1] == resolved_device:
+            return cached[0]
+
+        local_vega = _resolve_local_vega_snapshot(vega_model)
+        vega_target = local_vega if local_vega is not None else vega_model
+        with warnings.catch_warnings(), contextlib.redirect_stdout(sys.stderr):
+            warnings.simplefilter("ignore", RuntimeWarning)
+            warnings.simplefilter("ignore", UserWarning)
+            try:
+                agent = laya.load(vegaml=vega_target, device=resolved_device)
+            except Exception as exc:
+                if local_vega is not None:
+                    print(
+                        f"[XLaya] Local Vega snapshot load failed ({exc}); retrying via hub id.",
+                        file=sys.stderr,
+                    )
+                    agent = laya.load(vegaml=vega_model, device=resolved_device)
+                else:
+                    raise
+
+        if cache:
+            _MODEL_CACHE[cache_key] = (agent, resolved_device)
+        return agent
+
+
+def get_status() -> Dict[str, Any]:
+    """Return current runtime, GPU/CPU, Laya/VegaML availability, and resident cache status."""
+    laya_ok, laya_ver = _pkg_version("laya", "laya")
+    vega_ok, vega_ver = _pkg_version("vegaml", "vegaml")
+
+    torch_ver: Optional[str] = None
+    cuda_ok = False
+    mps_ok = False
+    gpu_name: Optional[str] = None
+    cpu_threads = _recommended_cpu_threads()
+    default_dev = "cpu"
+
+    try:
+        import torch  # type: ignore
+
+        torch_ver = str(torch.__version__)
+        cuda_ok = bool(torch.cuda.is_available())
+        mps_ok = bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+        cpu_threads = _configure_cpu_threads(torch)
+        if cuda_ok:
+            default_dev = "cuda"
+            gpu_name = str(torch.cuda.get_device_name(0))
+        elif mps_ok:
+            default_dev = "mps"
+        else:
+            default_dev = "cpu"
+    except ImportError:
+        pass
+
+    with _CACHE_LOCK:
+        loaded = list(_MODEL_CACHE.keys())
+
+    return {
+        "ok": True,
+        "version": __version__,
+        "python": sys.version.split()[0],
+        "laya_available": laya_ok,
+        "laya_version": laya_ver,
+        "vegaml_available": vega_ok,
+        "vegaml_version": vega_ver,
+        "torch_version": torch_ver,
+        "cuda_available": cuda_ok,
+        "mps_available": mps_ok,
+        "device": default_dev,
+        "gpu_name": gpu_name,
+        "cpu_threads": cpu_threads,
+        "loaded_models": loaded,
+    }
+
+
+def preload_models(
+    models: Optional[Sequence[str]] = None,
+    vega: bool = False,
+    vega_model: str = "0.8b",
+    device: str = "auto",
+) -> Dict[str, Any]:
+    """Preload requested ModernBERT and/or VegaML models into the thread-safe cache."""
+    t0 = time.perf_counter()
+    resolved_device = _resolve_device(device)
+    req_models = ["english"] if models is None else list(models)
+    loaded_now: List[str] = []
+
+    laya_ok, _ = _pkg_version("laya", "laya")
+    if not laya_ok:
+        return {
+            "ok": False,
+            "error": "laya package is not installed in this Python environment.",
+            "loaded": [],
+            "loaded_models": [],
+            "device": resolved_device,
+            "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        }
+
+    with _CACHE_LOCK:
+        for item in req_models:
+            key = _normalize_model_key(item)
+            if key.startswith("vega:"):
+                v_name = key.split(":", 1)[1]
+                _load_vega_checkpoint(v_name, resolved_device, cache=True)
+                loaded_now.append(key)
+            else:
+                _load_laya_checkpoint(key, resolved_device, cache=True)
+                loaded_now.append(key)
+
+        if vega:
+            v_key = f"vega:{vega_model}"
+            if v_key not in loaded_now:
+                _load_vega_checkpoint(vega_model, resolved_device, cache=True)
+                loaded_now.append(v_key)
+
+        all_loaded = list(_MODEL_CACHE.keys())
+
+    return {
+        "ok": True,
+        "loaded": loaded_now,
+        "loaded_models": all_loaded,
+        "device": resolved_device,
+        "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+    }
+
+
+def unload_models() -> Dict[str, Any]:
+    """Evict all cached models and reclaim CPU RAM and CUDA VRAM."""
+    with _CACHE_LOCK:
+        unloaded = list(_MODEL_CACHE.keys())
+        _MODEL_CACHE.clear()
+
+    gc.collect()
+    try:
+        import torch  # type: ignore
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+    return {
+        "ok": True,
+        "unloaded": unloaded,
+        "loaded_models": [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Language Detection & Answer Sanitization Helpers
+# ---------------------------------------------------------------------------
+
+
+def _flatten_text(obj: Any) -> str:
+    if obj is None:
+        return ""
+    if isinstance(obj, str):
+        return obj
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
+    if isinstance(obj, dict):
+        return " ".join(f"{_flatten_text(k)} {_flatten_text(v)}" for k, v in obj.items())
+    if isinstance(obj, (list, tuple, set)):
+        return " ".join(_flatten_text(x) for x in obj)
+    return str(obj)
+
+
+def _strip_code_and_cli_tokens(text: str) -> str:
+    no_fences = re.sub(r"(?ms)^[ ]{0,3}(`{3,}|~{3,})[^\n]*\n.*?\n[ ]{0,3}\1[ \t]*$", " ", text)
+    no_inline = re.sub(r"`[^`\n]+`", " ", no_fences)
+    no_flags = re.sub(r"(?:--[A-Za-z0-9_-]+|<[A-Za-z0-9_./:-]+>|\*\.[\w]+)", " ", no_inline)
+    return no_flags
+
+
+def _is_english_text(state_or_text: Any) -> bool:
+    flat = _flatten_text(state_or_text)
+    if not flat.strip():
+        return True
+    if NON_ENGLISH_SCRIPT_RE.search(flat):
+        return False
+    prose = _strip_code_and_cli_tokens(flat)
+    has_non_ascii_alpha = any(ord(ch) >= 128 and ch.isalpha() for ch in prose)
+    if not has_non_ascii_alpha:
+        prose_words = re.findall(r"\b[A-Za-z]{2,}\b", prose)
+        if len(prose_words) < 6:
+            return True
+    if "laya" not in sys.modules:
+        # Avoid paying ~2.5s cold `import laya` + `torch` inside Stage 0 chunking;
+        # `NON_ENGLISH_SCRIPT_RE` + Latin diacritic check (`has_non_ascii_alpha`) covers offline Stage 0.
+        return not has_non_ascii_alpha
+    try:
+        import laya  # type: ignore
+
+        probe = prose if prose.strip() else flat
+        return bool(laya.is_english(probe))
+    except ImportError:
+        return True
+
+
+def _questions_head_text(questions: Dict[str, Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for qdef in questions.values():
+        if not isinstance(qdef, dict):
+            continue
+        instr = qdef.get("instructions")
+        if instr:
+            parts.append(str(instr))
+        crit = qdef.get("criteria")
+        if isinstance(crit, dict):
+            for k, v in crit.items():
+                parts.append(str(k))
+                if v is not None:
+                    parts.append(str(v))
+        elif isinstance(crit, (list, tuple)):
+            parts.extend(str(x) for x in crit if x is not None)
+    return " ".join(parts)
+
+
+def _sanitize_prediction(pred: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(pred)
+    raw_answers = pred.get("answers")
+    if isinstance(raw_answers, dict):
+        clean_answers: Dict[str, Any] = {}
+        for qid, ans in raw_answers.items():
+            if isinstance(ans, dict):
+                clean_ans = {k: v for k, v in ans.items() if k not in ("unbound", "action")}
+                clean_answers[qid] = clean_ans
+            else:
+                clean_answers[qid] = ans
+        out["answers"] = clean_answers
+    return out
+
+
+def _strip_noul_labels_for_vega(questions: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    cleaned: Dict[str, Dict[str, Any]] = {}
+    for qid, qdef in questions.items():
+        if isinstance(qdef, dict) and "labels" in qdef:
+            cleaned[qid] = {k: v for k, v in qdef.items() if k != "labels"}
+        else:
+            cleaned[qid] = qdef
+    return cleaned
+
+
+# ---------------------------------------------------------------------------
+# Direct Prediction Seam (MCP Server & Programmatic Python Entry Point)
+# ---------------------------------------------------------------------------
+
+
+def predict_direct(
+    state: Any = None,
+    questions: Optional[Dict[str, Dict[str, Any]]] = None,
+    *,
+    states: Optional[List[Any]] = None,
+    model: str = "auto",
+    vega: bool = False,
+    vega_model: str = "0.8b",
+    device: str = "auto",
+    batch_size: int = 32,
+    group_size: int = 16,
+) -> Dict[str, Any]:
+    """Run direct single-state or batched neural/conformal prediction."""
+    if not questions or not isinstance(questions, dict):
+        raise ValueError("predict_direct requires a non-empty 'questions' dictionary.")
+
+    is_batch = states is not None
+    if not is_batch and state is None:
+        raise ValueError("predict_direct requires either 'state' or 'states'.")
+
+    items: List[Any] = list(states) if is_batch else [state]
+    t0 = time.perf_counter()
+    resolved_device = _resolve_device(device)
+
+    import laya  # type: ignore
+
+    if vega:
+        v_agent = _load_vega_checkpoint(vega_model, resolved_device, cache=True)
+        v_questions = _strip_noul_labels_for_vega(questions)
+        if not items:
+            raw_preds: List[Dict[str, Any]] = []
+        elif len(items) == 1:
+            raw_preds = [v_agent.predict(items[0], v_questions)]
+        else:
+            raw_preds = v_agent.predict_batch(items, v_questions, batch_size=batch_size)
+        sanitized = [_sanitize_prediction(p) for p in raw_preds]
+        payload: Dict[str, Any] = {
+            "ok": True,
+            "model": f"vega:{vega_model}",
+            "device": resolved_device,
+            "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        }
+        if is_batch:
+            payload["results"] = sanitized
+        else:
+            payload["result"] = sanitized[0]
+        return payload
+
+    needs_tournament = any(
+        isinstance(qdef, dict)
+        and qdef.get("type") == "choice"
+        and len(qdef.get("criteria") or {}) > 20
+        for qdef in questions.values()
+    )
+
+    req_model = (model or "auto").strip().lower()
+    if req_model not in ("", "auto"):
+        norm_req = _normalize_model_key(req_model)
+        if norm_req not in ("english", "multilingual"):
+            raise ValueError(f"Unsupported predict_direct model {model!r}; expected 'auto', 'en', or 'multi'.")
+    else:
+        req_model = "auto"
+        norm_req = "auto"
+    head_en = _is_english_text(_questions_head_text(questions))
+
+    en_indices: List[int] = []
+    ml_indices: List[int] = []
+    if norm_req == "english":
+        en_indices = list(range(len(items)))
+    elif norm_req == "multilingual":
+        ml_indices = list(range(len(items)))
+    elif not head_en:
+        ml_indices = list(range(len(items)))
+    else:
+        for idx, item in enumerate(items):
+            if _is_english_text(item):
+                en_indices.append(idx)
+            else:
+                ml_indices.append(idx)
+
+    merged: List[Optional[Dict[str, Any]]] = [None] * len(items)
+    for bucket_key, bucket_idxs in (("english", en_indices), ("multilingual", ml_indices)):
+        if not bucket_idxs:
+            continue
+        agent = _load_laya_checkpoint(bucket_key, resolved_device, cache=True)
+        bucket_states = [items[i] for i in bucket_idxs]
+        if needs_tournament:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                bucket_preds = [
+                    laya.predict_tournament(agent, s, questions, group_size=group_size)
+                    for s in bucket_states
+                ]
+        elif len(bucket_states) == 1:
+            bucket_preds = [agent.predict(bucket_states[0], questions)]
+        else:
+            bucket_preds = agent.predict_batch(
+                bucket_states,
+                questions,
+                batch_size=batch_size,
+                sort_by_length=True,
+            )
+        for orig_i, pred in zip(bucket_idxs, bucket_preds):
+            merged[orig_i] = _sanitize_prediction(pred)
+
+    final_preds = [p for p in merged if p is not None]
+    used_model = (
+        "english"
+        if not ml_indices
+        else ("multilingual" if not en_indices else "bilingual(per-state)")
+    )
+    payload = {
+        "ok": True,
+        "model": used_model,
+        "language_routing": {
+            "english": len(en_indices),
+            "multilingual": len(ml_indices),
+            "head_guard_multilingual": not head_en and req_model == "auto",
+        },
+        "device": resolved_device,
+        "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+    }
+    if is_batch:
+        payload["results"] = final_preds
+    else:
+        payload["result"] = final_preds[0]
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Stage 0: Multi-Format Fence-Safe Chunker & Breadcrumb Engine
+# ---------------------------------------------------------------------------
+
+
+def _estimate_tokens(text: str) -> float:
+    ascii_count = sum(1 for ch in text if ord(ch) < 128)
+    non_ascii = len(text) - ascii_count
+    punct = sum(1 for ch in text if ch in "|`{}[]()<>:;=/\\_-*#~")
+    return (ascii_count / 3.8) + (non_ascii * 0.9) + (punct * 0.35)
+
+
+def _token_budget_for_text(text: str) -> float:
+    return 380.0 if _is_english_text(text) else 780.0
+
+
+def _fits_budget(text: str, max_chars: int) -> bool:
+    if len(text) > max_chars:
+        return False
+    est = _estimate_tokens(text)
+    if est <= 380.0:
+        return True
+    if est > 780.0:
+        return False
+    return est <= _token_budget_for_text(text)
+
+
+def _check_fence_transition(
+    line: str,
+    fence_state: Optional[Tuple[str, int]],
+) -> Optional[Tuple[str, int]]:
+    m = FENCE_OPEN_RE.match(line)
+    if not m:
+        return fence_state
+    run, rest = m.group(1), m.group(2)
+    ch = run[0]
+    run_len = len(run)
+    if fence_state is None:
+        if ch == "`" and "`" in rest:
+            return None
+        return (ch, run_len)
+    open_ch, open_len = fence_state
+    if ch == open_ch and run_len >= open_len and not rest.strip():
+        return None
+    return fence_state
+
+
+def _make_chunk(
+    file_path: Path,
+    rel_prefix: str,
+    heading: str,
+    start_line: int,
+    end_line: int,
+    text: str,
+    ref_suffix: Optional[str] = None,
+) -> Dict[str, Any]:
+    suffix = ref_suffix if ref_suffix is not None else f"#L{start_line}-L{end_line}"
+    return {
+        "file": str(file_path.as_posix()),
+        "name": file_path.name,
+        "heading": heading,
+        "start_line": start_line,
+        "end_line": end_line,
+        "ref": f"{rel_prefix}{suffix}",
+        "text": text,
+    }
+
+
+def _split_section_lines(
+    file_path: Path,
+    rel_prefix: str,
+    full_breadcrumb: str,
+    parent_breadcrumb: str,
+    start_ln: int,
+    s_lines: List[str],
+    max_chars: int,
+) -> List[Dict[str, Any]]:
+    raw_body = "\n".join(s_lines).strip()
+    if not raw_body:
+        return []
+
+    first_prefix = f"[{parent_breadcrumb}]\n" if parent_breadcrumb else ""
+    cont_prefix = f"[{full_breadcrumb}]\n" if full_breadcrumb else ""
+
+    first_candidate = first_prefix + raw_body
+    if _fits_budget(first_candidate, max_chars):
         return [
-            {
-                "file": str(file_path.as_posix()),
-                "name": file_path.name,
-                "heading": "<read_error>",
-                "start_line": 1,
-                "end_line": 1,
-                "ref": f"{file_path.name}#L1-L1",
-                "text": f"Error reading file: {exc}",
-            }
+            _make_chunk(
+                file_path,
+                rel_prefix,
+                full_breadcrumb,
+                start_ln,
+                start_ln + len(s_lines) - 1,
+                first_candidate,
+            )
         ]
 
+    # Group lines into fence-safe paragraph blocks separated by blank lines outside fences
+    blocks: List[Tuple[int, int, List[str]]] = []
+    cur_lines: List[str] = []
+    cur_start = start_ln
+    fence_state: Optional[Tuple[str, int]] = None
+
+    for idx_off, line in enumerate(s_lines):
+        ln_no = start_ln + idx_off
+        was_in_fence = fence_state is not None
+        fence_state = _check_fence_transition(line, fence_state)
+        is_blank_outside = (not was_in_fence) and (fence_state is None) and (not line.strip())
+
+        if is_blank_outside:
+            if cur_lines:
+                blocks.append((cur_start, ln_no - 1, cur_lines))
+                cur_lines = []
+            cur_start = ln_no + 1
+        else:
+            if not cur_lines:
+                cur_start = ln_no
+            cur_lines.append(line)
+
+    if cur_lines:
+        blocks.append((cur_start, start_ln + len(s_lines) - 1, cur_lines))
+
+    chunks: List[Dict[str, Any]] = []
+    acc_lines: List[str] = []
+    acc_start = start_ln
+    acc_end = start_ln
+    is_first_emit = True
+
+    def emit_accumulated() -> None:
+        nonlocal acc_lines, is_first_emit
+        if not acc_lines:
+            return
+        body = "\n".join(acc_lines).strip()
+        acc_lines = []
+        if not body:
+            return
+        pfx = first_prefix if is_first_emit else cont_prefix
+        is_first_emit = False
+        chunks.append(
+            _make_chunk(
+                file_path,
+                rel_prefix,
+                full_breadcrumb,
+                acc_start,
+                acc_end,
+                (pfx + body)[:max_chars],
+            )
+        )
+
+    for b_start, b_end, b_lines in blocks:
+        b_text = "\n".join(b_lines)
+        pfx = first_prefix if (is_first_emit and not acc_lines) else cont_prefix
+        combined = ("\n\n".join(["\n".join(acc_lines), b_text]) if acc_lines else b_text).strip()
+
+        if _fits_budget(pfx + combined, max_chars):
+            if not acc_lines:
+                acc_start = b_start
+            acc_lines = (acc_lines + [""] + b_lines) if acc_lines else list(b_lines)
+            acc_end = b_end
+            continue
+
+        emit_accumulated()
+        pfx = first_prefix if is_first_emit else cont_prefix
+        if _fits_budget(pfx + b_text.strip(), max_chars):
+            acc_start = b_start
+            acc_end = b_end
+            acc_lines = list(b_lines)
+            continue
+
+        # Oversized single block (e.g., large code fence or GFM table): split on line boundaries
+        line_buf: List[str] = []
+        lb_start = b_start
+        for l_off, single_line in enumerate(b_lines):
+            cur_ln = b_start + l_off
+            pfx = first_prefix if is_first_emit else cont_prefix
+            line_budget = max(128, max_chars - len(pfx))
+
+            if len(single_line) > line_budget:
+                if line_buf:
+                    body = "\n".join(line_buf).strip()
+                    if body:
+                        chunks.append(
+                            _make_chunk(
+                                file_path,
+                                rel_prefix,
+                                full_breadcrumb,
+                                lb_start,
+                                cur_ln - 1,
+                                (pfx + body)[:max_chars],
+                            )
+                        )
+                        is_first_emit = False
+                    line_buf = []
+
+                s_strip = single_line.lstrip()
+                row_head = (
+                    ("|" + s_strip.split("|")[1] + " | ")[:60]
+                    if s_strip.startswith("|") and len(s_strip.split("|")) > 1
+                    else ""
+                )
+                for pos in range(0, len(single_line), max(96, line_budget - len(row_head))):
+                    pfx = first_prefix if is_first_emit else cont_prefix
+                    step = max(96, max_chars - len(pfx) - len(row_head))
+                    seg = single_line[pos:pos + step]
+                    seg_txt = (pfx + seg) if pos == 0 else (pfx + row_head + seg)
+                    chunks.append(
+                        _make_chunk(
+                            file_path,
+                            rel_prefix,
+                            full_breadcrumb,
+                            cur_ln,
+                            cur_ln,
+                            seg_txt[:max_chars],
+                        )
+                    )
+                    is_first_emit = False
+                lb_start = cur_ln + 1
+                continue
+
+            trial = "\n".join(line_buf + [single_line]).strip()
+            if line_buf and not _fits_budget(pfx + trial, max_chars):
+                body = "\n".join(line_buf).strip()
+                if body:
+                    chunks.append(
+                        _make_chunk(
+                            file_path,
+                            rel_prefix,
+                            full_breadcrumb,
+                            lb_start,
+                            cur_ln - 1,
+                            (pfx + body)[:max_chars],
+                        )
+                    )
+                    is_first_emit = False
+                line_buf = [single_line]
+                lb_start = cur_ln
+            else:
+                if not line_buf:
+                    lb_start = cur_ln
+                line_buf.append(single_line)
+
+        if line_buf:
+            pfx = first_prefix if is_first_emit else cont_prefix
+            body = "\n".join(line_buf).strip()
+            if body:
+                chunks.append(
+                    _make_chunk(
+                        file_path,
+                        rel_prefix,
+                        full_breadcrumb,
+                        lb_start,
+                        b_end,
+                        (pfx + body)[:max_chars],
+                    )
+                )
+                is_first_emit = False
+
+    emit_accumulated()
+    return chunks
+
+
+def _chunk_markdown_or_text(
+    file_path: Path,
+    raw_text: str,
+    rel_prefix: str,
+    max_chars: int,
+    min_merge_chars: int = 180,
+) -> List[Dict[str, Any]]:
     lines = raw_text.splitlines()
     if not lines:
         return []
 
-    if whole_file:
-        clipped = raw_text[:max_chars]
-        return [
-            {
-                "file": str(file_path.as_posix()),
-                "name": file_path.name,
-                "heading": file_path.name,
-                "start_line": 1,
-                "end_line": len(lines),
-                "ref": f"{file_path.name}#L1-L{len(lines)}",
-                "text": clipped,
-            }
-        ]
-
-    raw_sections: List[Tuple[str, int, int, List[str]]] = []
-    current_heading = file_path.name
+    raw_sections: List[Tuple[str, str, int, int, List[str]]] = []
+    heading_stack: Dict[int, str] = {}
+    cur_full = file_path.name
+    cur_parent = ""
     sec_start = 1
     sec_lines: List[str] = []
-    in_fence = False
+    fence_state: Optional[Tuple[str, int]] = None
 
     for idx, line in enumerate(lines, start=1):
-        if FENCE_RE.match(line):
-            in_fence = not in_fence
+        was_in_fence = fence_state is not None
+        fence_state = _check_fence_transition(line, fence_state)
+        in_fence_now = was_in_fence or (fence_state is not None)
 
-        match = None if in_fence else HEADING_RE.match(line)
-        if match and sec_lines:
-            raw_sections.append((current_heading, sec_start, idx - 1, sec_lines))
-            current_heading = match.group(2).strip()
+        h_match = None if in_fence_now else HEADING_RE.match(line)
+        if h_match:
+            if sec_lines and any(x.strip() for x in sec_lines):
+                raw_sections.append((cur_full, cur_parent, sec_start, idx - 1, sec_lines))
+            level = len(h_match.group(1))
+            title = h_match.group(2).rstrip("#").strip() or file_path.name
+            for k in [existing for existing in heading_stack if existing >= level]:
+                del heading_stack[k]
+            heading_stack[level] = title
+            ordered_levels = sorted(heading_stack)
+            cur_full = " > ".join(heading_stack[k] for k in ordered_levels)
+            cur_parent = " > ".join(heading_stack[k] for k in ordered_levels if k < level)
             sec_start = idx
             sec_lines = [line]
         else:
-            if match and not sec_lines:
-                current_heading = match.group(2).strip()
-                sec_start = idx
             sec_lines.append(line)
 
-    if sec_lines:
-        raw_sections.append((current_heading, sec_start, len(lines), sec_lines))
+    if sec_lines and any(x.strip() for x in sec_lines):
+        raw_sections.append((cur_full, cur_parent, sec_start, len(lines), sec_lines))
 
-    # Merge tiny intro/header stubs (< min_merge_chars) into the following section when total <= max_chars
-    sections: List[Tuple[str, int, int, List[str]]] = []
+    # Merge pre-heading frontmatter stubs or drop empty parent-heading-only stubs covered by breadcrumb
+    merged_sections: List[Tuple[str, str, int, int, List[str]]] = []
     i = 0
     while i < len(raw_sections):
-        h, s_ln, e_ln, s_lns = raw_sections[i]
-        text_len = sum(len(x) + 1 for x in s_lns)
-        if text_len < min_merge_chars and (i + 1) < len(raw_sections):
-            nh, _, ne_ln, ns_lns = raw_sections[i + 1]
-            combined_len = text_len + sum(len(x) + 1 for x in ns_lns)
-            if combined_len <= max_chars:
-                merged_heading = f"{h} > {nh}" if h != file_path.name else nh
-                raw_sections[i + 1] = (merged_heading, s_ln, ne_ln, s_lns + ns_lns)
+        full_h, parent_h, s_ln, e_ln, s_lns = raw_sections[i]
+        starts_with_heading = bool(s_lns and HEADING_RE.match(s_lns[0]))
+        non_rule_body = [
+            ln for ln in (s_lns[1:] if starts_with_heading else s_lns)
+            if ln.strip() and not (len(ln.strip()) >= 3 and set(ln.strip()) <= {"-", "*", "_"})
+        ]
+        if starts_with_heading and not non_rule_body and (i + 1) < len(raw_sections):
+            n_full, n_parent, _, ne_ln, ns_lns = raw_sections[i + 1]
+            if n_parent.startswith(full_h):
                 i += 1
                 continue
-        sections.append((h, s_ln, e_ln, s_lns))
+            combined_text = "\n".join(s_lns + ns_lns)
+            pfx = f"[{parent_h}]\n" if parent_h else ""
+            if _fits_budget(pfx + combined_text, max_chars):
+                raw_sections[i + 1] = (n_full, parent_h or n_parent, s_ln, ne_ln, s_lns + ns_lns)
+                i += 1
+                continue
+        elif (
+            not starts_with_heading
+            and sum(len(x) + 1 for x in s_lns) < min_merge_chars
+            and (i + 1) < len(raw_sections)
+        ):
+            n_full, n_parent, _, ne_ln, ns_lns = raw_sections[i + 1]
+            combined_text = "\n".join(s_lns + ns_lns)
+            pfx = f"[{parent_h}]\n" if parent_h else ""
+            if _fits_budget(pfx + combined_text, max_chars):
+                raw_sections[i + 1] = (n_full, parent_h or n_parent, s_ln, ne_ln, s_lns + ns_lns)
+                i += 1
+                continue
+        merged_sections.append((full_h, parent_h, s_ln, e_ln, s_lns))
         i += 1
 
     chunks: List[Dict[str, Any]] = []
-    for heading, start_ln, end_ln, s_lines in sections:
-        block_text = "\n".join(s_lines).strip()
-        if not block_text:
-            continue
-        if len(block_text) <= max_chars:
-            chunks.append(
-                {
-                    "file": str(file_path.as_posix()),
-                    "name": file_path.name,
-                    "heading": heading,
-                    "start_line": start_ln,
-                    "end_line": end_ln,
-                    "ref": f"{file_path.name}#L{start_ln}-L{end_ln}",
-                    "text": block_text,
-                }
+    for full_h, parent_h, s_ln, _e_ln, s_lns in merged_sections:
+        chunks.extend(
+            _split_section_lines(
+                file_path=file_path,
+                rel_prefix=rel_prefix,
+                full_breadcrumb=full_h,
+                parent_breadcrumb=parent_h,
+                start_ln=s_ln,
+                s_lines=s_lns,
+                max_chars=max_chars,
             )
-            continue
-
-        # Subdivide oversized section on paragraph boundaries while keeping line accuracy
-        prefix = f"[{heading}]\n"
-        budget = max(256, max_chars - len(prefix))
-        buf_lines: List[str] = []
-        buf_chars = 0
-        chunk_start = start_ln
-
-        for offset, s_line in enumerate(s_lines):
-            cur_ln = start_ln + offset
-            line_len = len(s_line) + 1
-            if len(s_line) > budget:
-                if buf_lines:
-                    body = "\n".join(buf_lines).strip()
-                    if body:
-                        chunks.append(
-                            {
-                                "file": str(file_path.as_posix()),
-                                "name": file_path.name,
-                                "heading": heading,
-                                "start_line": chunk_start,
-                                "end_line": cur_ln - 1,
-                                "ref": f"{file_path.name}#L{chunk_start}-L{cur_ln - 1}",
-                                "text": (prefix + body)[:max_chars],
-                            }
-                        )
-                    buf_lines = []
-                    buf_chars = 0
-
-                s_strip = s_line.lstrip()
-                if s_strip.startswith("|") and len(s_strip.split("|")) > 1:
-                    row_head = ("|" + s_strip.split("|")[1] + " | ")[:60]
-                else:
-                    row_head = ""
-
-                slice_budget = max(128, max_chars - len(prefix) - len(row_head))
-                for pos in range(0, len(s_line), slice_budget):
-                    segment = s_line[pos: pos + slice_budget]
-                    seg_text = (prefix + segment) if pos == 0 else (prefix + row_head + segment)
-                    chunks.append(
-                        {
-                            "file": str(file_path.as_posix()),
-                            "name": file_path.name,
-                            "heading": heading,
-                            "start_line": cur_ln,
-                            "end_line": cur_ln,
-                            "ref": f"{file_path.name}#L{cur_ln}-L{cur_ln}",
-                            "text": seg_text[:max_chars],
-                        }
-                    )
-                chunk_start = cur_ln + 1
-                continue
-
-            should_split = bool(buf_lines) and (buf_chars + line_len > budget)
-            if should_split:
-                body = "\n".join(buf_lines).strip()
-                if body:
-                    chunks.append(
-                        {
-                            "file": str(file_path.as_posix()),
-                            "name": file_path.name,
-                            "heading": heading,
-                            "start_line": chunk_start,
-                            "end_line": cur_ln - 1,
-                            "ref": f"{file_path.name}#L{chunk_start}-L{cur_ln - 1}",
-                            "text": (prefix + body)[:max_chars],
-                        }
-                    )
-                buf_lines = [s_line]
-                buf_chars = line_len
-                chunk_start = cur_ln
-            else:
-                buf_lines.append(s_line)
-                buf_chars += line_len
-
-        if buf_lines:
-            body = "\n".join(buf_lines).strip()
-            if body:
-                chunks.append(
-                    {
-                        "file": str(file_path.as_posix()),
-                        "name": file_path.name,
-                        "heading": heading,
-                        "start_line": chunk_start,
-                        "end_line": end_ln,
-                        "ref": f"{file_path.name}#L{chunk_start}-L{end_ln}",
-                        "text": (prefix + body)[:max_chars],
-                    }
-                )
-
+        )
     return chunks
 
 
-def collect_target_files(paths: List[str], pattern: str = "*.md") -> List[Path]:
-    """Resolve file or directory paths into a sorted list of target files."""
-    resolved: List[Path] = []
-    seen = set()
+def _strip_html_fragment(fragment: str) -> str:
+    cleaned = HTML_NOISE_RE.sub(" ", fragment)
+    cleaned = re.sub(r"<br\s*/?>", "\n", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"</(p|div|li|tr|section|article|h[1-6])>", "\n", cleaned, flags=re.IGNORECASE)
+    cleaned = HTML_TAG_RE.sub(" ", cleaned)
+    cleaned = html.unescape(cleaned)
+    out_lines = [" ".join(ln.split()) for ln in cleaned.splitlines()]
+    return "\n".join(ln for ln in out_lines if ln)
+
+
+def _chunk_html(
+    file_path: Path,
+    raw_text: str,
+    rel_prefix: str,
+    max_chars: int,
+) -> List[Dict[str, Any]]:
+    total_lines = max(1, len(raw_text.splitlines()))
+    matches = list(HTML_HEADING_RE.finditer(raw_text))
+    if not matches:
+        plain = _strip_html_fragment(raw_text)
+        if not plain:
+            return []
+        return _split_section_lines(
+            file_path,
+            rel_prefix,
+            file_path.name,
+            "",
+            1,
+            plain.splitlines(),
+            max_chars,
+        )
+
+    chunks: List[Dict[str, Any]] = []
+    heading_stack: Dict[int, str] = {}
+
+    if matches[0].start() > 0:
+        intro_html = raw_text[: matches[0].start()]
+        intro_txt = _strip_html_fragment(intro_html)
+        if intro_txt:
+            end_ln = max(1, raw_text.count("\n", 0, matches[0].start()) + 1)
+            chunks.append(
+                _make_chunk(file_path, rel_prefix, file_path.name, 1, end_ln, intro_txt[:max_chars])
+            )
+
+    for idx, m in enumerate(matches):
+        level = int(m.group(1))
+        h_title = _strip_html_fragment(m.group(2)).replace("\n", " ").strip() or file_path.name
+        for k in [existing for existing in heading_stack if existing >= level]:
+            del heading_stack[k]
+        heading_stack[level] = h_title
+        ordered = sorted(heading_stack)
+        full_b = " > ".join(heading_stack[k] for k in ordered)
+        parent_b = " > ".join(heading_stack[k] for k in ordered if k < level)
+
+        seg_start = m.start()
+        seg_end = matches[idx + 1].start() if (idx + 1) < len(matches) else len(raw_text)
+        start_ln = raw_text.count("\n", 0, seg_start) + 1
+        end_ln = min(total_lines, max(start_ln, raw_text.count("\n", 0, seg_end) + 1))
+
+        body_txt = _strip_html_fragment(raw_text[seg_start:seg_end])
+        if not body_txt:
+            continue
+        pfx = f"[{parent_b}]\n" if parent_b else ""
+        full_txt = pfx + body_txt
+        if _fits_budget(full_txt, max_chars):
+            chunks.append(_make_chunk(file_path, rel_prefix, full_b, start_ln, end_ln, full_txt))
+        else:
+            for pos in range(0, len(body_txt), max(256, max_chars - len(f"[{full_b}]\n"))):
+                sub_pfx = pfx if pos == 0 else f"[{full_b}]\n"
+                step = max(256, max_chars - len(sub_pfx))
+                sub = (sub_pfx + body_txt[pos:pos + step])[:max_chars]
+                chunks.append(_make_chunk(file_path, rel_prefix, full_b, start_ln, end_ln, sub))
+    return chunks
+
+
+def _format_record(obj: Any) -> str:
+    if isinstance(obj, dict):
+        parts: List[str] = []
+        for k, v in obj.items():
+            val_str = json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else str(v)
+            parts.append(f"{k}: {val_str}")
+        return " | ".join(parts)
+    return json.dumps(obj, ensure_ascii=False)
+
+
+def _chunk_jsonl(
+    file_path: Path,
+    raw_text: str,
+    rel_prefix: str,
+    max_chars: int,
+    limit_hint: int = 0,
+) -> List[Dict[str, Any]]:
+    chunks: List[Dict[str, Any]] = []
+    for ln_no, raw_line in enumerate(raw_text.splitlines(), start=1):
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        heading = f"{file_path.name} [L{ln_no}]"
+        try:
+            parsed = json.loads(stripped)
+            formatted = _format_record(parsed)
+            if isinstance(parsed, dict):
+                for key_cand in ("id", "name", "title", "heading", "slug"):
+                    if key_cand in parsed and parsed[key_cand]:
+                        heading = f"{file_path.name} [{parsed[key_cand]}]"
+                        break
+        except ValueError:
+            formatted = stripped
+
+        chunks.append(
+            _make_chunk(file_path, rel_prefix, heading, ln_no, ln_no, formatted[:max_chars])
+        )
+        if limit_hint > 0 and len(chunks) >= limit_hint:
+            break
+    return chunks
+
+
+def _chunk_json(
+    file_path: Path,
+    raw_text: str,
+    rel_prefix: str,
+    max_chars: int,
+    limit_hint: int = 0,
+) -> List[Dict[str, Any]]:
+    total_lines = max(1, len(raw_text.splitlines()))
+    try:
+        data = json.loads(raw_text)
+    except ValueError:
+        return _chunk_markdown_or_text(file_path, raw_text, rel_prefix, max_chars)
+
+    if isinstance(data, list) and data and all(isinstance(x, dict) for x in data):
+        chunks: List[Dict[str, Any]] = []
+        for idx, item in enumerate(data):
+            label = str(item.get("id") or item.get("name") or item.get("title") or f"item-{idx}")
+            heading = f"{file_path.name} [{label}]"
+            formatted = _format_record(item)[:max_chars]
+            chunks.append(
+                _make_chunk(
+                    file_path,
+                    rel_prefix,
+                    heading,
+                    1,
+                    total_lines,
+                    formatted,
+                    ref_suffix=f"#item-{idx}",
+                )
+            )
+            if limit_hint > 0 and len(chunks) >= limit_hint:
+                break
+        return chunks
+
+    pretty = json.dumps(data, indent=2, ensure_ascii=False)
+    return _chunk_markdown_or_text(file_path, pretty, rel_prefix, max_chars)
+
+
+def _chunk_csv(
+    file_path: Path,
+    raw_text: str,
+    rel_prefix: str,
+    max_chars: int,
+    limit_hint: int = 0,
+) -> List[Dict[str, Any]]:
+    chunks: List[Dict[str, Any]] = []
+    sio = io.StringIO(raw_text)
+    reader = csv.DictReader(sio)
+    if not reader.fieldnames:
+        return []
+    prev_line = 1
+    for row_idx, row in enumerate(reader, start=1):
+        end_ln = max(prev_line + 1, reader.line_num)
+        start_ln = prev_line + 1
+        prev_line = reader.line_num
+        clean_row = {str(k): ("" if v is None else str(v)) for k, v in row.items() if k is not None}
+        formatted = _format_record(clean_row).strip()
+        if not formatted:
+            continue
+        heading = f"{file_path.name} [row {row_idx}]"
+        chunks.append(
+            _make_chunk(file_path, rel_prefix, heading, start_ln, end_ln, formatted[:max_chars])
+        )
+        if limit_hint > 0 and len(chunks) >= limit_hint:
+            break
+    return chunks
+
+
+def chunk_file(
+    file_path: Path,
+    max_chars: int = 1600,
+    whole_file: bool = False,
+    rel_prefix: Optional[str] = None,
+    limit_hint: int = 0,
+) -> List[Dict[str, Any]]:
+    """Split a supported file into fence-safe or structured chunks with line/item refs."""
+    try:
+        raw_text = file_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"[XLaya] Warning: could not read {file_path}: {exc}", file=sys.stderr)
+        return []
+
+    if not raw_text.strip():
+        return []
+
+    ref_base = rel_prefix if rel_prefix is not None else file_path.name
+    lines = raw_text.splitlines()
+
+    if whole_file:
+        ext = file_path.suffix.lower()
+        body = _strip_html_fragment(raw_text) if ext in (".html", ".htm") else raw_text
+        if not body.strip():
+            return []
+        ch = _make_chunk(
+            file_path,
+            ref_base,
+            file_path.name,
+            1,
+            max(1, len(lines)),
+            body[:max_chars],
+        )
+        ch["_full_text"] = body[:240000]
+        return [ch]
+
+    ext = file_path.suffix.lower()
+    if ext in (".html", ".htm"):
+        return _chunk_html(file_path, raw_text, ref_base, max_chars)
+    if ext == ".jsonl":
+        return _chunk_jsonl(file_path, raw_text, ref_base, max_chars, limit_hint=limit_hint)
+    if ext == ".json":
+        return _chunk_json(file_path, raw_text, ref_base, max_chars, limit_hint=limit_hint)
+    if ext == ".csv":
+        return _chunk_csv(file_path, raw_text, ref_base, max_chars, limit_hint=limit_hint)
+    return _chunk_markdown_or_text(file_path, raw_text, ref_base, max_chars)
+
+
+def chunk_markdown_file(
+    file_path: Path,
+    max_chars: int = 1600,
+    min_merge_chars: int = 180,
+    whole_file: bool = False,
+) -> List[Dict[str, Any]]:
+    """Backward-compatible wrapper around chunk_file."""
+    if whole_file or file_path.suffix.lower() in (".html", ".htm", ".jsonl", ".json", ".csv"):
+        return chunk_file(file_path, max_chars=max_chars, whole_file=whole_file)
+    try:
+        raw_text = file_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"[XLaya] Warning: could not read {file_path}: {exc}", file=sys.stderr)
+        return []
+    if not raw_text.strip():
+        return []
+    return _chunk_markdown_or_text(
+        file_path,
+        raw_text,
+        file_path.name,
+        max_chars=max_chars,
+        min_merge_chars=min_merge_chars,
+    )
+
+
+def collect_target_files(paths: Sequence[str], pattern: str = DEFAULT_PATTERN) -> Tuple[List[Path], Optional[Path]]:
+    """Resolve input files/directories into sorted unique file paths and common scan root."""
+    globs = [g.strip().lower() for g in pattern.split(",") if g.strip()] or ["*.md"]
+    resolved_files: List[Path] = []
+    seen: set[Path] = set()
+    raw_resolved_inputs: List[Path] = []
+    has_directory_input = False
+
     for raw in paths:
         p = Path(raw).resolve()
+        if not p.exists():
+            continue
+        raw_resolved_inputs.append(p)
         if p.is_file():
             if p not in seen:
                 seen.add(p)
-                resolved.append(p)
+                resolved_files.append(p)
         elif p.is_dir():
-            excluded_parts = {
-                ".git",
-                "node_modules",
-                ".venv",
-                "venv",
-                "env",
-                "dist",
-                "build",
-                "__pycache__",
-                ".obsidian",
-                ".pytest_cache",
-            }
-            for child in sorted(p.rglob(pattern)):
-                if child.is_file() and not any(part in excluded_parts for part in child.parts):
-                    if child not in seen:
-                        seen.add(child)
-                        resolved.append(child)
-    return resolved
+            has_directory_input = True
+            for root_str, dirnames, filenames in os.walk(p):
+                dirnames[:] = sorted(d for d in dirnames if d not in EXCLUDED_DIRS)
+                root_path = Path(root_str)
+                for fname in sorted(filenames):
+                    fname_low = fname.lower()
+                    if any(fnmatch.fnmatch(fname_low, g) for g in globs):
+                        child = (root_path / fname).resolve()
+                        if child not in seen and child.is_file():
+                            seen.add(child)
+                            resolved_files.append(child)
+
+    is_single_file = (
+        not has_directory_input
+        and len(raw_resolved_inputs) == 1
+        and len(resolved_files) == 1
+    )
+    if is_single_file or not resolved_files:
+        return resolved_files, None
+
+    anchors: List[str] = []
+    for inp in raw_resolved_inputs:
+        anchors.append(str(inp if inp.is_dir() else inp.parent))
+    try:
+        common = Path(os.path.commonpath(anchors))
+        return resolved_files, common
+    except ValueError:
+        return resolved_files, None
+
+
+def _rel_ref_prefix(file_path: Path, scan_root: Optional[Path]) -> str:
+    if scan_root is None:
+        return file_path.name
+    try:
+        rel = file_path.relative_to(scan_root).as_posix()
+        return rel if rel else file_path.name
+    except ValueError:
+        return file_path.as_posix()
+
+
+# ---------------------------------------------------------------------------
+# Stage 0: Lexical BM25 + Code-Span / Identifier + Thai 3-Gram Engine
+# ---------------------------------------------------------------------------
+
+
+def _extract_lexical_tokens(text: str) -> List[str]:
+    lower = text.lower()
+    tokens = [w for w in LATIN_TOKEN_RE.findall(lower) if len(w) >= 2 and w not in STOPWORDS]
+
+    for run in THAI_RUN_RE.findall(text):
+        if len(run) < 3:
+            tokens.append(run)
+        else:
+            tokens.extend(run[i:i + 3] for i in range(len(run) - 2))
+
+    for cjk in CJK_RUN_RE.findall(text):
+        if len(cjk) == 1:
+            tokens.append(cjk)
+        else:
+            tokens.extend(cjk[i:i + 2] for i in range(len(cjk) - 1))
+
+    return tokens
+
+
+def _extract_technical_anchors(text: str) -> List[str]:
+    anchors: List[str] = []
+    seen: set[str] = set()
+    for pat in (BACKTICK_SPAN_RE, CLI_FLAG_RE, IDENT_RE):
+        for m in pat.finditer(text):
+            val = (m.group(1) if m.lastindex else m.group(0)).strip().lower()
+            if len(val) >= 2 and val not in seen:
+                seen.add(val)
+                anchors.append(val)
+    return anchors
+
+
+def compute_lexical_scores(chunks: Sequence[Dict[str, Any]], query_text: str) -> List[float]:
+    """Compute calibrated [0.0, 1.0] lexical relevance using BM25 + code anchors + Thai 3-grams."""
+    if not chunks or not query_text.strip():
+        return [0.0] * len(chunks)
+
+    q_tokens = _extract_lexical_tokens(query_text)
+    q_unique = list(dict.fromkeys(q_tokens))
+    q_anchors = _extract_technical_anchors(query_text)
+
+    if not q_unique and not q_anchors:
+        return [0.0] * len(chunks)
+
+    n_docs = len(chunks)
+    doc_counters: List[Counter[str]] = []
+    doc_lengths: List[int] = []
+    df: Counter[str] = Counter()
+
+    for ch in chunks:
+        toks = _extract_lexical_tokens(ch["text"])
+        cnt = Counter(toks)
+        doc_counters.append(cnt)
+        doc_lengths.append(max(1, len(toks)))
+        for qt in q_unique:
+            if qt in cnt:
+                df[qt] += 1
+
+    avgdl = sum(doc_lengths) / max(1, n_docs)
+    k1 = 1.5
+    b = 0.75
+
+    idfs: Dict[str, float] = {
+        qt: math.log(1.0 + (n_docs - df[qt] + 0.5) / (df[qt] + 0.5))
+        for qt in q_unique
+    }
+    theoretical_max = sum(idfs[qt] * (k1 + 1.0) for qt in q_unique)
+
+    raw_bm25: List[float] = []
+    anchor_ratios: List[float] = []
+
+    for ch, cnt, dl in zip(chunks, doc_counters, doc_lengths):
+        score = 0.0
+        for qt in q_unique:
+            tf = cnt.get(qt, 0)
+            if tf > 0:
+                denom = tf + k1 * (1.0 - b + b * (dl / avgdl))
+                score += idfs[qt] * ((tf * (k1 + 1.0)) / denom)
+        raw_bm25.append(score)
+
+        if q_anchors:
+            ch_low = ch["text"].lower()
+            hits = sum(1 for a in q_anchors if a in ch_low)
+            anchor_ratios.append(hits / len(q_anchors))
+        else:
+            anchor_ratios.append(0.0)
+
+    max_observed = max(raw_bm25) if raw_bm25 else 0.0
+    norm_denom = max(max_observed, theoretical_max * 0.40, 1e-6)
+
+    scores: List[float] = []
+    for bm, ar in zip(raw_bm25, anchor_ratios):
+        bm_norm = min(1.0, bm / norm_denom) if theoretical_max > 0 else 0.0
+        if q_anchors:
+            blended = min(1.0, 0.72 * bm_norm + 0.28 * ar)
+        else:
+            blended = bm_norm
+        scores.append(round(blended, 4))
+    return scores
+
+
+# ---------------------------------------------------------------------------
+# Pure-Python Deterministic Fallback (Zero External ML Dependencies)
+# ---------------------------------------------------------------------------
+
+
+def _significant_numbers(text: str) -> set[str]:
+    stripped_lines = [LINE_INDEX_PREFIX_RE.sub("", ln) for ln in text.splitlines()]
+    return set(NUMBER_TOKEN_RE.findall("\n".join(stripped_lines)))
+
+
+def fallback_evaluate(
+    chunks: List[Dict[str, Any]],
+    mode: str,
+    query: str,
+    ssot: str,
+    labels: Dict[str, str],
+    threshold: float = 0.55,
+) -> List[Dict[str, Any]]:
+    """Deterministic lexical + Thai 3-gram + subset-safe contradiction fallback."""
+    lex_scores = compute_lexical_scores(chunks, query or ssot)
+    ssot_nums = _significant_numbers(ssot) if ssot else set()
+    negation_markers = {"not", "never", "false", "deprecated", "legacy", "unsupported", "removed"}
+    ssot_negations = set(LATIN_TOKEN_RE.findall(ssot.lower())) & negation_markers
+
+    results: List[Dict[str, Any]] = []
+    for ch, lex in zip(chunks, lex_scores):
+        txt = ch["text"]
+        word_count = max(1, len(txt.split()))
+        has_code = "```" in txt or "`" in txt
+        has_table = "|" in txt
+        item = dict(ch)
+        item["engine"] = "pure-python-fallback"
+        item["lexical_score"] = lex
+
+        if mode == "shortlist":
+            exp_score = round(min(4.0, lex * 4.0), 4)
+            hyb = round(0.82 * (exp_score / 4.0) + 0.18 * lex, 4)
+            item.update(
+                {
+                    "score": exp_score,
+                    "expected_score": exp_score,
+                    "hybrid_score": hyb,
+                    "noul": 0.0,
+                    "confidence": 0.5,
+                }
+            )
+        elif mode == "contradiction":
+            chunk_nums = _significant_numbers(txt)
+            chunk_words = set(LATIN_TOKEN_RE.findall(txt.lower()))
+            # Subset/superset safe: require both an unfulfilled SSOT number and a conflicting chunk number
+            has_conflicting_nums = bool(
+                ssot_nums
+                and chunk_nums
+                and bool(ssot_nums - chunk_nums)
+                and bool(chunk_nums - ssot_nums)
+            )
+            has_extra_negation = bool((chunk_words & negation_markers) - ssot_negations)
+            rel = round(min(1.0, lex * 1.15), 4)
+            if rel >= 0.25 and (has_conflicting_nums or has_extra_negation):
+                raw_p = round(min(0.95, 0.72 + 0.25 * rel), 4)
+            else:
+                raw_p = round(0.08 * rel, 4)
+            eff_p = round(rel * raw_p, 4)
+            item.update(
+                {
+                    "score": 0.0,
+                    "noul": eff_p,
+                    "noul_raw": raw_p,
+                    "relevance": rel,
+                    "flagged": bool(eff_p >= threshold),
+                    "confidence": 0.5,
+                }
+            )
+        elif mode == "classify":
+            best_label = next(iter(labels.keys()), "unknown")
+            best_score = -1.0
+            for lbl, desc in labels.items():
+                lbl_lex = compute_lexical_scores([ch], f"{lbl} {desc}")[0]
+                if lbl_lex > best_score:
+                    best_score = lbl_lex
+                    best_label = lbl
+            item.update({"choice": best_label, "confidence": round(0.4 + 0.4 * max(0.0, best_score), 4)})
+        else:
+            base = min(2.5, word_count / 55.0)
+            bonus = (0.75 if has_code else 0.0) + (0.75 if has_table else 0.0)
+            exp_score = round(min(4.0, base + bonus), 4)
+            item.update(
+                {
+                    "score": exp_score,
+                    "expected_score": exp_score,
+                    "noul": 0.0,
+                    "confidence": 0.5,
+                }
+            )
+        results.append(item)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Stage 1 & Stage 2: Neural Triage + Conformal VegaML Escalation
+# ---------------------------------------------------------------------------
 
 
 def parse_label_spec(spec: str) -> Dict[str, str]:
     """Parse 'label1:desc1|label2:desc2' or comma-separated labels into a criteria dict."""
-    sep = "|" if "|" in spec else ","
+    effective = spec.strip() or DEFAULT_LABELS_SPEC
+    sep = "|" if "|" in effective else ","
     out: Dict[str, str] = {}
-    for item in spec.split(sep):
+    for item in effective.split(sep):
         item = item.strip()
         if not item:
             continue
@@ -293,190 +1583,993 @@ def parse_label_spec(spec: str) -> Dict[str, str]:
     return out
 
 
-def fallback_evaluate(
-    chunks: List[Dict[str, Any]],
-    mode: str,
-    query: str,
-    ssot: str,
-    labels: Dict[str, str],
-) -> List[Dict[str, Any]]:
-    """Deterministic pure-Python fallback when `laya` is not installed."""
-    ssot_or_query = ssot or query
-    query_terms = [t.lower() for t in re.findall(r"\w+", query or ssot) if len(t) > 2]
-    ssot_nums = set(re.findall(r"\b\d+(?:\.\d+)?\b", ssot_or_query))
-    negation_markers = {"not", "never", "false", "deprecated", "legacy", "old", "fail"}
-    ssot_negations = set(re.findall(r"\b[a-z]+\b", ssot_or_query.lower())) & negation_markers
-    results: List[Dict[str, Any]] = []
-
-    for ch in chunks:
-        text_lower = ch["text"].lower()
-        word_count = len(ch["text"].split())
-        has_code = "```" in ch["text"] or "`" in ch["text"]
-        has_table = "|" in ch["text"]
-
-        if mode == "shortlist":
-            hits = sum(1 for t in query_terms if t in text_lower)
-            denom = max(1, len(query_terms))
-            score_val = min(4.0, round((hits / denom) * 4.0, 3))
-            results.append({**ch, "score": score_val, "noul": 0.0, "confidence": 0.5, "engine": "fallback"})
-        elif mode == "contradiction":
-            hits = sum(1 for t in query_terms if t in text_lower)
-            overlap_ratio = hits / max(1, len(query_terms))
-            chunk_nums = set(re.findall(r"\b\d+(?:\.\d+)?\b", text_lower))
-            chunk_words = set(re.findall(r"\b[a-z]+\b", text_lower))
-            has_conflicting_nums = bool(ssot_nums and chunk_nums and not ssot_nums.issubset(chunk_nums))
-            has_extra_negation = bool((chunk_words & negation_markers) - ssot_negations)
-            if hits > 0 and (has_conflicting_nums or has_extra_negation):
-                noul_val = (
-                    round(min(1.0, max(0.65, overlap_ratio)), 3)
-                    if overlap_ratio >= 0.25
-                    else round(overlap_ratio, 3)
-                )
-            else:
-                noul_val = round(0.15 * overlap_ratio, 3)
-            results.append({**ch, "score": 0.0, "noul": noul_val, "confidence": 0.5, "engine": "fallback"})
-        elif mode == "classify":
-            best_label = next(iter(labels.keys()), "unknown")
-            best_hits = -1
-            for lbl, desc in labels.items():
-                terms = [t.lower() for t in re.findall(r"\w+", f"{lbl} {desc}") if len(t) > 2]
-                hits = sum(1 for t in terms if t in text_lower)
-                if hits > best_hits:
-                    best_hits = hits
-                    best_label = lbl
-            results.append({**ch, "choice": best_label, "confidence": 0.5, "engine": "fallback"})
-        else:
-            base = min(2.5, word_count / 60.0)
-            bonus = (0.75 if has_code else 0.0) + (0.75 if has_table else 0.0)
-            score_val = round(min(4.0, base + bonus), 3)
-            results.append({**ch, "score": score_val, "noul": 0.0, "confidence": 0.5, "engine": "fallback"})
-
-    return results
+def parse_noul_labels(spec: str) -> Optional[Dict[str, str]]:
+    """Parse optional '--noul-labels' (e.g. 'B,A' -> {'false': 'B', 'true': 'A'})."""
+    cleaned = spec.strip()
+    if not cleaned:
+        return None
+    if ":" in cleaned:
+        sep = "|" if "|" in cleaned else ","
+        mapped: Dict[str, str] = {}
+        for part in cleaned.split(sep):
+            if ":" in part:
+                k, v = part.split(":", 1)
+                mapped[k.strip().lower()] = v.strip()
+        if set(mapped.keys()) != {"false", "true"} or mapped["false"] == mapped["true"]:
+            raise ValueError("noul_labels mapping must provide distinct 'false' and 'true' labels.")
+        return mapped
+    parts = [p.strip() for p in cleaned.split(",") if p.strip()]
+    if len(parts) != 2 or parts[0] == parts[1]:
+        raise ValueError("noul_labels must contain two distinct comma-separated labels, e.g. 'B,A'.")
+    return {"false": parts[0], "true": parts[1]}
 
 
-def run_laya_inference(
-    chunks: List[Dict[str, Any]],
+def _shares_specific_identifier(chunk_text: str, ssot_text: str) -> bool:
+    ident_re = re.compile(r"\b[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)+\b|\b[A-Za-z]+[0-9]+[A-Za-z0-9.-]*\b")
+    ssot_idents = {m.lower() for m in ident_re.findall(ssot_text) if len(m) >= 4}
+    if not ssot_idents:
+        return False
+    chunk_low = chunk_text.lower()
+    return any(ident in chunk_low for ident in ssot_idents)
+
+
+def _build_mode_questions(
     mode: str,
     query: str,
     ssot: str,
     true_desc: str,
     false_desc: str,
     labels: Dict[str, str],
-    lang_mode: str,
-    batch_size: int,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """Run neural System 1 inference with `laya` or fall back cleanly."""
-    try:
-        import laya  # type: ignore
-    except ImportError:
-        return fallback_evaluate(chunks, mode, query, ssot, labels), {
-            "laya_available": False,
-            "model": "pure-python-fallback",
-            "device": "cpu",
-        }
+    noul_label_map: Optional[Dict[str, str]],
+) -> Dict[str, Dict[str, Any]]:
+    def with_noul_labels(q: Dict[str, Any]) -> Dict[str, Any]:
+        if noul_label_map is not None:
+            q = dict(q)
+            q["labels"] = noul_label_map
+        return q
 
-    sample_text = "\n".join(c["text"][:300] for c in chunks[:5]) + " " + query + " " + ssot
-    if lang_mode == "en":
-        use_english = True
-    elif lang_mode == "multi":
-        use_english = False
-    else:
-        use_english = bool(laya.is_english(sample_text)) and not bool(THAI_OR_NON_ASCII_RE.search(sample_text))
-
-    if use_english:
-        agent = laya.load("convaiinnovations/laya")
-        model_id = "convaiinnovations/laya"
-    else:
-        agent = laya.load("convaiinnovations/laya", subfolder="multilingual")
-        model_id = "convaiinnovations/laya (multilingual)"
-
-    device_str = str(getattr(agent, "device", "cpu"))
-    meta = {
-        "laya_available": True,
-        "laya_version": getattr(laya, "__version__", "unknown"),
-        "model": model_id,
-        "language_route": "english" if use_english else "multilingual",
-        "device": device_str,
-    }
-
-    questions: Dict[str, Any] = {}
-    if mode == "shortlist":
-        questions["rel"] = {
-            "type": "score",
-            "instructions": f"Rate how directly this section answers or specifies: {query}",
-            "criteria": DEFAULT_RELEVANCE_CRITERIA,
-        }
-    elif mode == "contradiction":
-        questions["contra"] = {
+    def joint_contradiction_questions(canon: str) -> Dict[str, Dict[str, Any]]:
+        rel_q: Dict[str, Any] = {
             "type": "noul",
-            "instructions": f"Does this text contradict the canonical truth: {ssot}",
-            "criteria": {
-                "false": false_desc or f"Consistent with or unrelated to: {ssot}",
-                "true": true_desc or f"Directly contradicts or states outdated facts against: {ssot}",
-            },
+            "instructions": f"Does this passage mention the specific model or subject of: {canon}?",
         }
-    elif mode == "classify":
-        questions["cat"] = {
-            "type": "choice",
-            "instructions": query or "Classify this text into the most accurate category.",
-            "criteria": labels,
+        cons_q: Dict[str, Any] = {
+            "type": "noul",
+            "instructions": (
+                f"Are the facts and numbers stated in this passage consistent and compatible with: {canon}?"
+            ),
         }
-    else:
-        questions["rubric"] = {
+        contra_q: Dict[str, Any] = {
+            "type": "noul",
+            "instructions": (
+                f"Assuming `{canon}` is strictly true, does this text state any conflicting "
+                "number, incompatible limit, wrong version, or opposite behavior?"
+            ),
+        }
+        if false_desc or true_desc:
+            contra_q["criteria"] = {
+                "false": false_desc or "consistent or compatible",
+                "true": true_desc or "states conflicting numbers or opposite claims",
+            }
+        return {
+            "is_relevant": with_noul_labels(rel_q),
+            "is_consistent": with_noul_labels(cons_q),
+            "contradicts_ssot": with_noul_labels(contra_q),
+        }
+
+    if mode == "shortlist":
+        return {
+            "rel": {
+                "type": "score",
+                "instructions": f"Rate how directly this section answers or specifies: {query}",
+                "criteria": DEFAULT_RELEVANCE_CRITERIA,
+            }
+        }
+    if mode == "contradiction":
+        return joint_contradiction_questions(ssot)
+    if mode == "classify":
+        return {
+            "cat": {
+                "type": "choice",
+                "instructions": query or "Classify this text into the most accurate category.",
+                "criteria": labels,
+            }
+        }
+
+    qs: Dict[str, Dict[str, Any]] = {
+        "rubric": {
             "type": "score",
             "instructions": query or "Rate the technical completeness and specificity of this documentation.",
             "criteria": DEFAULT_RUBRIC_CRITERIA,
         }
-        if ssot:
-            questions["contra"] = {
-                "type": "noul",
-                "instructions": f"Does this text contradict the canonical truth: {ssot}",
-                "criteria": {
-                    "false": false_desc or f"Consistent with canonical truth: {ssot}",
-                    "true": true_desc or f"Contradicts canonical truth: {ssot}",
-                },
+    }
+    if ssot:
+        qs.update(joint_contradiction_questions(ssot))
+    return qs
+
+
+def _select_vega_finalists(
+    results: List[Dict[str, Any]],
+    mode: str,
+    threshold: float,
+    vega_top_k: int,
+    whole_file: bool,
+) -> List[int]:
+    if vega_top_k <= 0 or not results:
+        return []
+    if whole_file and len(results) <= vega_top_k:
+        return list(range(len(results)))
+
+    if mode == "contradiction":
+        borderline = [
+            i for i, r in enumerate(results) if 0.25 <= float(r.get("noul", 0.0)) <= 0.85
+        ]
+        borderline.sort(key=lambda i: abs(float(results[i].get("noul", 0.0)) - threshold))
+        chosen = borderline[:vega_top_k]
+        if len(chosen) < vega_top_k:
+            seen = set(chosen)
+            by_noul = sorted(
+                range(len(results)),
+                key=lambda i: float(results[i].get("noul", 0.0)),
+                reverse=True,
+            )
+            for idx in by_noul:
+                if idx not in seen:
+                    chosen.append(idx)
+                    seen.add(idx)
+                    if len(chosen) >= vega_top_k:
+                        break
+        return chosen
+
+    if mode == "classify":
+        low_conf = [
+            i for i, r in enumerate(results) if float(r.get("confidence", 1.0)) < 0.55
+        ]
+        low_conf.sort(key=lambda i: float(results[i].get("confidence", 1.0)))
+        return low_conf[:vega_top_k]
+
+    return list(range(min(len(results), vega_top_k)))
+
+
+def _attach_vega_escalation(
+    results: List[Dict[str, Any]],
+    finalist_indices: List[int],
+    questions: Dict[str, Dict[str, Any]],
+    mode: str,
+    vega_model: str,
+    resolved_device: str,
+    batch_size: int,
+    resident_cache: bool,
+    threshold: float = 0.55,
+    whole_file: bool = False,
+) -> int:
+    if not finalist_indices:
+        return 0
+    vega_ok, _ = _pkg_version("vegaml", "vegaml")
+    if not vega_ok:
+        print("[XLaya] Warning: --vega requested, but vegaml is not installed.", file=sys.stderr)
+        return 0
+
+    v_key = f"vega:{vega_model}"
+    with _CACHE_LOCK:
+        was_cached = v_key in _MODEL_CACHE
+
+    v_agent = _load_vega_checkpoint(vega_model, resolved_device, cache=resident_cache)
+    v_questions = _strip_noul_labels_for_vega(questions)
+    texts = [results[i].get("_full_text") or results[i]["text"] for i in finalist_indices]
+
+    if len(texts) == 1:
+        v_preds = [v_agent.predict(texts[0], v_questions)]
+    else:
+        v_preds = v_agent.predict_batch(texts, v_questions, batch_size=min(batch_size, 16))
+
+    for idx, raw_pred in zip(finalist_indices, v_preds):
+        ans = _sanitize_prediction(raw_pred).get("answers", {})
+        if mode == "contradiction":
+            v_rel = ans.get("is_relevant", {})
+            v_cons = ans.get("is_consistent", {})
+            v_con = ans.get("contradicts_ssot", {})
+            p_rel = float(v_rel.get("noul", 0.0))
+            p_cons = float(v_cons.get("noul", 0.0))
+            p_raw = float(v_con.get("noul", 0.0))
+            v_abstain = bool(v_con.get("abstain", False))
+            v_pset = list(v_con.get("prediction_set", []))
+            v_route = v_con.get("route")
+            v_noul = round(p_rel * p_raw * (1.0 - p_cons), 4)
+            if (
+                whole_file
+                and not v_abstain
+                and v_route == "auto"
+                and v_pset == ["true"]
+                and p_cons < 0.40
+            ):
+                v_noul = max(v_noul, round(p_raw * (1.0 - p_cons), 4))
+            results[idx]["vega"] = {
+                "model": vega_model,
+                "route": v_route,
+                "route_reason": v_con.get("route_reason"),
+                "abstain": v_abstain,
+                "prediction_set": v_pset,
+                "noul": v_noul,
+                "noul_raw": round(p_raw, 4),
+                "relevance": round(p_rel, 4),
+                "consistency": round(p_cons, 4),
+            }
+            if not v_abstain and v_noul >= threshold:
+                results[idx]["noul"] = max(float(results[idx].get("noul", 0.0)), v_noul)
+                results[idx]["flagged"] = True
+        elif mode == "shortlist":
+            v_rel = ans.get("rel", {})
+            results[idx]["vega"] = {
+                "model": vega_model,
+                "route": v_rel.get("route"),
+                "route_reason": v_rel.get("route_reason"),
+                "abstain": bool(v_rel.get("abstain", False)),
+                "prediction_set": list(v_rel.get("prediction_set", [])),
+                "expected_score": round(float(v_rel.get("expected_score", v_rel.get("score", 0.0))), 4),
+            }
+        elif mode == "classify":
+            v_cat = ans.get("cat", {})
+            results[idx]["vega"] = {
+                "model": vega_model,
+                "route": v_cat.get("route"),
+                "route_reason": v_cat.get("route_reason"),
+                "abstain": bool(v_cat.get("abstain", False)),
+                "prediction_set": list(v_cat.get("prediction_set", [])),
+                "choice": v_cat.get("choice"),
+            }
+        else:
+            v_rub = ans.get("rubric", {})
+            vega_info: Dict[str, Any] = {
+                "model": vega_model,
+                "route": v_rub.get("route"),
+                "route_reason": v_rub.get("route_reason"),
+                "abstain": bool(v_rub.get("abstain", False)),
+                "prediction_set": list(v_rub.get("prediction_set", [])),
+                "expected_score": round(float(v_rub.get("expected_score", v_rub.get("score", 0.0))), 4),
+            }
+            if "contradicts_ssot" in ans and "is_relevant" in ans:
+                p_rel = float(ans["is_relevant"].get("noul", 0.0))
+                p_cons = float(ans.get("is_consistent", {}).get("noul", 0.0))
+                p_raw = float(ans["contradicts_ssot"].get("noul", 0.0))
+                vega_info["noul"] = round(p_rel * p_raw * (1.0 - p_cons), 4)
+            results[idx]["vega"] = vega_info
+
+    if not resident_cache and not was_cached:
+        del v_agent
+        gc.collect()
+
+    return len(finalist_indices)
+
+
+def run_triage(
+    paths: Sequence[str],
+    mode: str = "rubric",
+    query: str = "",
+    ssot: str = "",
+    true_desc: str = "",
+    false_desc: str = "",
+    labels_spec: str = "",
+    noul_labels: str = "",
+    lang: str = "auto",
+    device: str = "auto",
+    max_chars: int = 1600,
+    whole_file: bool = False,
+    max_chunks: int = 2048,
+    top_k: Optional[int] = None,
+    threshold: float = 0.55,
+    batch_size: int = 32,
+    pattern: str = DEFAULT_PATTERN,
+    lexical_prefilter: int = 0,
+    vega: bool = False,
+    vega_model: str = "0.8b",
+    vega_top_k: int = 10,
+    resident_cache: bool = True,
+) -> Dict[str, Any]:
+    """Execute the full 3-stage Stage 0 → Stage 1 → Stage 2 semantic triage cascade."""
+    t0 = time.perf_counter()
+
+    if mode not in VALID_MODES:
+        raise ValueError(f"Unsupported mode {mode!r}; expected one of {sorted(VALID_MODES)}.")
+    if mode == "shortlist" and not query.strip():
+        raise ValueError("Mode 'shortlist' requires a non-empty query (--query).")
+    if mode == "contradiction" and not ssot.strip():
+        raise ValueError("Mode 'contradiction' requires a non-empty canonical SSOT statement (--ssot).")
+    if lang not in ("auto", "en", "multi"):
+        raise ValueError(f"Unsupported lang {lang!r}; expected 'auto', 'en', or 'multi'.")
+
+    noul_label_map = parse_noul_labels(noul_labels)
+    labels_dict = parse_label_spec(labels_spec)
+
+    files, scan_root = collect_target_files(paths, pattern=pattern)
+    if not files:
+        return {
+            "ok": True,
+            "meta": {
+                "version": __version__,
+                "mode": mode,
+                "files_scanned": 0,
+                "chunks_evaluated": 0,
+                "truncated_chunks": 0,
+                "vega_escalated": 0,
+                "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+            },
+            "results": [],
+        }
+
+    all_chunks: List[Dict[str, Any]] = []
+    truncated_chunks = 0
+    hard_cap = max(max_chunks + 1, max_chunks * 4)
+
+    for fpath in files:
+        rel_pfx = _rel_ref_prefix(fpath, scan_root)
+        remaining_hint = max(0, hard_cap - len(all_chunks))
+        extracted = chunk_file(
+            fpath,
+            max_chars=max_chars,
+            whole_file=whole_file,
+            rel_prefix=rel_pfx,
+            limit_hint=remaining_hint,
+        )
+        all_chunks.extend(extracted)
+        if len(all_chunks) >= hard_cap:
+            break
+
+    if len(all_chunks) > max_chunks:
+        truncated_chunks = len(all_chunks) - max_chunks
+        all_chunks = all_chunks[:max_chunks]
+        print(
+            f"[XLaya] Warning: chunk count exceeded max_chunks={max_chunks}; "
+            f"truncated {truncated_chunks}+ trailing chunks.",
+            file=sys.stderr,
+        )
+
+    if not all_chunks:
+        return {
+            "ok": True,
+            "meta": {
+                "version": __version__,
+                "mode": mode,
+                "files_scanned": len(files),
+                "chunks_evaluated": 0,
+                "truncated_chunks": truncated_chunks,
+                "vega_escalated": 0,
+                "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+            },
+            "results": [],
+        }
+
+    lex_target = query if mode in ("shortlist", "classify", "rubric") and query else (ssot or query)
+    lex_scores = compute_lexical_scores(all_chunks, lex_target)
+    for ch, lx in zip(all_chunks, lex_scores):
+        ch["lexical_score"] = lx
+
+    prefiltered_from: Optional[int] = None
+    if lexical_prefilter > 0 and len(all_chunks) > lexical_prefilter and lex_target.strip():
+        prefiltered_from = len(all_chunks)
+        ranked_indices = sorted(
+            range(len(all_chunks)),
+            key=lambda i: (all_chunks[i]["lexical_score"], -i),
+            reverse=True,
+        )[:lexical_prefilter]
+        ranked_indices.sort()
+        all_chunks = [all_chunks[i] for i in ranked_indices]
+
+    laya_ok, laya_ver = _pkg_version("laya", "laya")
+    resolved_device = _resolve_device(device) if laya_ok else "cpu"
+
+    questions = _build_mode_questions(
+        mode=mode,
+        query=query,
+        ssot=ssot,
+        true_desc=true_desc,
+        false_desc=false_desc,
+        labels=labels_dict,
+        noul_label_map=noul_label_map,
+    )
+
+    if not laya_ok:
+        enriched = fallback_evaluate(all_chunks, mode, query, ssot, labels_dict, threshold=threshold)
+        meta: Dict[str, Any] = {
+            "version": __version__,
+            "laya_available": False,
+            "laya_version": None,
+            "model": "pure-python-fallback",
+            "language_route": "fallback",
+            "language_routing": {"english": 0, "multilingual": 0, "head_guard_multilingual": False},
+            "device": "cpu",
+            "mode": mode,
+            "files_scanned": len(files),
+            "chunks_evaluated": len(enriched),
+            "truncated_chunks": truncated_chunks,
+            "vega_escalated": 0,
+        }
+        if prefiltered_from is not None:
+            meta["lexical_prefiltered_from"] = prefiltered_from
+    else:
+        import laya  # type: ignore
+
+        head_txt = _questions_head_text(questions)
+        head_is_en = _is_english_text(head_txt)
+
+        en_idxs: List[int] = []
+        ml_idxs: List[int] = []
+        if lang == "en":
+            en_idxs = list(range(len(all_chunks)))
+        elif lang == "multi":
+            ml_idxs = list(range(len(all_chunks)))
+        elif not head_is_en:
+            ml_idxs = list(range(len(all_chunks)))
+        else:
+            for idx, ch in enumerate(all_chunks):
+                if _is_english_text(ch["text"]):
+                    en_idxs.append(idx)
+                else:
+                    ml_idxs.append(idx)
+
+        preds_by_idx: List[Optional[Tuple[Dict[str, Any], str]]] = [None] * len(all_chunks)
+        needs_tournament = mode == "classify" and len(labels_dict) > 20
+
+        for bucket_name, b_idxs in (("english", en_idxs), ("multilingual", ml_idxs)):
+            if not b_idxs:
+                continue
+            with _CACHE_LOCK:
+                already_cached = bucket_name in _MODEL_CACHE
+            agent = _load_laya_checkpoint(bucket_name, resolved_device, cache=resident_cache)
+            b_texts = [all_chunks[i]["text"] for i in b_idxs]
+            model_tag = (
+                "convaiinnovations/laya"
+                if bucket_name == "english"
+                else "convaiinnovations/laya (multilingual)"
+            )
+
+            if needs_tournament:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    b_preds = [
+                        laya.predict_tournament(agent, st, questions, group_size=16)
+                        for st in b_texts
+                    ]
+            elif len(b_texts) == 1:
+                b_preds = [agent.predict(b_texts[0], questions)]
+            else:
+                b_preds = agent.predict_batch(
+                    b_texts,
+                    questions,
+                    batch_size=batch_size,
+                    sort_by_length=True,
+                )
+
+            for orig_i, pr in zip(b_idxs, b_preds):
+                preds_by_idx[orig_i] = (pr, model_tag)
+
+            # Cap peak CPU RAM when not caching models across both English and Multilingual buckets
+            if not resident_cache and not already_cached:
+                with _CACHE_LOCK:
+                    _MODEL_CACHE.pop(bucket_name, None)
+                del agent
+                gc.collect()
+
+        enriched = []
+        for ch, entry in zip(all_chunks, preds_by_idx):
+            assert entry is not None
+            pred, model_tag = entry
+            ans = pred["answers"]
+            item = dict(ch)
+            item["engine"] = model_tag
+            lex_val = float(ch.get("lexical_score", 0.0))
+
+            if mode == "shortlist":
+                exp_s = float(ans["rel"].get("expected_score", ans["rel"]["score"]))
+                exp_round = round(exp_s, 4)
+                hyb = round(0.82 * (exp_s / 4.0) + 0.18 * lex_val, 4)
+                item["score"] = exp_round
+                item["expected_score"] = exp_round
+                item["lexical_score"] = round(lex_val, 4)
+                item["hybrid_score"] = hyb
+                item["confidence"] = round(float(ans["rel"]["confidence"]), 4)
+            elif mode == "contradiction":
+                p_rel = float(ans["is_relevant"]["noul"])
+                p_cons = float(ans.get("is_consistent", {}).get("noul", 0.0))
+                p_raw = float(ans["contradicts_ssot"]["noul"])
+                eff_rel = (
+                    max(p_rel, 0.85)
+                    if (
+                        p_rel < 0.35
+                        and p_cons < 0.15
+                        and p_raw >= 0.75
+                        and _shares_specific_identifier(ch["text"], ssot)
+                    )
+                    else p_rel
+                )
+                p_eff = round(eff_rel * p_raw * (1.0 - p_cons), 4)
+                item["noul"] = p_eff
+                item["noul_raw"] = round(p_raw, 4)
+                item["relevance"] = round(eff_rel, 4)
+                item["consistency"] = round(p_cons, 4)
+                item["flagged"] = bool(p_eff >= threshold)
+                item["confidence"] = round(float(ans["contradicts_ssot"]["confidence"]), 4)
+            elif mode == "classify":
+                item["choice"] = ans["cat"]["choice"]
+                item["confidence"] = round(float(ans["cat"]["confidence"]), 4)
+            else:
+                exp_s = float(ans["rubric"].get("expected_score", ans["rubric"]["score"]))
+                exp_round = round(exp_s, 4)
+                item["score"] = exp_round
+                item["expected_score"] = exp_round
+                item["confidence"] = round(float(ans["rubric"]["confidence"]), 4)
+                if "contradicts_ssot" in ans and "is_relevant" in ans:
+                    p_rel = float(ans["is_relevant"]["noul"])
+                    p_cons = float(ans.get("is_consistent", {}).get("noul", 0.0))
+                    p_raw = float(ans["contradicts_ssot"]["noul"])
+                    p_eff = round(p_rel * p_raw * (1.0 - p_cons), 4)
+                    item["noul"] = p_eff
+                    item["noul_raw"] = round(p_raw, 4)
+                    item["relevance"] = round(p_rel, 4)
+                    item["consistency"] = round(p_cons, 4)
+                else:
+                    item["noul"] = 0.0
+            enriched.append(item)
+
+        lang_route = (
+            "english"
+            if not ml_idxs
+            else ("multilingual" if not en_idxs else "bilingual(per-chunk)")
+        )
+        model_summary = (
+            "convaiinnovations/laya"
+            if not ml_idxs
+            else (
+                "convaiinnovations/laya (multilingual)"
+                if not en_idxs
+                else "convaiinnovations/laya (en+multilingual)"
+            )
+        )
+        meta = {
+            "version": __version__,
+            "laya_available": True,
+            "laya_version": laya_ver,
+            "model": model_summary,
+            "language_route": lang_route,
+            "language_routing": {
+                "english": len(en_idxs),
+                "multilingual": len(ml_idxs),
+                "head_guard_multilingual": (not head_is_en and lang == "auto"),
+            },
+            "device": resolved_device,
+            "mode": mode,
+            "files_scanned": len(files),
+            "chunks_evaluated": len(enriched),
+            "truncated_chunks": truncated_chunks,
+            "vega_escalated": 0,
+        }
+        if prefiltered_from is not None:
+            meta["lexical_prefiltered_from"] = prefiltered_from
+
+    # Mode-specific sorting
+    if mode == "shortlist":
+        enriched.sort(
+            key=lambda r: (r.get("hybrid_score", 0.0), r.get("expected_score", 0.0)),
+            reverse=True,
+        )
+    elif mode == "contradiction":
+        enriched.sort(
+            key=lambda r: (r.get("noul", 0.0), r.get("confidence", 0.0)),
+            reverse=True,
+        )
+    elif mode == "rubric":
+        enriched.sort(
+            key=lambda r: (r.get("expected_score", r.get("score", 0.0)), -r.get("noul", 0.0)),
+            reverse=True,
+        )
+
+    # Stage 2: Opt-in VegaML Conformal Escalation
+    if vega and laya_ok:
+        finalist_idxs = _select_vega_finalists(
+            results=enriched,
+            mode=mode,
+            threshold=threshold,
+            vega_top_k=vega_top_k,
+            whole_file=whole_file,
+        )
+        meta["vega_escalated"] = _attach_vega_escalation(
+            results=enriched,
+            finalist_indices=finalist_idxs,
+            questions=questions,
+            mode=mode,
+            vega_model=vega_model,
+            resolved_device=resolved_device,
+            batch_size=batch_size,
+            resident_cache=resident_cache,
+            threshold=threshold,
+            whole_file=whole_file,
+        )
+        if mode == "contradiction":
+            enriched.sort(
+                key=lambda r: (r.get("noul", 0.0), r.get("confidence", 0.0)),
+                reverse=True,
+            )
+
+    eff_top_k = (0 if mode == "classify" else 10) if top_k is None else int(top_k)
+
+    # Mode-specific result slicing (BUG-A5)
+    if mode == "contradiction":
+        flagged_items = [r for r in enriched if r.get("flagged")]
+        meta["flagged_count"] = len(flagged_items)
+        if flagged_items:
+            selected = flagged_items
+        else:
+            selected = enriched[:eff_top_k] if eff_top_k > 0 else []
+    elif mode == "classify":
+        selected = enriched[:eff_top_k] if eff_top_k > 0 else enriched
+    else:
+        selected = enriched[:eff_top_k] if eff_top_k > 0 else enriched
+
+    clean_results = [
+        {k: v for k, v in item.items() if k not in ("text", "_full_text")}
+        for item in selected
+    ]
+    meta["results_returned"] = len(clean_results)
+    meta["elapsed_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+
+    return {
+        "ok": True,
+        "meta": meta,
+        "results": clean_results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Built-in Self-Test Suite (--self-test)
+# ---------------------------------------------------------------------------
+
+
+def run_self_test() -> Dict[str, Any]:
+    """Run deterministic + neural counter-anchor self-verification suite."""
+    t0 = time.perf_counter()
+    checks: Dict[str, Any] = {}
+
+    # 1. Runtime status & thread checks
+    st = get_status()
+    assert st["ok"] is True and st["version"] == __version__
+    assert st["cpu_threads"] >= 1
+    checks["status"] = {
+        "device": st["device"],
+        "gpu_name": st["gpu_name"],
+        "cpu_threads": st["cpu_threads"],
+        "laya_version": st["laya_version"],
+        "vegaml_version": st["vegaml_version"],
+    }
+
+    with tempfile.TemporaryDirectory(prefix="xlaya_selftest_") as tmp_str:
+        tmp_dir = Path(tmp_str)
+
+        # 2. 4-backtick fence safety + #{1,6} breadcrumb stack + non-duplicated heading
+        md_sample = (
+            "# Root Spec\n\n"
+            "Intro overview paragraph with sufficient detail so it stays intact.\n\n"
+            "## Chunker Engine\n\n"
+            "````markdown\n"
+            "```python\n"
+            "# Fake Heading Inside Nested Fence\n"
+            "x = 1\n"
+            "```\n"
+            "````\n\n"
+            "#### Deep Sublevel\n\n"
+            "Body under level-4 heading verifying 6-level breadcrumb tracking.\n"
+        )
+        f_md = tmp_dir / "subA" / "fence_test.md"
+        f_md.parent.mkdir(parents=True, exist_ok=True)
+        f_md.write_text(md_sample, encoding="utf-8")
+
+        md_chunks = chunk_file(f_md, max_chars=1600)
+        headings = [c["heading"] for c in md_chunks]
+        assert not any("Fake Heading Inside Nested Fence" in h for h in headings), headings
+        deep_chunks = [c for c in md_chunks if "Deep Sublevel" in c["heading"]]
+        assert len(deep_chunks) == 1, headings
+        assert deep_chunks[0]["heading"] == "Root Spec > Chunker Engine > Deep Sublevel"
+        assert deep_chunks[0]["text"].startswith("[Root Spec > Chunker Engine]\n#### Deep Sublevel")
+
+        # 3. Structured formats (.jsonl, .json, .csv, .html) + disambiguated refs
+        f_jsonl = tmp_dir / "subB" / "events.jsonl"
+        f_jsonl.parent.mkdir(parents=True, exist_ok=True)
+        f_jsonl.write_text(
+            '{"id": "ev1", "msg": "alpha"}\n\n{"id": "ev2", "msg": "beta"}\n',
+            encoding="utf-8",
+        )
+        jl_chunks = chunk_file(f_jsonl, max_chars=1600)
+        assert [c["ref"] for c in jl_chunks] == ["events.jsonl#L1-L1", "events.jsonl#L3-L3"]
+
+        f_json = tmp_dir / "subB" / "items.json"
+        f_json.write_text(json.dumps([{"id": "k1", "v": 10}, {"id": "k2", "v": 20}]), encoding="utf-8")
+        js_chunks = chunk_file(f_json, max_chars=1600)
+        assert [c["ref"] for c in js_chunks] == ["items.json#item-0", "items.json#item-1"]
+
+        f_csv = tmp_dir / "subB" / "rows.csv"
+        f_csv.write_text("col,val\nr1,100\nr2,200\n", encoding="utf-8")
+        csv_chunks = chunk_file(f_csv, max_chars=1600)
+        assert [c["ref"] for c in csv_chunks] == ["rows.csv#L2-L2", "rows.csv#L3-L3"]
+
+        f_html = tmp_dir / "subB" / "page.html"
+        f_html.write_text(
+            "<h1>Main &amp; Title</h1><p>First.</p><h2>Second</h2><p>Body &lt;ok&gt;.</p>",
+            encoding="utf-8",
+        )
+        html_chunks = chunk_file(f_html, max_chars=1600)
+        assert len(html_chunks) == 2 and "<ok>" in html_chunks[1]["text"]
+
+        files_multi, root_multi = collect_target_files([str(tmp_dir)])
+        refs_multi = [_rel_ref_prefix(p, root_multi) for p in files_multi]
+        assert "subA/fence_test.md" in refs_multi and "subB/events.jsonl" in refs_multi
+        files_single, root_single = collect_target_files([str(f_md)])
+        assert len(files_single) == 1 and root_single is None
+        checks["stage0_chunker"] = "passed"
+
+        # 4. Fail-fast validation (BUG-A6)
+        for bad_kwargs in (
+            {"mode": "shortlist", "query": ""},
+            {"mode": "contradiction", "ssot": ""},
+        ):
+            raised = False
+            try:
+                run_triage([str(f_md)], **bad_kwargs)
+            except ValueError:
+                raised = True
+            assert raised, f"Expected ValueError for {bad_kwargs}"
+        checks["fail_fast_validation"] = "passed"
+
+        # 5. Stage 0 Lexical Thai 3-gram + Code-Span + Subset-Safe Fallback
+        thai_chunks = [
+            {"text": "ระบบตรวจสอบความขัดแย้งทางความหมายสำหรับเอกสารภาษาไทยอย่างแม่นยำ"},
+            {"text": "สูตรการทำอาหารต้มยำกุ้งและส่วนผสมสมุนไพรสดในครัวเรือน"},
+        ]
+        thai_lex = compute_lexical_scores(thai_chunks, "ตรวจสอบความขัดแย้งเอกสาร")
+        assert thai_lex[0] > 0.4 and thai_lex[1] == 0.0, thai_lex
+
+        fb_chunks = [
+            {
+                "file": "a.md", "name": "a.md", "heading": "Partial Consistent",
+                "start_line": 1, "end_line": 2, "ref": "a.md#L1-L2",
+                "text": "ModernBERT-large uses a 512-token context window for local triage.",
+            },
+            {
+                "file": "a.md", "name": "a.md", "heading": "Conflicting Numbers",
+                "start_line": 3, "end_line": 4, "ref": "a.md#L3-L4",
+                "text": "ModernBERT-large uses a 128-token context window and outputs 500 LLM tokens.",
+            },
+        ]
+        fb_res = fallback_evaluate(
+            fb_chunks,
+            mode="contradiction",
+            query="",
+            ssot="ModernBERT-large uses a 512-token context window and outputs 0 LLM tokens.",
+            labels={},
+            threshold=0.55,
+        )
+        assert fb_res[0]["flagged"] is False and fb_res[1]["flagged"] is True, fb_res
+        checks["lexical_and_fallback"] = {"thai_lex": thai_lex, "subset_safe": True}
+
+        # 6. Neural checks (when laya is installed)
+        if st["laya_available"]:
+            bilingual_md = (
+                "# English Architecture\n\n"
+                "ModernBERT executes fast local semantic classification on GPU hardware.\n\n"
+                "# สถาปัตยกรรมภาษาไทย\n\n"
+                "ระบบประมวลผลภาษาไทยอัตโนมัติสำหรับการคัดกรองเอกสารและตรวจสอบความถูกต้อง\n"
+            )
+            f_bi = tmp_dir / "bilingual.md"
+            f_bi.write_text(bilingual_md, encoding="utf-8")
+
+            bi_en_head = run_triage(
+                [str(f_bi)],
+                mode="shortlist",
+                query="semantic classification architecture",
+                lang="auto",
+            )
+            rt_en = bi_en_head["meta"]["language_routing"]
+            assert rt_en["english"] == 1 and rt_en["multilingual"] == 1, rt_en
+
+            bi_th_head = run_triage(
+                [str(f_bi)],
+                mode="shortlist",
+                query="ค้นหาสถาปัตยกรรมภาษาไทย",
+                lang="auto",
+            )
+            rt_th = bi_th_head["meta"]["language_routing"]
+            assert rt_th["english"] == 0 and rt_th["multilingual"] == 2 and rt_th["head_guard_multilingual"], rt_th
+            checks["bilingual_routing"] = {"en_head": rt_en, "th_head_guard": rt_th}
+
+            # 7. Hybrid shortlist verification
+            sh_item = bi_en_head["results"][0]
+            expected_hyb = round(
+                0.82 * (sh_item["expected_score"] / 4.0) + 0.18 * sh_item["lexical_score"],
+                4,
+            )
+            assert sh_item["hybrid_score"] == expected_hyb, sh_item
+            checks["hybrid_shortlist"] = sh_item["hybrid_score"]
+
+            # 8. Counter-Anchor Contradiction Test: A_pos ∧ A_neg
+            here = Path(__file__).resolve().parent
+            skill_candidates = [
+                here.parent / "SKILL.md",
+                here / "skills" / "xlaya" / "SKILL.md",
+            ]
+            skill_md = next((p for p in skill_candidates if p.is_file()), None)
+            if skill_md is None:
+                f_pos = tmp_dir / "pos_skill.md"
+                f_pos.write_text(
+                    "# XLaya Semantic Decision & Conformal Triage Sidecar (`/xlaya` v2.0)\n\n"
+                    "Unlike System 2 LLMs that iterate across multi-step tool loops, `laya` executes a "
+                    "deterministic encoder forward pass (`output_tokens: 0`) using ModernBERT-large's "
+                    "512-token context window (not 128 tokens) with 0 LLM output tokens.\n",
+                    encoding="utf-8",
+                )
+                pos_target = f_pos
+            else:
+                pos_target = skill_md
+
+            ssot_claim = "ModernBERT-large has a 128-token context window and outputs 500 LLM tokens."
+            res_pos = run_triage([str(pos_target)], mode="contradiction", ssot=ssot_claim, threshold=0.55)
+            pos_flagged = [r for r in res_pos["results"] if r.get("flagged")]
+            assert len(pos_flagged) >= 1 and pos_flagged[0]["noul"] >= 0.55, res_pos
+
+            f_neg = tmp_dir / "unrelated_ops.md"
+            f_neg.write_text(
+                "# Cloud Dataproc & Airflow\n\n"
+                "Provision PySpark clusters on Dataproc Serverless with autoscaling workers and "
+                "schedule daily Apache Airflow DAGs in Cloud Composer.\n\n"
+                "# Windows UIA Ghost Mouse\n\n"
+                "Dispatch background Win32 mouse click events via UI Automation tree handles "
+                "without moving the physical desktop cursor.\n",
+                encoding="utf-8",
+            )
+            res_neg = run_triage([str(f_neg)], mode="contradiction", ssot=ssot_claim, threshold=0.55, top_k=5)
+            neg_max = max((r["noul"] for r in res_neg["results"]), default=0.0)
+            assert res_neg["meta"]["flagged_count"] == 0 and neg_max < 0.25, res_neg
+
+            consistent_ssot = (
+                "ModernBERT-large uses a 512-token context window and outputs 0 LLM tokens, "
+                "while vega-U supports up to 73,728 tokens."
+            )
+            res_con = run_triage(
+                [str(pos_target)], mode="contradiction", ssot=consistent_ssot, threshold=0.55, top_k=5
+            )
+            assert res_con["meta"]["flagged_count"] == 0, res_con
+            checks["contradiction_anchors"] = {
+                "a_pos_max_noul": pos_flagged[0]["noul"],
+                "a_pos_flagged": len(pos_flagged),
+                "a_con_flagged": res_con["meta"]["flagged_count"],
+                "a_neg_max_noul": neg_max,
+                "a_neg_flagged": res_neg["meta"]["flagged_count"],
             }
 
-    state_texts = [c["text"] for c in chunks]
-    if mode == "classify" and len(labels) > 20:
-        embed_fn = laya.embed_fn_from_agent(agent)
-        preds = [laya.predict_shortlist(agent, st, questions, embed_fn=embed_fn, k=20) for st in state_texts]
+            # 9. >20 labels tournament routing (24 labels via predict_tournament)
+            many_labels = {f"topic_{i:02d}": f"Category {i} unrelated domain" for i in range(23)}
+            many_labels["gpu_cuda_inference"] = "GPU CUDA neural model inference and PyTorch batching"
+            tourn_res = predict_direct(
+                state="PyTorch executes batched neural model inference on an NVIDIA CUDA GPU.",
+                questions={
+                    "cat": {
+                        "type": "choice",
+                        "instructions": "Select the matching technical category.",
+                        "criteria": many_labels,
+                    }
+                },
+                model="en",
+            )
+            assert tourn_res["ok"] is True
+            assert "tournament" in tourn_res["result"]
+            assert tourn_res["result"]["answers"]["cat"]["choice"] in many_labels
+            checks["tournament_24_labels"] = {
+                "winner": tourn_res["result"]["answers"]["cat"]["choice"],
+                "rounds": tourn_res["result"]["tournament"]["cat"]["rounds"],
+            }
+
+            # 10. Vega conformal smoke check (when vegaml is installed)
+            if st["vegaml_available"]:
+                vega_res = predict_direct(
+                    state="ModernBERT-large uses a 512-token context window.",
+                    questions={
+                        "chk": {
+                            "type": "noul",
+                            "instructions": "Does this text mention a 512-token context window?",
+                        }
+                    },
+                    vega=True,
+                    vega_model="0.8b",
+                )
+                v_ans = vega_res["result"]["answers"]["chk"]
+                assert "unbound" not in v_ans
+                for req_key in ("prediction_set", "abstain", "route", "route_reason"):
+                    assert req_key in v_ans, v_ans
+                checks["vega_conformal"] = {
+                    "route": v_ans["route"],
+                    "abstain": v_ans["abstain"],
+                    "prediction_set": v_ans["prediction_set"],
+                }
+
+    return {
+        "ok": True,
+        "version": __version__,
+        "checks": checks,
+        "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+    }
+
+
+# ---------------------------------------------------------------------------
+# CLI Interface
+# ---------------------------------------------------------------------------
+
+
+def _print_human_report(payload: Dict[str, Any], args: argparse.Namespace) -> None:
+    meta = payload["meta"]
+    shown = payload["results"]
+    vega_part = f" | vega_escalated={meta.get('vega_escalated', 0)}" if args.vega else ""
+    print(
+        f"[XLaya v{__version__}] model={meta.get('model')} | device={meta.get('device')} "
+        f"| route={meta.get('language_route')} | mode={args.mode} "
+        f"| files={meta.get('files_scanned')} | chunks={meta.get('chunks_evaluated')}{vega_part} "
+        f"| {meta.get('elapsed_ms')} ms"
+    )
+    print("-" * 98)
+
+    if not shown:
+        print("  (No matching chunks returned.)")
+        return
+
+    if args.mode == "contradiction":
+        flagged_n = meta.get("flagged_count", 0)
+        hdr = (
+            f"Contradiction Sweep (threshold P ≥ {args.threshold:.2f}) → "
+            f"{flagged_n} flagged of {meta.get('chunks_evaluated', 0)} chunks:"
+        )
+        print(hdr)
+        for r in shown:
+            flag_str = "FLAG" if r.get("flagged") else "DIAG"
+            v_tag = ""
+            if "vega" in r:
+                v_tag = f" | vega={r['vega']['noul']:.3f}({r['vega']['route']})"
+            print(
+                f"  [{flag_str}] P(eff)={r.get('noul', 0.0):.3f} "
+                f"(rel={r.get('relevance', 0.0):.2f} × raw={r.get('noul_raw', 0.0):.2f}){v_tag} "
+                f"| {r['ref']:36s} | {r['heading'][:34]}"
+            )
+    elif args.mode == "shortlist":
+        print(f"Top-{len(shown)} Hybrid Shortlisted Sections for query: {args.query!r}")
+        for idx, r in enumerate(shown, start=1):
+            v_tag = f" | vega={r['vega']['expected_score']:.2f}" if "vega" in r else ""
+            print(
+                f"  {idx:2d}. hyb={r.get('hybrid_score', 0.0):.3f} "
+                f"(neural={r.get('expected_score', 0.0):.2f}/4.00, lex={r.get('lexical_score', 0.0):.2f})"
+                f"{v_tag} | {r['ref']:36s} | {r['heading'][:32]}"
+            )
+    elif args.mode == "classify":
+        print(f"Classification Results ({len(shown)} chunks):")
+        for r in shown:
+            v_tag = f" | vega={r['vega']['choice']}({r['vega']['route']})" if "vega" in r else ""
+            print(
+                f"  choice={str(r.get('choice', '')):18s} | conf={r.get('confidence', 0.0):.3f}"
+                f"{v_tag} | {r['ref']:36s} | {r['heading'][:34]}"
+            )
     else:
-        preds = agent.predict_batch(state_texts, questions, batch_size=batch_size)
-
-    enriched: List[Dict[str, Any]] = []
-    for ch, pred in zip(chunks, preds):
-        ans = pred["answers"]
-        item = dict(ch)
-        item["engine"] = model_id
-        if mode == "shortlist":
-            item["score"] = round(float(ans["rel"]["score"]), 3)
-            item["confidence"] = round(float(ans["rel"]["confidence"]), 3)
-        elif mode == "contradiction":
-            item["noul"] = round(float(ans["contra"]["noul"]), 3)
-            item["confidence"] = round(float(ans["contra"]["confidence"]), 3)
-        elif mode == "classify":
-            item["choice"] = ans["cat"]["choice"]
-            item["confidence"] = round(float(ans["cat"]["confidence"]), 3)
-        else:
-            item["score"] = round(float(ans["rubric"]["score"]), 3)
-            item["confidence"] = round(float(ans["rubric"]["confidence"]), 3)
-            if "contra" in ans:
-                item["noul"] = round(float(ans["contra"]["noul"]), 3)
-            else:
-                item["noul"] = 0.0
-        enriched.append(item)
-
-    return enriched, meta
+        print(f"Rubric Completeness Sweep (top {len(shown)} of {meta.get('chunks_evaluated', 0)} chunks):")
+        for r in shown:
+            contra_part = f" | P(contra)={r.get('noul', 0.0):.3f}" if args.ssot else ""
+            v_tag = f" | vega={r['vega']['expected_score']:.2f}" if "vega" in r else ""
+            print(
+                f"  score={r.get('expected_score', r.get('score', 0.0)):.2f}/4.00 "
+                f"| conf={r.get('confidence', 0.0):.3f}{contra_part}{v_tag} "
+                f"| {r['ref']:36s} | {r['heading'][:34]}"
+            )
 
 
-def main() -> int:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="XBoost /xlaya System 1 Semantic Triage & Heading Chunker CLI Engine"
+        description="XBoost /xlaya v2.0.0 — 3-Stage System 1 → System 1.5 Semantic Triage Engine"
     )
     parser.add_argument(
         "paths",
-        nargs="+",
+        nargs="*",
         help="Target files or directories to chunk and evaluate",
     )
     parser.add_argument(
@@ -485,47 +2578,42 @@ def main() -> int:
         default="rubric",
         help="Evaluation mode (default: rubric)",
     )
-    parser.add_argument(
-        "--query",
-        default="",
-        help="Target query/instructions for shortlist, rubric, or classify modes",
-    )
-    parser.add_argument(
-        "--ssot",
-        default="",
-        help="Canonical SSOT statement to test for contradictions (noul)",
-    )
-    parser.add_argument(
-        "--true-desc",
-        default="",
-        help="Custom description for noul 'true' (contradiction/violation present)",
-    )
-    parser.add_argument(
-        "--false-desc",
-        default="",
-        help="Custom description for noul 'false' (consistent/compliant)",
-    )
+    parser.add_argument("--query", default="", help="Target query/instructions for shortlist, rubric, or classify")
+    parser.add_argument("--ssot", default="", help="Canonical SSOT statement to test for contradictions (noul)")
+    parser.add_argument("--true-desc", default="", help="Custom description for noul 'true' (contradiction)")
+    parser.add_argument("--false-desc", default="", help="Custom description for noul 'false' (consistent)")
     parser.add_argument(
         "--labels",
-        default="architecture:Architecture & specs|cli:CLI scripts & commands|docs:General prose & guides",
+        default=DEFAULT_LABELS_SPEC,
         help="Label specification 'key1:desc1|key2:desc2' for classify mode",
+    )
+    parser.add_argument(
+        "--noul-labels",
+        default="",
+        help="Optional custom noul label pair, e.g. 'B,A' mapping false→B and true→A",
     )
     parser.add_argument(
         "--lang",
         choices=["auto", "en", "multi"],
         default="auto",
-        help="Language routing: auto (via laya.is_english), en, or multi",
+        help="Language routing: auto (per-chunk + head guard), en, or multi",
+    )
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cuda", "mps", "cpu"],
+        default="auto",
+        help="Execution device: auto, cuda, mps, or cpu (default: auto)",
     )
     parser.add_argument(
         "--max-chars",
         type=int,
-        default=1200,
-        help="Maximum characters per chunk (default: 1200 ≈ 300 tokens, fitting ModernBERT 512 window)",
+        default=1600,
+        help="Maximum characters per chunk (default: 1600, paired with script-aware token budget)",
     )
     parser.add_argument(
         "--whole-file",
         action="store_true",
-        help="Evaluate only the first max-chars of each file instead of splitting by heading",
+        help="Evaluate each file as a single unit (up to max-chars in Stage 1; up to ~73k tokens with --vega)",
     )
     parser.add_argument(
         "--max-chunks",
@@ -536,134 +2624,118 @@ def main() -> int:
     parser.add_argument(
         "--top-k",
         type=int,
-        default=10,
-        help="Number of top results to display in shortlist/contradiction/rubric output (default: 10)",
+        default=None,
+        help="Top results to return (default: 10 for shortlist/rubric/contradiction-diag, all [0] for classify)",
     )
     parser.add_argument(
         "--threshold",
         type=float,
-        default=0.60,
-        help="Probability threshold P(true) for flagging contradictions in contradiction mode (default: 0.60)",
+        default=0.55,
+        help="Effective contradiction threshold P(rel × contra) (default: 0.55)",
     )
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=16,
-        help="Batch size for agent.predict_batch (default: 16)",
+        default=32,
+        help="Batch size for length-sorted agent.predict_batch (default: 32)",
     )
     parser.add_argument(
         "--pattern",
-        default="*.md",
-        help="Glob pattern when scanning directories (default: *.md)",
+        default=DEFAULT_PATTERN,
+        help=f"Comma-separated glob patterns for directory scans (default: {DEFAULT_PATTERN})",
+    )
+    parser.add_argument(
+        "--lexical-prefilter",
+        type=int,
+        default=0,
+        help="Optional Stage 0 BM25 + code-span + Thai 3-gram prefilter top-K before neural pass (0 = off)",
+    )
+    parser.add_argument(
+        "--vega",
+        action="store_true",
+        help="Enable Stage 2 VegaML conformal escalation on top/borderline finalists",
+    )
+    parser.add_argument(
+        "--vega-model",
+        choices=["0.8b", "4b", "gemma-1b"],
+        default="0.8b",
+        help="VegaML reader model size for Stage 2 escalation (default: 0.8b)",
+    )
+    parser.add_argument(
+        "--vega-top-k",
+        type=int,
+        default=10,
+        help="Maximum Stage 1 finalists escalated to VegaML (default: 10)",
+    )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run built-in deterministic + neural + conformal self-test suite and exit",
     )
     parser.add_argument(
         "--json",
         action="store_true",
         help="Emit machine-readable JSON output",
     )
+    return parser
 
-    args = parser.parse_args()
-    files = collect_target_files(args.paths, pattern=args.pattern)
-    if not files:
-        print("[XLaya Sidecar] No matching files found for the given paths.", file=sys.stderr)
-        return 0
 
-    all_chunks: List[Dict[str, Any]] = []
-    for f in files:
-        all_chunks.extend(chunk_markdown_file(f, max_chars=args.max_chars, whole_file=args.whole_file))
-        if len(all_chunks) >= args.max_chunks:
-            all_chunks = all_chunks[: args.max_chunks]
-            break
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
 
-    if not all_chunks:
-        print("[XLaya Sidecar] No non-empty text chunks extracted.", file=sys.stderr)
-        return 0
+    if args.self_test:
+        report = run_self_test()
+        print(json.dumps(report, indent=2, ensure_ascii=False))
+        return 0 if report.get("ok") else 1
 
-    labels_dict = parse_label_spec(args.labels)
-    results, meta = run_laya_inference(
-        chunks=all_chunks,
-        mode=args.mode,
-        query=args.query,
-        ssot=args.ssot,
-        true_desc=args.true_desc,
-        false_desc=args.false_desc,
-        labels=labels_dict,
-        lang_mode=args.lang,
-        batch_size=args.batch_size,
-    )
+    if not args.paths:
+        print("[XLaya Error] At least one target file or directory path is required.", file=sys.stderr)
+        return 2
 
-    # Sort according to mode
-    if args.mode == "shortlist":
-        results.sort(key=lambda r: (r.get("score", 0.0), r.get("confidence", 0.0)), reverse=True)
-    elif args.mode == "contradiction":
-        results.sort(key=lambda r: (r.get("noul", 0.0), r.get("confidence", 0.0)), reverse=True)
-    elif args.mode == "rubric":
-        results.sort(key=lambda r: (r.get("score", 0.0), -r.get("noul", 0.0)), reverse=True)
+    effective_top_k = args.top_k if args.top_k is not None else (0 if args.mode == "classify" else 10)
 
-    shown = results[: args.top_k]
+    try:
+        payload = run_triage(
+            paths=args.paths,
+            mode=args.mode,
+            query=args.query,
+            ssot=args.ssot,
+            true_desc=args.true_desc,
+            false_desc=args.false_desc,
+            labels_spec=args.labels,
+            noul_labels=args.noul_labels,
+            lang=args.lang,
+            device=args.device,
+            max_chars=args.max_chars,
+            whole_file=args.whole_file,
+            max_chunks=args.max_chunks,
+            top_k=effective_top_k,
+            threshold=args.threshold,
+            batch_size=args.batch_size,
+            pattern=args.pattern,
+            lexical_prefilter=args.lexical_prefilter,
+            vega=args.vega,
+            vega_model=args.vega_model,
+            vega_top_k=args.vega_top_k,
+            resident_cache=False,
+        )
+    except ValueError as exc:
+        print(f"[XLaya Error] {exc}", file=sys.stderr)
+        return 2
 
     if args.json:
-        payload = {
-            "meta": {
-                **meta,
-                "mode": args.mode,
-                "files_scanned": len(files),
-                "chunks_evaluated": len(results),
-            },
-            "results": [
-                {k: v for k, v in item.items() if k != "text"}
-                for item in shown
-            ],
-        }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
 
-    print(
-        f"[XLaya Sidecar] model={meta.get('model')} | device={meta.get('device')} "
-        f"| mode={args.mode} | files={len(files)} | chunks={len(results)}"
-    )
-    if meta.get("laya_available") and meta.get("device") == "cpu":
-        print(
-            "  Tip: PyTorch is currently running on CPU. Install a CUDA wheel matching your GPU "
-            "for ~5-10× faster batch inference."
-        )
-    print("-" * 92)
+    if payload["meta"].get("files_scanned", 0) == 0:
+        print("[XLaya] No matching files found for the given paths.", file=sys.stderr)
+        return 0
+    if payload["meta"].get("chunks_evaluated", 0) == 0:
+        print("[XLaya] No non-empty text chunks extracted.", file=sys.stderr)
+        return 0
 
-    if args.mode == "contradiction":
-        flagged = [r for r in results if r.get("noul", 0.0) >= args.threshold]
-        print(
-            f"Contradiction Sweep (threshold P ≥ {args.threshold:.2f}) → "
-            f"{len(flagged)} flagged of {len(results)} chunks:"
-        )
-        for r in shown:
-            flag_str = "FLAG" if r.get("noul", 0.0) >= args.threshold else "OK  "
-            print(
-                f"  [{flag_str}] P(contra)={r.get('noul', 0.0):.3f} | conf={r.get('confidence', 0.0):.3f} "
-                f"| {r['ref']:36s} | {r['heading'][:34]}"
-            )
-    elif args.mode == "shortlist":
-        print(f"Top-{len(shown)} Shortlisted Sections for query: {args.query!r}")
-        for idx, r in enumerate(shown, start=1):
-            print(
-                f"  {idx:2d}. score={r.get('score', 0.0):.2f}/4.00 | conf={r.get('confidence', 0.0):.3f} "
-                f"| {r['ref']:36s} | {r['heading'][:34]}"
-            )
-    elif args.mode == "classify":
-        print(f"Classification Results (top {len(shown)} shown):")
-        for r in shown:
-            print(
-                f"  choice={r.get('choice', ''):16s} | conf={r.get('confidence', 0.0):.3f} "
-                f"| {r['ref']:36s} | {r['heading'][:34]}"
-            )
-    else:
-        print(f"Rubric Completeness Sweep (top {len(shown)} of {len(results)} chunks):")
-        for r in shown:
-            contra_part = f" | P(contra)={r.get('noul', 0.0):.3f}" if args.ssot else ""
-            print(
-                f"  score={r.get('score', 0.0):.2f}/4.00 | conf={r.get('confidence', 0.0):.3f}{contra_part} "
-                f"| {r['ref']:36s} | {r['heading'][:34]}"
-            )
-
+    _print_human_report(payload, args)
     return 0
 
 

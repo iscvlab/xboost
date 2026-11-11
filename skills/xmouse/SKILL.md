@@ -13,7 +13,7 @@ OS-native, non-intrusive computer-use engine (`/xmouse`, package `@iscvlab/xmous
 Red failure modes prevented:
 1. Hijacking the human user's physical mouse cursor (`SetCursorPos` / `pyautogui`) and stealing window focus while the user is working.
 2. Taking slow full-screen Vision LLM screenshots (`400+ ms`, `1,500+` tokens) when the OS Accessibility / Win32 UIA tree resolves exact control coordinates in `< 1 ms`.
-3. Colliding on a single shared hardware cursor when multiple [`/xultra`](../xultra/SKILL.md) subagents automate distinct desktop windows concurrently.
+3. Colliding on a single shared hardware cursor when multiple `/xultra` subagents automate distinct desktop windows concurrently.
 4. Fighting the human user during physical viewport drags instead of yielding control within `< 10 ms` on human mouse delta.
 
 ---
@@ -102,8 +102,8 @@ python3 "<SKILL_DIR>/scripts/xmouse_cli.py" self-test
 
 | Chained Command | Execution Protocol |
 | :--- | :--- |
-| **`/xmouse` + [`/xultra`](../xultra/SKILL.md)** | **Multi-Window Parallel Ghost Sharding (`N` Windows, `0` Cursor Collisions)**: Assign each [`/xultra`](../xultra/SKILL.md) builder shard a distinct target `HWND` and `agent_id` (`Agent-1..N`). All shards dispatch background `Ghost Click` / `Ghost Type` calls concurrently while updating their color-coded badge on the shared `MultiCursorHUD`. |
-| **`/xmouse` + [`/xboost`](../xboost/SKILL.md)** | **4-Axis Live GUI Verification (`UL-01..UL-08`)**: Enforces [`deep_audit_protocol.md`](../xboost/references/deep_audit_protocol.md) runtime probes (`physical_cursor_delta_px == [0, 0]`, `latency_ms < 5.0`, `∑ cell_area == W × H`, and `reaction_latency_ms < 10.0`). |
-| **`/xmouse` + [`/xlearn`](../xlearn/SKILL.md)** | **Desktop GUI & CAD/GIS Pattern Ratchet (`Tier 1C`)**: Distills verified UIA control selectors, custom-canvas SoM fallback patterns, and multi-monitor DPI guardrails into `COMPOUND_LEARNING_PLAYBOOK.md` (`Tier 1C`) with automatic [`/xsync`](../xsync/SKILL.md) `--federated` mirror closure. |
-| **`/xmouse` + [`/xsync`](../xsync/SKILL.md)** | **Cross-Repo Skill & Package Mirror Parity**: Verifies SHA-256 byte equality between `skills/xmouse/` and mirrored standalone package trees via `audit_workspace_docs.py --federated`. |
+| **`/xmouse` + `/xultra`** | **Multi-Window Parallel Ghost Sharding (`N` Windows, `0` Cursor Collisions)**: Assign each `/xultra` builder shard a distinct target `HWND` and `agent_id` (`Agent-1..N`). All shards dispatch background `Ghost Click` / `Ghost Type` calls concurrently while updating their color-coded badge on the shared `MultiCursorHUD`. |
+| **`/xmouse` + `/xboost`** | **4-Axis Live GUI Verification (`UL-01..UL-08`)**: Enforces `xboost/references/deep_audit_protocol.md` runtime probes (`physical_cursor_delta_px == [0, 0]`, `latency_ms < 5.0`, `∑ cell_area == W × H`, and `reaction_latency_ms < 10.0`). |
+| **`/xmouse` + `/xlearn`** | **Desktop GUI & CAD/GIS Pattern Ratchet (`Tier 1C`)**: Distills verified UIA control selectors, custom-canvas SoM fallback patterns, and multi-monitor DPI guardrails into `COMPOUND_LEARNING_PLAYBOOK.md` (`Tier 1C`) with automatic `/xsync` `--federated` mirror closure. |
+| **`/xmouse` + `/xsync`** | **Cross-Repo Skill & Package Mirror Parity**: Verifies SHA-256 byte equality between `skills/xmouse/` and mirrored standalone package trees via `audit_workspace_docs.py --federated`. |
 | **`/xmouse` + `/rhino` / `/qgis`** | **Hybrid MCP + Native Dialog Automation**: Use `/rhino` or `/qgis` MCP tools for document/geometry operations, and use `/xmouse` (`inspect` → `click` / `type`) to dismiss or populate modal native OS file/export dialogs without moving the user's physical mouse. |

@@ -54,6 +54,8 @@ def strip_code_regions(text: str, suffix: str) -> str:
     """Strip fenced code blocks, inline code spans, and HTML script/style blocks before prose scanning."""
     cleaned = text
     if suffix == ".md":
+        # Strip collapsible <details>...</details> academic LaTeX citation blocks
+        cleaned = re.sub(r"<details\b[^>]*>[\s\S]*?</details>", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"(`{3,}|~{3,})[\s\S]*?\1", "", cleaned)
         cleaned = re.sub(r"``[^\n]+?``", "", cleaned)
         cleaned = re.sub(r"\[`([^`\n]+)`\]\(", r"[\1](", cleaned)
