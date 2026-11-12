@@ -14,7 +14,7 @@ import sys
 import threading
 from typing import Any, Dict, List, Optional
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 sys.dont_write_bytecode = True
 
@@ -130,7 +130,7 @@ MCP_TOOLS: List[Dict[str, Any]] = [
     {
         "name": "xlaya_status",
         "description": (
-            "Inspect XLaya System 1 runtime health, warm-loaded models (`en`, `multi`, `vegaml`), "
+            "Inspect XLaya System 1 runtime health, warm-loaded models (`en`, `multi`, `typed`, `ensemble`, `vegaml`), "
             "CUDA/VRAM availability, MCP server version, and idle auto-unload TTL."
         ),
         "inputSchema": {
@@ -142,7 +142,8 @@ MCP_TOOLS: List[Dict[str, Any]] = [
         "name": "xlaya_triage",
         "description": (
             "Run high-throughput System 1 document/section triage (`shortlist`, `contradiction`, "
-            "`rubric`, `classify`) across files or directories with optional VegaML escalation."
+            "`rubric`, `classify`) across files or directories with optional `--thorough` 4-facet ensemble scan, "
+            "multi-view debiasing (`views=1..3`), trained `policy_path`, and VegaML escalation."
         ),
         "inputSchema": {
             "type": "object",
@@ -190,9 +191,9 @@ MCP_TOOLS: List[Dict[str, Any]] = [
                 },
                 "lang": {
                     "type": "string",
-                    "enum": ["auto", "en", "multi"],
+                    "enum": ["auto", "en", "multi", "typed", "ensemble"],
                     "default": "auto",
-                    "description": "Laya model language selector (`auto`, `en`, `multi`).",
+                    "description": "Laya model/ensemble selector (`auto`, `en`, `multi`, `typed`, `ensemble`).",
                 },
                 "device": {
                     "type": "string",
@@ -246,14 +247,49 @@ MCP_TOOLS: List[Dict[str, Any]] = [
                 },
                 "vega_model": {
                     "type": "string",
-                    "enum": ["0.8b", "4b", "gemma-1b"],
-                    "default": "0.8b",
-                    "description": "VegaML model tier (`0.8b`, `4b`, `gemma-1b`).",
+                    "enum": ["auto", "0.8b", "4b", "gemma-1b", "27b"],
+                    "default": "auto",
+                    "description": "VegaML model tier (`auto`, `0.8b`, `4b`, `gemma-1b`, `27b`).",
                 },
                 "vega_top_k": {
                     "type": "integer",
                     "default": 10,
                     "description": "Number of top Laya candidates to re-score with VegaML.",
+                },
+                "views": {
+                    "type": "integer",
+                    "enum": [1, 2, 3],
+                    "default": 1,
+                    "description": (
+                        "Multi-view debiasing passes (`1` = standard, `2` = option-order reversal, "
+                        "`3` = reversal + prose template paraphrase; returns `view_agreement`)."
+                    ),
+                },
+                "thorough": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Enable thorough scan: Stage 1 `ensemble` (`0.45*en + 0.55*typed`) + inter-model "
+                        "`disagreement` gate (`>= 0.15`) + 4-facet decomposed rubric scoring + `file_summaries` "
+                        "+ automatic Stage 2 `views=3` escalation when `vegaml` is available."
+                    ),
+                },
+                "rubric_preset": {
+                    "type": "string",
+                    "enum": ["default", "architecture", "code_audit", "doc_sync", "research"],
+                    "default": "default",
+                    "description": (
+                        "Domain-calibrated 4-facet rubric preset (`default`, `architecture`, "
+                        "`code_audit`, `doc_sync`, `research`)."
+                    ),
+                },
+                "policy_path": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Optional directory path to a trained `VegaAgent` TTT/conformal policy "
+                        "(`heads.npz`, `calibration.json`, `manifest.json`, `questions.json`)."
+                    ),
                 },
             },
             "required": ["paths"],
@@ -262,8 +298,9 @@ MCP_TOOLS: List[Dict[str, Any]] = [
     {
         "name": "xlaya_predict",
         "description": (
-            "Execute raw typed System 1 decisions (`choice`, `score`, `noul`) over a single `state` "
-            "or batch `states` using warm Laya and optional VegaML escalation."
+            "Execute raw typed System 1 decisions (`choice`, `score`, `noul`) over a single `state`, "
+            "batch `states`, or local multimodal input (`image`, `audio`, `video`) using warm Laya "
+            "(`en`, `multi`, `typed`, `ensemble`), multi-view debiasing, `policy_path`, and VegaML escalation."
         ),
         "inputSchema": {
             "type": "object",
@@ -285,9 +322,9 @@ MCP_TOOLS: List[Dict[str, Any]] = [
                 },
                 "model": {
                     "type": "string",
-                    "enum": ["auto", "en", "multi"],
+                    "enum": ["auto", "en", "multi", "typed", "ensemble"],
                     "default": "auto",
-                    "description": "Laya model selector (`auto`, `en`, `multi`).",
+                    "description": "Laya model/ensemble selector (`auto`, `en`, `multi`, `typed`, `ensemble`).",
                 },
                 "device": {
                     "type": "string",
@@ -312,28 +349,114 @@ MCP_TOOLS: List[Dict[str, Any]] = [
                 },
                 "vega_model": {
                     "type": "string",
-                    "enum": ["0.8b", "4b", "gemma-1b"],
-                    "default": "0.8b",
-                    "description": "VegaML model tier (`0.8b`, `4b`, `gemma-1b`).",
+                    "enum": ["auto", "0.8b", "4b", "gemma-1b", "27b"],
+                    "default": "auto",
+                    "description": "VegaML model tier (`auto`, `0.8b`, `4b`, `gemma-1b`, `27b`).",
+                },
+                "views": {
+                    "type": "integer",
+                    "enum": [1, 2, 3],
+                    "default": 1,
+                    "description": "Multi-view debiasing passes (`1`, `2`, or `3`; returns `view_agreement`).",
+                },
+                "policy_path": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional directory path to a trained `VegaAgent` TTT/conformal policy.",
+                },
+                "image": {
+                    "type": "string",
+                    "description": "Optional local image file path for multimodal `VegaVision` decision evaluation.",
+                },
+                "audio": {
+                    "type": "string",
+                    "description": "Optional local audio file path for local ASR + decision evaluation.",
+                },
+                "video": {
+                    "type": "string",
+                    "description": "Optional local video file path for local speech/contact-sheet decision evaluation.",
                 },
             },
             "required": ["questions"],
         },
     },
     {
+        "name": "xlaya_fit",
+        "description": (
+            "Fit and persist a calibrated `VegaAgent` TTTHead + split-conformal policy "
+            "(`heads.npz`, `calibration.json`, `manifest.json`, `questions.json`) with OOD `outbound` centroid guard."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "rows": {
+                    "description": (
+                        "Labeled training rows (`[{'state': ..., 'gold': {...}}]` array or string path "
+                        "to a `.csv` / `.jsonl` file)."
+                    ),
+                },
+                "questions": {
+                    "type": "object",
+                    "description": (
+                        "Mapping of `question_id -> {type: 'choice'|'score'|'noul', "
+                        "instructions: str, criteria: dict|list}`."
+                    ),
+                },
+                "policy_path": {
+                    "type": "string",
+                    "description": (
+                        "Directory path where `heads.npz`, `calibration.json`, `manifest.json`, "
+                        "and `questions.json` will be saved."
+                    ),
+                },
+                "vega_model": {
+                    "type": "string",
+                    "enum": ["auto", "0.8b", "4b", "gemma-1b", "27b"],
+                    "default": "0.8b",
+                    "description": "VegaML model tier (`auto`, `0.8b`, `4b`, `gemma-1b`, `27b`).",
+                },
+                "device": {
+                    "type": "string",
+                    "enum": ["auto", "cuda", "mps", "cpu"],
+                    "default": "auto",
+                    "description": "Compute device (`auto`, `cuda`, `mps`, `cpu`).",
+                },
+                "folds": {
+                    "type": "integer",
+                    "default": 5,
+                    "description": "Number of out-of-fold splits for split-conformal calibration.",
+                },
+                "calibrate": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Run split-conformal threshold and temperature calibration.",
+                },
+                "target_precision": {
+                    "type": "number",
+                    "default": 0.95,
+                    "description": "Target precision in `(0.0, 1.0)` for conformal auto-routing calibration.",
+                },
+            },
+            "required": ["rows", "questions", "policy_path"],
+        },
+    },
+    {
         "name": "xlaya_preload",
         "description": (
-            "Pre-warm Laya (`en`, `multi`) and/or VegaML models in RAM/VRAM so subsequent MCP calls "
-            "skip cold-start checkpoint loading."
+            "Pre-warm Laya (`en`, `multi`, `typed`, `ensemble`) and/or VegaML models in RAM/VRAM "
+            "so subsequent MCP calls skip cold-start checkpoint loading."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "models": {
                     "type": "array",
-                    "items": {"type": "string", "enum": ["en", "multi"]},
+                    "items": {"type": "string", "enum": ["en", "multi", "typed", "ensemble"]},
                     "default": ["en"],
-                    "description": "Laya models to preload (`['en']`, `['multi']`, or `['en', 'multi']`).",
+                    "description": (
+                        "Laya models to preload (`['en']`, `['multi']`, `['typed']`, `['ensemble']`, "
+                        "or any combination)."
+                    ),
                 },
                 "vega": {
                     "type": "boolean",
@@ -342,9 +465,9 @@ MCP_TOOLS: List[Dict[str, Any]] = [
                 },
                 "vega_model": {
                     "type": "string",
-                    "enum": ["0.8b", "4b", "gemma-1b"],
-                    "default": "0.8b",
-                    "description": "VegaML model tier (`0.8b`, `4b`, `gemma-1b`).",
+                    "enum": ["auto", "0.8b", "4b", "gemma-1b", "27b"],
+                    "default": "auto",
+                    "description": "VegaML model tier (`auto`, `0.8b`, `4b`, `gemma-1b`, `27b`).",
                 },
                 "device": {
                     "type": "string",
@@ -417,8 +540,12 @@ def dispatch_mcp_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                     pattern=_arg_str(args, "pattern", _DEFAULT_PATTERN),
                     lexical_prefilter=_arg_int(args, "lexical_prefilter", 0),
                     vega=_arg_bool(args, "vega", False),
-                    vega_model=_arg_str(args, "vega_model", "0.8b"),
+                    vega_model=_arg_str(args, "vega_model", "auto"),
                     vega_top_k=_arg_int(args, "vega_top_k", 10),
+                    views=_arg_int(args, "views", 1),
+                    thorough=_arg_bool(args, "thorough", False),
+                    rubric_preset=_arg_str(args, "rubric_preset", "default"),
+                    policy_path=_arg_str(args, "policy_path", ""),
                 )
                 return _normalize_dict_payload(res)
             finally:
@@ -431,6 +558,9 @@ def dispatch_mcp_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             raw_states = args.get("states")
             if raw_states is not None and not isinstance(raw_states, list):
                 raise ValueError("Parameter 'states' must be an array when provided.")
+            image_arg = _arg_str(args, "image", "").strip() or None
+            audio_arg = _arg_str(args, "audio", "").strip() or None
+            video_arg = _arg_str(args, "video", "").strip() or None
 
             _cancel_idle_timer()
             try:
@@ -443,7 +573,39 @@ def dispatch_mcp_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                     batch_size=_arg_int(args, "batch_size", 32),
                     group_size=_arg_int(args, "group_size", 16),
                     vega=_arg_bool(args, "vega", False),
+                    vega_model=_arg_str(args, "vega_model", "auto"),
+                    views=_arg_int(args, "views", 1),
+                    policy_path=_arg_str(args, "policy_path", ""),
+                    image=image_arg,
+                    audio=audio_arg,
+                    video=video_arg,
+                )
+                return _normalize_dict_payload(res)
+            finally:
+                _reset_idle_timer()
+
+        if name == "xlaya_fit":
+            raw_rows = args.get("rows")
+            if raw_rows is None or (isinstance(raw_rows, (str, list)) and len(raw_rows) == 0):
+                raise ValueError("Parameter 'rows' must be a non-empty array of row objects or a file path.")
+            raw_questions = args.get("questions")
+            if not isinstance(raw_questions, dict) or not raw_questions:
+                raise ValueError("Parameter 'questions' must be a non-empty object.")
+            policy_path = _arg_str(args, "policy_path", "").strip()
+            if not policy_path:
+                raise ValueError("Parameter 'policy_path' must be a non-empty directory path.")
+
+            _cancel_idle_timer()
+            try:
+                res = backend.fit_policy(
+                    rows=raw_rows,
+                    questions=raw_questions,
+                    policy_path=policy_path,
                     vega_model=_arg_str(args, "vega_model", "0.8b"),
+                    device=_arg_str(args, "device", "auto"),
+                    folds=_arg_int(args, "folds", 5),
+                    calibrate=_arg_bool(args, "calibrate", True),
+                    target_precision=_arg_float(args, "target_precision", 0.95),
                 )
                 return _normalize_dict_payload(res)
             finally:
@@ -456,7 +618,7 @@ def dispatch_mcp_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             elif isinstance(raw_models, str):
                 cleaned = raw_models.strip()
                 if cleaned.lower() == "all":
-                    models_list = ["en", "multi"]
+                    models_list = ["en", "multi", "typed"]
                 else:
                     models_list = [m.strip() for m in cleaned.split(",") if m.strip()]
             elif isinstance(raw_models, (list, tuple)):
@@ -469,7 +631,7 @@ def dispatch_mcp_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                 res = backend.preload_models(
                     models=models_list,
                     vega=_arg_bool(args, "vega", False),
-                    vega_model=_arg_str(args, "vega_model", "0.8b"),
+                    vega_model=_arg_str(args, "vega_model", "auto"),
                     device=_arg_str(args, "device", "auto"),
                 )
                 return _normalize_dict_payload(res)
@@ -582,7 +744,14 @@ def run_self_check() -> Dict[str, Any]:
 
     list_resp = handle_jsonrpc_request({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})
     tools = (list_resp or {}).get("result", {}).get("tools", [])
-    expected_names = ["xlaya_status", "xlaya_triage", "xlaya_predict", "xlaya_preload", "xlaya_unload"]
+    expected_names = [
+        "xlaya_status",
+        "xlaya_triage",
+        "xlaya_predict",
+        "xlaya_fit",
+        "xlaya_preload",
+        "xlaya_unload",
+    ]
     actual_names = [t.get("name") for t in tools]
     if actual_names != expected_names:
         raise RuntimeError(f"tools/list mismatch: expected {expected_names}, got {actual_names}")

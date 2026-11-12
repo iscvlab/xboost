@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-laya_triage.py — 3-Stage System 1 → System 1.5 Semantic Triage & Conformal Cascade Engine
-Part of the XBoost Agent Skill Framework (/xlaya v2.0.0).
+laya_triage.py — 3-Stage System 1 → System 1.5 Semantic Triage, Multi-Facet Rubric & Conformal Cascade Engine
+Part of the XBoost Agent Skill Framework (/xlaya v2.1.0).
 
 Architecture:
 - Stage 0 (Deterministic Chunker + Lexical Engine):
@@ -9,13 +9,16 @@ Architecture:
   • Script-aware token budget estimator (English ≤ 380 est. tokens, Multilingual ≤ 780 est. tokens)
   • Multi-format structured chunking (.md, .txt, .html/.htm, .jsonl, .json, .csv) with disambiguated refs
   • Stdlib BM25 + code-span / CLI-flag / identifier bonus + overlapping Thai character 3-grams
-- Stage 1 (ModernBERT Neural System 1):
+- Stage 1 (ModernBERT Multi-Encoder Jury — english + typed-decisions + mmBERT):
   • Thread-safe resident model cache (_MODEL_CACHE) + offline-first local HF snapshot resolution
-  • Per-chunk English vs Multilingual routing conservation + Head-Language Guard
-  • 2-question joint contradiction calibration (is_relevant × contradicts_ssot)
-  • Elimination tournament routing via laya.predict_tournament for >20 choice labels
-- Stage 2 (VegaML Conformal System 1.5 Escalation):
-  • Opt-in --vega conformal prediction sets, abstention flags, and route reasons on top finalists
+  • Support for 'en', 'multi', 'typed' (subfolder='typed-decisions'), and 'ensemble' (0.45*en + 0.55*typed)
+  • Per-item inter-model disagreement & model_agreement telemetry for automatic Stage 2 escalation
+  • 4-facet decomposed rubric scoring (specificity, completeness, consistency, actionability) + file summaries
+- Stage 2 (VegaML Conformal System 1.5 Escalation & Persistent TTT Calibration):
+  • Hardware-aware vega_model selector ('auto' -> '4b' or '0.8b', plus 'gemma-1b', '27b')
+  • Multi-view test-time surface debiasing (views=1|2|3 reversing option order & prose templates -> view_agreement)
+  • Persistent TTTHead + split-conformal policy training (fit_policy / load_calibration / outbound OOD guard)
+  • Local multimodal inference (image, audio, video) through VegaAgent
 """
 
 from __future__ import annotations
@@ -40,9 +43,9 @@ import time
 import warnings
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 sys.dont_write_bytecode = True
 if hasattr(sys.stdout, "reconfigure"):
@@ -116,6 +119,132 @@ DEFAULT_RELEVANCE_CRITERIA = [
 ]
 
 VALID_MODES = frozenset({"rubric", "contradiction", "shortlist", "classify"})
+VALID_VEGA_MODELS = frozenset({"auto", "0.8b", "08b", "4b", "gemma-1b", "27b"})
+
+FACET_WEIGHTS: Dict[str, float] = {
+    "specificity": 0.30,
+    "completeness": 0.30,
+    "consistency": 0.20,
+    "actionability": 0.20,
+}
+
+RUBRIC_PRESETS: Dict[str, Dict[str, Dict[str, Any]]] = {
+    "default": {
+        "specificity": {
+            "instructions": "Rate the technical specificity, concrete parameters, versions, and exact identifiers.",
+            "criteria": [
+                "Vague prose with no concrete identifiers, parameters, or versions",
+                "Mentions general concepts with minimal technical specifics",
+                "Includes partial parameters, commands, or module references",
+                "Detailed technical specification with concrete parameters and versions",
+                "Exhaustive specification with exact signatures, constants, and CLI parameters",
+            ],
+        },
+        "completeness": {
+            "instructions": "Rate the structural completeness, boundary coverage, and edge-case handling.",
+            "criteria": [
+                "Incomplete fragment or stub missing core workflow steps",
+                "Covers only basic happy path without boundaries or edge cases",
+                "Covers primary workflow with partial boundary conditions",
+                "Comprehensive coverage of workflow, boundaries, and fallback rules",
+                "Complete end-to-end specification covering all branches, edge cases, and invariants",
+            ],
+        },
+        "consistency": {
+            "instructions": "Rate the internal coherence, invariant clarity, and absence of ambiguous claims.",
+            "criteria": [
+                "Internally contradictory or severely ambiguous statements",
+                "Contains loosely defined terms or potential terminology drift",
+                "Generally coherent with minor unstated assumptions",
+                "Internally consistent with explicit constraints and definitions",
+                "Strictly coherent with locked mathematical or architectural invariants",
+            ],
+        },
+        "actionability": {
+            "instructions": "Rate the execution and verification readiness with concrete, falsifiable checks.",
+            "criteria": [
+                "Purely aspirational with no actionable steps or verification criteria",
+                "High-level guidance requiring substantial interpretation to execute",
+                "Moderately actionable with basic usage examples",
+                "Directly actionable with clear execution steps and expected outputs",
+                "Immediately executable and verifiable with exact Red-to-Green probes and receipts",
+            ],
+        },
+    },
+    "architecture": {
+        "specificity": {
+            "instructions": "Rate how clearly module boundaries, interfaces, and seam signatures are specified.",
+            "criteria": DEFAULT_RUBRIC_CRITERIA,
+        },
+        "completeness": {
+            "instructions": "Rate coverage of data flow, resource lifecycle, and failure recovery boundaries.",
+            "criteria": DEFAULT_RUBRIC_CRITERIA,
+        },
+        "consistency": {
+            "instructions": "Rate adherence to deep-module invariants and single-source-of-truth contracts.",
+            "criteria": DEFAULT_RUBRIC_CRITERIA,
+        },
+        "actionability": {
+            "instructions": "Rate readiness for surgical implementation and end-to-end integration testing.",
+            "criteria": DEFAULT_RUBRIC_CRITERIA,
+        },
+    },
+    "code_audit": {
+        "specificity": {
+            "instructions": "Rate the precision of type contracts, numerical bounds, and error handling.",
+            "criteria": DEFAULT_RUBRIC_CRITERIA,
+        },
+        "completeness": {
+            "instructions": "Rate coverage of boundary inputs, null/empty guards, and peer branches.",
+            "criteria": DEFAULT_RUBRIC_CRITERIA,
+        },
+        "consistency": {
+            "instructions": "Rate conservation laws, causal ordering, and absence of silent fallbacks.",
+            "criteria": DEFAULT_RUBRIC_CRITERIA,
+        },
+        "actionability": {
+            "instructions": "Rate testability and presence of deterministic runtime verification probes.",
+            "criteria": DEFAULT_RUBRIC_CRITERIA,
+        },
+    },
+    "doc_sync": {
+        "specificity": {
+            "instructions": "Rate accuracy of version numbers, CLI flags, file links, and schema tables.",
+            "criteria": DEFAULT_RUBRIC_CRITERIA,
+        },
+        "completeness": {
+            "instructions": "Rate completeness of feature documentation across all supported modes and tools.",
+            "criteria": DEFAULT_RUBRIC_CRITERIA,
+        },
+        "consistency": {
+            "instructions": "Rate alignment with canonical SSOT metrics and absence of stale legacy references.",
+            "criteria": DEFAULT_RUBRIC_CRITERIA,
+        },
+        "actionability": {
+            "instructions": "Rate clarity of copy-paste CLI commands and quick-start examples.",
+            "criteria": DEFAULT_RUBRIC_CRITERIA,
+        },
+    },
+    "research": {
+        "specificity": {
+            "instructions": "Rate primary-source citation depth, exact benchmark numbers, and dataset sizes.",
+            "criteria": DEFAULT_RUBRIC_CRITERIA,
+        },
+        "completeness": {
+            "instructions": "Rate coverage of competing baselines, trade-offs, and hardware constraints.",
+            "criteria": DEFAULT_RUBRIC_CRITERIA,
+        },
+        "consistency": {
+            "instructions": "Rate methodological rigor, calibration metrics (ECE/AURC), and fair comparisons.",
+            "criteria": DEFAULT_RUBRIC_CRITERIA,
+        },
+        "actionability": {
+            "instructions": "Rate how directly the findings translate into concrete engineering decisions.",
+            "criteria": DEFAULT_RUBRIC_CRITERIA,
+        },
+    },
+}
+VALID_RUBRIC_PRESETS = frozenset(RUBRIC_PRESETS.keys())
 
 _CACHE_LOCK = threading.RLock()
 _MODEL_CACHE: Dict[str, Tuple[Any, str]] = {}
@@ -184,9 +313,16 @@ def _normalize_model_key(name: str) -> str:
         return "english"
     if raw in ("multi", "multilingual", "ml"):
         return "multilingual"
+    if raw in ("typed", "typed-decisions", "typed_decisions"):
+        return "typed-decisions"
+    if raw == "ensemble":
+        return "ensemble"
     if raw.startswith("vega:"):
         return raw
-    raise ValueError(f"Unsupported model key {name!r}; expected 'en', 'english', 'multi', or 'multilingual'.")
+    raise ValueError(
+        f"Unsupported model key {name!r}; expected 'en', 'english', 'multi', "
+        "'multilingual', 'typed', 'typed-decisions', or 'ensemble'."
+    )
 
 
 def _has_valid_laya_checkpoint(snap_dir: str, subfolder: Optional[str]) -> bool:
@@ -250,7 +386,14 @@ def _load_laya_checkpoint(canon_key: str, resolved_device: str, cache: bool = Tr
         if cached is not None and cached[1] == resolved_device:
             return cached[0]
 
-        subfolder = None if canon_key == "english" else "multilingual"
+        subfolder_map: Dict[str, Optional[str]] = {
+            "english": None,
+            "multilingual": "multilingual",
+            "typed-decisions": "typed-decisions",
+        }
+        if canon_key not in subfolder_map:
+            raise ValueError(f"Unsupported Stage 1 checkpoint key: {canon_key!r}")
+        subfolder = subfolder_map[canon_key]
         local_snap = _resolve_local_laya_snapshot(subfolder)
         target_id = local_snap if local_snap is not None else "convaiinnovations/laya"
 
@@ -274,8 +417,57 @@ def _load_laya_checkpoint(canon_key: str, resolved_device: str, cache: bool = Tr
         return agent
 
 
+def _is_hf_repo_cached(repo_id: str) -> bool:
+    hf_cache = os.environ.get("HF_HUB_CACHE") or os.path.join(
+        os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface"),
+        "hub",
+    )
+    folder_name = "models--" + repo_id.replace("/", "--")
+    snaps_dir = Path(hf_cache) / folder_name / "snapshots"
+    if not snaps_dir.is_dir():
+        return False
+    try:
+        for snap in snaps_dir.iterdir():
+            if snap.is_dir() and any(snap.glob("*.safetensors")):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _resolve_vega_model(vega_model: str, resolved_device: str) -> str:
+    raw = (vega_model or "auto").strip().lower()
+    if raw == "08b":
+        return "0.8b"
+    if raw not in VALID_VEGA_MODELS:
+        raise ValueError(
+            f"Unsupported vega_model {vega_model!r}; expected one of {sorted(VALID_VEGA_MODELS)}."
+        )
+    if raw != "auto":
+        return raw
+
+    # Hardware-aware auto-selector: prefer 4b on >=10 GB CUDA VRAM when cached locally, else 0.8b
+    if resolved_device.startswith("cuda") and _is_hf_repo_cached("Qwen/Qwen3.5-4B"):
+        try:
+            import torch  # type: ignore
+
+            if torch.cuda.is_available():
+                free_b, total_b = torch.cuda.mem_get_info()
+                if free_b >= int(9.5 * (1024 ** 3)) or total_b >= int(14.0 * (1024 ** 3)):
+                    return "4b"
+        except Exception:  # nosec B110
+            pass
+    return "0.8b"
+
+
 def _resolve_local_vega_snapshot(vega_model: str) -> Optional[str]:
-    variant_map = {"0.8b": "", "08b": "", "4b": "Qwen3.5-4B", "gemma-1b": "gemma-3-1b-it"}
+    variant_map = {
+        "0.8b": "",
+        "08b": "",
+        "4b": "Qwen3.5-4B",
+        "gemma-1b": "gemma-3-1b-it",
+        "27b": "Qwen3.8-27B",
+    }
     key = (vega_model or "0.8b").strip().lower()
     if key not in variant_map:
         return None
@@ -302,35 +494,169 @@ def _resolve_local_vega_snapshot(vega_model: str) -> Optional[str]:
     return None
 
 
-def _load_vega_checkpoint(vega_model: str, resolved_device: str, cache: bool = True) -> Any:
+def _apply_vega_policy_state(agent: Any, policy_path: str) -> None:
+    norm_policy = str(Path(policy_path).resolve()) if policy_path and policy_path.strip() else ""
+    current_policy = getattr(agent, "_xlaya_policy_path", "")
+    if norm_policy:
+        if current_policy != norm_policy:
+            agent.vega.heads.clear()
+            agent.calibration = None
+            agent._novelty = None
+            agent.load_calibration(norm_policy, verify=True)
+            agent._xlaya_policy_path = norm_policy
+    elif current_policy:
+        agent.vega.heads.clear()
+        agent.calibration = None
+        agent._novelty = None
+        agent._xlaya_policy_path = ""
+
+
+def _load_vega_checkpoint(
+    vega_model: str,
+    resolved_device: str,
+    cache: bool = True,
+    policy_path: str = "",
+) -> Any:
     import laya  # type: ignore
 
-    cache_key = f"vega:{vega_model}"
+    eff_model = _resolve_vega_model(vega_model, resolved_device)
+    cache_key = f"vega:{eff_model}"
     with _CACHE_LOCK:
         cached = _MODEL_CACHE.get(cache_key)
         if cached is not None and cached[1] == resolved_device:
-            return cached[0]
+            agent = cached[0]
+            _apply_vega_policy_state(agent, policy_path)
+            return agent
 
-        local_vega = _resolve_local_vega_snapshot(vega_model)
-        vega_target = local_vega if local_vega is not None else vega_model
+        local_vega = _resolve_local_vega_snapshot(eff_model)
+        vega_target = local_vega if local_vega is not None else eff_model
         with warnings.catch_warnings(), contextlib.redirect_stdout(sys.stderr):
             warnings.simplefilter("ignore", RuntimeWarning)
             warnings.simplefilter("ignore", UserWarning)
             try:
-                agent = laya.load(vegaml=vega_target, device=resolved_device)
+                if eff_model == "27b" and local_vega is None:
+                    agent = laya.load(
+                        vegaml="0.8b",
+                        backbone="Qwen/Qwen3.8-27B",
+                        device=resolved_device,
+                    )
+                else:
+                    agent = laya.load(vegaml=vega_target, device=resolved_device)
             except Exception as exc:
                 if local_vega is not None:
                     print(
                         f"[XLaya] Local Vega snapshot load failed ({exc}); retrying via hub id.",
                         file=sys.stderr,
                     )
-                    agent = laya.load(vegaml=vega_model, device=resolved_device)
+                    if eff_model == "27b":
+                        agent = laya.load(
+                            vegaml="0.8b",
+                            backbone="Qwen/Qwen3.8-27B",
+                            device=resolved_device,
+                        )
+                    else:
+                        agent = laya.load(vegaml=eff_model, device=resolved_device)
                 else:
                     raise
 
+        agent._xlaya_policy_path = ""
+        _apply_vega_policy_state(agent, policy_path)
         if cache:
             _MODEL_CACHE[cache_key] = (agent, resolved_device)
         return agent
+
+
+def fit_policy(
+    rows: Any,
+    questions: Dict[str, Dict[str, Any]],
+    policy_path: str,
+    *,
+    vega_model: str = "0.8b",
+    device: str = "auto",
+    folds: int = 5,
+    calibrate: bool = True,
+    target_precision: float = 0.95,
+    resident_cache: bool = True,
+) -> Dict[str, Any]:
+    """Train TTT linear readout heads and split-conformal calibration, saving a reloadable policy."""
+    if not questions or not isinstance(questions, dict):
+        raise ValueError("fit_policy requires a non-empty 'questions' dictionary.")
+    if not policy_path or not str(policy_path).strip():
+        raise ValueError("fit_policy requires a non-empty 'policy_path' directory.")
+
+    t0 = time.perf_counter()
+    resolved_device = _resolve_device(device)
+    eff_vega = _resolve_vega_model(vega_model, resolved_device)
+    v_questions = _strip_noul_labels_for_vega(questions)
+
+    v_agent = _load_vega_checkpoint(eff_vega, resolved_device, cache=resident_cache, policy_path="")
+    with _CACHE_LOCK:
+        v_agent.vega.heads.clear()
+        v_agent.calibration = None
+        v_agent._novelty = None
+        v_agent._xlaya_policy_path = ""
+
+        # Auto-adapt folds down to >=2 when small calibration sets (<35 rows) are supplied
+        parsed_rows = v_agent.load_rows(rows, v_questions) if isinstance(rows, (str, os.PathLike)) else list(rows)
+        n_rows = len(parsed_rows)
+        eff_folds = max(2, int(folds))
+        while eff_folds > 2 and n_rows < v_agent.min_rows(v_questions, folds=eff_folds, calibrate=calibrate):
+            eff_folds -= 1
+
+        eff_calibrate = bool(calibrate)
+        if eff_calibrate and n_rows < v_agent.min_rows(v_questions, folds=eff_folds, calibrate=True):
+            if n_rows >= v_agent.min_rows(v_questions, folds=eff_folds, calibrate=False):
+                eff_calibrate = False
+
+        fit_rep = v_agent.fit(
+            parsed_rows,
+            v_questions,
+            folds=eff_folds,
+            calibrate=eff_calibrate,
+            target_precision=float(target_precision),
+        )
+        out_dir = str(Path(policy_path).resolve())
+        save_rep = v_agent.save_calibration(out_dir)
+
+        # Persist questions.json and refresh manifest.json so load_calibration(verify=True) succeeds
+        q_file = os.path.join(out_dir, "questions.json")
+        with open(q_file, "w", encoding="utf-8") as f:
+            json.dump(v_questions, f, indent=2, ensure_ascii=False)
+
+        from laya import policy as _laya_policy  # type: ignore
+
+        tracked_names = ("heads.npz", "calibration.json", "questions.json")
+        files_bytes = {
+            n: open(os.path.join(out_dir, n), "rb").read()
+            for n in tracked_names
+            if os.path.exists(os.path.join(out_dir, n))
+        }
+        try:
+            engine_sha = v_agent.vega.engine.base_sha256()
+        except Exception:
+            engine_sha = None
+        with open(os.path.join(out_dir, "manifest.json"), "wb") as f:
+            f.write(
+                _laya_policy.manifest_for(
+                    files_bytes,
+                    format="laya-policy/1",
+                    engine_sha256=engine_sha,
+                    model=v_agent.model_id,
+                )
+            )
+        v_agent._xlaya_policy_path = out_dir
+
+    return {
+        "ok": True,
+        "policy_path": out_dir,
+        "vega_model": eff_vega,
+        "device": resolved_device,
+        "folds_used": eff_folds,
+        "calibrated": bool(save_rep.get("calibrated")),
+        "heads": save_rep.get("heads", []),
+        "fit_report": fit_rep,
+        "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+    }
 
 
 def get_status() -> Dict[str, Any]:
@@ -342,6 +668,8 @@ def get_status() -> Dict[str, Any]:
     cuda_ok = False
     mps_ok = False
     gpu_name: Optional[str] = None
+    vram_total_gb: Optional[float] = None
+    vram_free_gb: Optional[float] = None
     cpu_threads = _recommended_cpu_threads()
     default_dev = "cpu"
 
@@ -355,6 +683,12 @@ def get_status() -> Dict[str, Any]:
         if cuda_ok:
             default_dev = "cuda"
             gpu_name = str(torch.cuda.get_device_name(0))
+            try:
+                free_b, total_b = torch.cuda.mem_get_info()
+                vram_free_gb = round(free_b / (1024 ** 3), 2)
+                vram_total_gb = round(total_b / (1024 ** 3), 2)
+            except Exception:  # nosec B110
+                pass
         elif mps_ok:
             default_dev = "mps"
         else:
@@ -378,6 +712,9 @@ def get_status() -> Dict[str, Any]:
         "mps_available": mps_ok,
         "device": default_dev,
         "gpu_name": gpu_name,
+        "vram_total_gb": vram_total_gb,
+        "vram_free_gb": vram_free_gb,
+        "recommended_vega_model": _resolve_vega_model("auto", default_dev),
         "cpu_threads": cpu_threads,
         "loaded_models": loaded,
     }
@@ -386,7 +723,7 @@ def get_status() -> Dict[str, Any]:
 def preload_models(
     models: Optional[Sequence[str]] = None,
     vega: bool = False,
-    vega_model: str = "0.8b",
+    vega_model: str = "auto",
     device: str = "auto",
 ) -> Dict[str, Any]:
     """Preload requested ModernBERT and/or VegaML models into the thread-safe cache."""
@@ -410,17 +747,24 @@ def preload_models(
         for item in req_models:
             key = _normalize_model_key(item)
             if key.startswith("vega:"):
-                v_name = key.split(":", 1)[1]
+                v_name = _resolve_vega_model(key.split(":", 1)[1], resolved_device)
                 _load_vega_checkpoint(v_name, resolved_device, cache=True)
-                loaded_now.append(key)
+                loaded_now.append(f"vega:{v_name}")
+            elif key == "ensemble":
+                for sub_key in ("english", "typed-decisions"):
+                    _load_laya_checkpoint(sub_key, resolved_device, cache=True)
+                    if sub_key not in loaded_now:
+                        loaded_now.append(sub_key)
             else:
                 _load_laya_checkpoint(key, resolved_device, cache=True)
-                loaded_now.append(key)
+                if key not in loaded_now:
+                    loaded_now.append(key)
 
         if vega:
-            v_key = f"vega:{vega_model}"
+            eff_vega = _resolve_vega_model(vega_model, resolved_device)
+            v_key = f"vega:{eff_vega}"
             if v_key not in loaded_now:
-                _load_vega_checkpoint(vega_model, resolved_device, cache=True)
+                _load_vega_checkpoint(eff_vega, resolved_device, cache=True)
                 loaded_now.append(v_key)
 
         all_loaded = list(_MODEL_CACHE.keys())
@@ -526,6 +870,127 @@ def _questions_head_text(questions: Dict[str, Dict[str, Any]]) -> str:
     return " ".join(parts)
 
 
+def _entropy_conf_from_probs(probs: Mapping[str, float]) -> float:
+    vals = [float(v) for v in probs.values() if float(v) > 0.0]
+    k = len(probs)
+    if k < 2 or not vals:
+        return 1.0
+    h = -sum(v * math.log(v) for v in vals)
+    return round(max(0.0, min(1.0, 1.0 - h / math.log(k))), 4)
+
+
+def _blend_two_predictions(
+    pred_a: Dict[str, Any],
+    pred_b: Dict[str, Any],
+    questions: Mapping[str, Mapping[str, Any]],
+    w_a: float = 0.45,
+    w_b: float = 0.55,
+) -> Dict[str, Any]:
+    """Blend two Stage 1 Laya predictions and compute inter-model disagreement & agreement."""
+    out = dict(pred_a)
+    ans_a_map = pred_a.get("answers") or {}
+    ans_b_map = pred_b.get("answers") or {}
+    blended_answers: Dict[str, Any] = {}
+
+    for qid, qdef in questions.items():
+        qa = dict(ans_a_map.get(qid) or {})
+        qb = dict(ans_b_map.get(qid) or {})
+        if not qa and not qb:
+            continue
+        if not qb:
+            qa["disagreement"] = 0.0
+            qa["model_agreement"] = 1.0
+            qa["label_agree"] = True
+            blended_answers[qid] = qa
+            continue
+
+        qtype = str(qdef.get("type", qa.get("type", "noul")))
+        probs_a = qa.get("probabilities") or {}
+        probs_b = qb.get("probabilities") or {}
+        all_keys = list(dict.fromkeys(list(probs_a.keys()) + list(probs_b.keys())))
+
+        raw_blend: Dict[str, float] = {}
+        for k in all_keys:
+            raw_blend[k] = float(w_a) * float(probs_a.get(k, 0.0)) + float(w_b) * float(probs_b.get(k, 0.0))
+        total_p = sum(raw_blend.values())
+        if total_p > 0.0:
+            norm_probs = {k: round(v / total_p, 6) for k, v in raw_blend.items()}
+            # Adjust rounding residual on top key so sum(norm_probs) == 1.0 exactly
+            top_k_key = max(norm_probs, key=norm_probs.get)
+            residual = round(1.0 - sum(norm_probs.values()), 6)
+            norm_probs[top_k_key] = round(max(0.0, min(1.0, norm_probs[top_k_key] + residual)), 6)
+        else:
+            norm_probs = {k: round(1.0 / max(1, len(all_keys)), 6) for k in all_keys}
+
+        merged_q = dict(qa)
+        merged_q["probabilities"] = norm_probs
+        merged_q["confidence"] = _entropy_conf_from_probs(norm_probs)
+        merged_q["answer_confidence"] = round(max(norm_probs.values()), 6) if norm_probs else 0.0
+
+        if qtype == "noul":
+            noul_a = float(qa.get("noul", probs_a.get("true", 0.0)))
+            noul_b = float(qb.get("noul", probs_b.get("true", 0.0)))
+            noul_blend = round(float(w_a) * noul_a + float(w_b) * noul_b, 6)
+            merged_q["noul"] = noul_blend
+            disagree = abs(noul_a - noul_b)
+            agree = (noul_a >= 0.5) == (noul_b >= 0.5)
+        elif qtype == "score":
+            exp_a = float(qa.get("expected_score", qa.get("score", 0.0)))
+            exp_b = float(qb.get("expected_score", qb.get("score", 0.0)))
+            exp_blend = round(float(w_a) * exp_a + float(w_b) * exp_b, 4)
+            best_lvl = int(max(norm_probs, key=lambda k: norm_probs[k])) if norm_probs else int(round(exp_blend))
+            merged_q["score"] = best_lvl
+            merged_q["expected_score"] = exp_blend
+            max_lvl = max(1.0, float(len(norm_probs) - 1))
+            disagree = abs(exp_a - exp_b) / max_lvl
+            agree = int(qa.get("score", round(exp_a))) == int(qb.get("score", round(exp_b)))
+        else:
+            best_choice = max(norm_probs, key=lambda k: norm_probs[k]) if norm_probs else qa.get("choice")
+            merged_q["choice"] = best_choice
+            disagree = 0.5 * sum(
+                abs(float(probs_a.get(k, 0.0)) - float(probs_b.get(k, 0.0))) for k in all_keys
+            )
+            agree = qa.get("choice") == qb.get("choice")
+
+        dis_round = round(float(disagree), 4)
+        merged_q["disagreement"] = dis_round
+        merged_q["model_agreement"] = round(1.0 - dis_round, 4)
+        merged_q["label_agree"] = bool(agree)
+        blended_answers[qid] = merged_q
+
+    out["answers"] = blended_answers
+    return out
+
+
+def _run_laya_agent_on_states(
+    agent: Any,
+    states_list: List[Any],
+    questions: Dict[str, Dict[str, Any]],
+    needs_tournament: bool,
+    batch_size: int,
+    group_size: int = 16,
+) -> List[Dict[str, Any]]:
+    import laya  # type: ignore
+
+    if not states_list:
+        return []
+    if needs_tournament:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            return [
+                laya.predict_tournament(agent, s, questions, group_size=group_size)
+                for s in states_list
+            ]
+    if len(states_list) == 1:
+        return [agent.predict(states_list[0], questions)]
+    return agent.predict_batch(
+        states_list,
+        questions,
+        batch_size=batch_size,
+        sort_by_length=True,
+    )
+
+
 def _sanitize_prediction(pred: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(pred)
     raw_answers = pred.get("answers")
@@ -534,6 +999,12 @@ def _sanitize_prediction(pred: Dict[str, Any]) -> Dict[str, Any]:
         for qid, ans in raw_answers.items():
             if isinstance(ans, dict):
                 clean_ans = {k: v for k, v in ans.items() if k not in ("unbound", "action")}
+                if "route" in clean_ans or "calibrated" in clean_ans or "outbound" in pred:
+                    clean_ans["outbound"] = bool(ans.get("outbound", pred.get("outbound", False)))
+                    clean_ans["ood_score"] = round(
+                        float(ans.get("ood_score", pred.get("ood_score", ans.get("energy", 0.0)))),
+                        4,
+                    )
                 clean_answers[qid] = clean_ans
             else:
                 clean_answers[qid] = ans
@@ -563,47 +1034,83 @@ def predict_direct(
     states: Optional[List[Any]] = None,
     model: str = "auto",
     vega: bool = False,
-    vega_model: str = "0.8b",
+    vega_model: str = "auto",
+    views: int = 1,
+    policy_path: str = "",
+    image: Optional[str] = None,
+    audio: Optional[str] = None,
+    video: Optional[str] = None,
     device: str = "auto",
     batch_size: int = 32,
     group_size: int = 16,
 ) -> Dict[str, Any]:
-    """Run direct single-state or batched neural/conformal prediction."""
+    """Run direct single-state, batched, or local multimodal neural/conformal prediction."""
     if not questions or not isinstance(questions, dict):
         raise ValueError("predict_direct requires a non-empty 'questions' dictionary.")
 
+    eff_views = max(1, min(3, int(views or 1)))
+    has_multimodal = any(x is not None and str(x).strip() != "" for x in (image, audio, video))
     is_batch = states is not None
-    if not is_batch and state is None:
-        raise ValueError("predict_direct requires either 'state' or 'states'.")
+    if not is_batch and state is None and not has_multimodal:
+        raise ValueError(
+            "predict_direct requires 'state', 'states', or a multimodal input ('image', 'audio', 'video')."
+        )
 
-    items: List[Any] = list(states) if is_batch else [state]
     t0 = time.perf_counter()
     resolved_device = _resolve_device(device)
 
-    import laya  # type: ignore
-
-    if vega:
-        v_agent = _load_vega_checkpoint(vega_model, resolved_device, cache=True)
+    # Automatically route to VegaAgent when vega=True, policy_path is set, or multimodal inputs are given
+    use_vega = bool(vega or (policy_path and str(policy_path).strip()) or has_multimodal)
+    if use_vega:
+        eff_vega = _resolve_vega_model(vega_model, resolved_device)
+        v_agent = _load_vega_checkpoint(
+            eff_vega,
+            resolved_device,
+            cache=True,
+            policy_path=policy_path,
+        )
         v_questions = _strip_noul_labels_for_vega(questions)
-        if not items:
-            raw_preds: List[Dict[str, Any]] = []
-        elif len(items) == 1:
-            raw_preds = [v_agent.predict(items[0], v_questions)]
+        if has_multimodal:
+            mm_kwargs: Dict[str, Any] = {"questions": v_questions, "views": eff_views}
+            if image is not None and str(image).strip():
+                mm_kwargs["image"] = str(image).strip()
+            elif audio is not None and str(audio).strip():
+                mm_kwargs["audio"] = str(audio).strip()
+            elif video is not None and str(video).strip():
+                mm_kwargs["video"] = str(video).strip()
+            raw_preds: List[Dict[str, Any]] = [v_agent.predict(**mm_kwargs)]
         else:
-            raw_preds = v_agent.predict_batch(items, v_questions, batch_size=batch_size)
+            items_vega: List[Any] = list(states) if is_batch else [state]
+            if not items_vega:
+                raw_preds = []
+            elif len(items_vega) == 1:
+                raw_preds = [v_agent.predict(items_vega[0], v_questions, views=eff_views)]
+            else:
+                raw_preds = v_agent.predict_batch(
+                    items_vega,
+                    v_questions,
+                    batch_size=batch_size,
+                    views=eff_views,
+                )
         sanitized = [_sanitize_prediction(p) for p in raw_preds]
         payload: Dict[str, Any] = {
             "ok": True,
-            "model": f"vega:{vega_model}",
+            "stage": "stage2_vega",
+            "model": f"vega:{eff_vega}",
+            "views": eff_views,
+            "calibrated": bool(getattr(v_agent, "calibration", None) is not None),
             "device": resolved_device,
             "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
         }
-        if is_batch:
+        if policy_path and str(policy_path).strip():
+            payload["policy_path"] = str(Path(policy_path).resolve())
+        if is_batch and not has_multimodal:
             payload["results"] = sanitized
         else:
-            payload["result"] = sanitized[0]
+            payload["result"] = sanitized[0] if sanitized else {}
         return payload
 
+    items: List[Any] = list(states) if is_batch else [state]
     needs_tournament = any(
         isinstance(qdef, dict)
         and qdef.get("type") == "choice"
@@ -614,12 +1121,37 @@ def predict_direct(
     req_model = (model or "auto").strip().lower()
     if req_model not in ("", "auto"):
         norm_req = _normalize_model_key(req_model)
-        if norm_req not in ("english", "multilingual"):
-            raise ValueError(f"Unsupported predict_direct model {model!r}; expected 'auto', 'en', or 'multi'.")
+        if norm_req not in ("english", "multilingual", "typed-decisions", "ensemble"):
+            raise ValueError(
+                f"Unsupported predict_direct model {model!r}; expected 'auto', 'en', 'multi', 'typed', or 'ensemble'."
+            )
     else:
         req_model = "auto"
         norm_req = "auto"
     head_en = _is_english_text(_questions_head_text(questions))
+
+    if norm_req == "typed-decisions":
+        agent_td = _load_laya_checkpoint("typed-decisions", resolved_device, cache=True)
+        td_preds = _run_laya_agent_on_states(agent_td, items, questions, needs_tournament, batch_size, group_size)
+        final_preds = [_sanitize_prediction(p) for p in td_preds]
+        payload = {
+            "ok": True,
+            "stage": "stage1_laya",
+            "model": "typed-decisions",
+            "language_routing": {
+                "english": 0,
+                "multilingual": 0,
+                "typed_decisions": len(items),
+                "head_guard_multilingual": False,
+            },
+            "device": resolved_device,
+            "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        }
+        if is_batch:
+            payload["results"] = final_preds
+        else:
+            payload["result"] = final_preds[0]
+        return payload
 
     en_indices: List[int] = []
     ml_indices: List[int] = []
@@ -637,43 +1169,60 @@ def predict_direct(
                 ml_indices.append(idx)
 
     merged: List[Optional[Dict[str, Any]]] = [None] * len(items)
-    for bucket_key, bucket_idxs in (("english", en_indices), ("multilingual", ml_indices)):
-        if not bucket_idxs:
-            continue
-        agent = _load_laya_checkpoint(bucket_key, resolved_device, cache=True)
-        bucket_states = [items[i] for i in bucket_idxs]
-        if needs_tournament:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", RuntimeWarning)
-                bucket_preds = [
-                    laya.predict_tournament(agent, s, questions, group_size=group_size)
-                    for s in bucket_states
-                ]
-        elif len(bucket_states) == 1:
-            bucket_preds = [agent.predict(bucket_states[0], questions)]
-        else:
-            bucket_preds = agent.predict_batch(
-                bucket_states,
-                questions,
-                batch_size=batch_size,
-                sort_by_length=True,
+    if norm_req == "ensemble":
+        agent_td = _load_laya_checkpoint("typed-decisions", resolved_device, cache=True)
+        if en_indices:
+            agent_en = _load_laya_checkpoint("english", resolved_device, cache=True)
+            en_states = [items[i] for i in en_indices]
+            preds_en = _run_laya_agent_on_states(
+                agent_en, en_states, questions, needs_tournament, batch_size, group_size
             )
-        for orig_i, pred in zip(bucket_idxs, bucket_preds):
-            merged[orig_i] = _sanitize_prediction(pred)
+            preds_td = _run_laya_agent_on_states(
+                agent_td, en_states, questions, needs_tournament, batch_size, group_size
+            )
+            for orig_i, p_en, p_td in zip(en_indices, preds_en, preds_td):
+                blended = _blend_two_predictions(p_en, p_td, questions, w_a=0.45, w_b=0.55)
+                merged[orig_i] = _sanitize_prediction(blended)
+        if ml_indices:
+            agent_ml = _load_laya_checkpoint("multilingual", resolved_device, cache=True)
+            ml_states = [items[i] for i in ml_indices]
+            preds_ml = _run_laya_agent_on_states(
+                agent_ml, ml_states, questions, needs_tournament, batch_size, group_size
+            )
+            preds_td_ml = _run_laya_agent_on_states(
+                agent_td, ml_states, questions, needs_tournament, batch_size, group_size
+            )
+            w_ml, w_td = (0.75, 0.25) if head_en else (1.0, 0.0)
+            for orig_i, p_ml, p_td in zip(ml_indices, preds_ml, preds_td_ml):
+                blended = _blend_two_predictions(p_ml, p_td, questions, w_a=w_ml, w_b=w_td)
+                merged[orig_i] = _sanitize_prediction(blended)
+        used_model = "ensemble(en+typed-decisions)" if not ml_indices else "ensemble(en+typed+multilingual)"
+    else:
+        for bucket_key, bucket_idxs in (("english", en_indices), ("multilingual", ml_indices)):
+            if not bucket_idxs:
+                continue
+            agent = _load_laya_checkpoint(bucket_key, resolved_device, cache=True)
+            bucket_states = [items[i] for i in bucket_idxs]
+            bucket_preds = _run_laya_agent_on_states(
+                agent, bucket_states, questions, needs_tournament, batch_size, group_size
+            )
+            for orig_i, pred in zip(bucket_idxs, bucket_preds):
+                merged[orig_i] = _sanitize_prediction(pred)
+        used_model = (
+            "english"
+            if not ml_indices
+            else ("multilingual" if not en_indices else "bilingual(per-state)")
+        )
 
     final_preds = [p for p in merged if p is not None]
-    used_model = (
-        "english"
-        if not ml_indices
-        else ("multilingual" if not en_indices else "bilingual(per-state)")
-    )
     payload = {
         "ok": True,
+        "stage": "stage1_laya",
         "model": used_model,
         "language_routing": {
             "english": len(en_indices),
             "multilingual": len(ml_indices),
-            "head_guard_multilingual": not head_en and req_model == "auto",
+            "head_guard_multilingual": not head_en and req_model in ("auto", "ensemble"),
         },
         "device": resolved_device,
         "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
@@ -1621,6 +2170,8 @@ def _build_mode_questions(
     false_desc: str,
     labels: Dict[str, str],
     noul_label_map: Optional[Dict[str, str]],
+    thorough: bool = False,
+    rubric_preset: str = "default",
 ) -> Dict[str, Dict[str, Any]]:
     def with_noul_labels(q: Dict[str, Any]) -> Dict[str, Any]:
         if noul_label_map is not None:
@@ -1676,16 +2227,112 @@ def _build_mode_questions(
             }
         }
 
-    qs: Dict[str, Dict[str, Any]] = {
-        "rubric": {
+    qs: Dict[str, Dict[str, Any]] = {}
+    if thorough:
+        preset_key = rubric_preset if rubric_preset in RUBRIC_PRESETS else "default"
+        preset_spec = RUBRIC_PRESETS[preset_key]
+        query_suffix = f" (Focus: {query})" if query.strip() else ""
+        for facet_name in FACET_WEIGHTS:
+            facet_def = preset_spec[facet_name]
+            qs[f"facet_{facet_name}"] = {
+                "type": "score",
+                "instructions": f"{facet_def['instructions']}{query_suffix}",
+                "criteria": list(facet_def["criteria"]),
+            }
+    else:
+        qs["rubric"] = {
             "type": "score",
             "instructions": query or "Rate the technical completeness and specificity of this documentation.",
             "criteria": DEFAULT_RUBRIC_CRITERIA,
         }
-    }
     if ssot:
         qs.update(joint_contradiction_questions(ssot))
     return qs
+
+
+def _extract_facet_breakdown(ans: Dict[str, Any]) -> Dict[str, Any]:
+    """Compute 4-facet decomposed rubric metrics from prediction answers."""
+    facet_scores: Dict[str, float] = {}
+    facet_confs: List[float] = []
+    facet_disagreements: List[float] = []
+    for facet_name in FACET_WEIGHTS:
+        q_key = f"facet_{facet_name}"
+        f_ans = ans.get(q_key, {})
+        val = float(f_ans.get("expected_score", f_ans.get("score", 0.0)))
+        facet_scores[facet_name] = round(val, 4)
+        if "confidence" in f_ans:
+            facet_confs.append(float(f_ans["confidence"]))
+        if "disagreement" in f_ans:
+            facet_disagreements.append(float(f_ans["disagreement"]))
+
+    composite = sum(facet_scores[f] * w for f, w in FACET_WEIGHTS.items())
+    vals = list(facet_scores.values())
+    f_min = min(vals) if vals else 0.0
+    f_max = max(vals) if vals else 0.0
+    f_spread = round(f_max - f_min, 4)
+    weakest = min(facet_scores.items(), key=lambda kv: (kv[1], kv[0]))[0] if facet_scores else "specificity"
+    mean_conf = sum(facet_confs) / len(facet_confs) if facet_confs else 0.5
+    out: Dict[str, Any] = {
+        "facet_scores": facet_scores,
+        "facet_min": round(f_min, 4),
+        "facet_spread": f_spread,
+        "weakest_facet": weakest,
+        "composite_score": round(composite, 4),
+        "confidence": round(mean_conf, 4),
+    }
+    if facet_disagreements:
+        max_dis = max(facet_disagreements)
+        out["disagreement"] = round(max_dis, 4)
+        out["model_agreement"] = round(1.0 - max_dis, 4)
+    return out
+
+
+def _compute_file_summaries(enriched: Sequence[Dict[str, Any]], mode: str) -> List[Dict[str, Any]]:
+    """Aggregate per-file summary statistics across all evaluated chunks."""
+    by_file: Dict[str, List[Dict[str, Any]]] = {}
+    for item in enriched:
+        fname = str(item.get("file", item.get("name", "unknown")))
+        by_file.setdefault(fname, []).append(item)
+
+    summaries: List[Dict[str, Any]] = []
+    for fname, items in by_file.items():
+        if mode == "contradiction":
+            scores = [float(r.get("noul", 0.0)) for r in items]
+        elif mode == "shortlist":
+            scores = [float(r.get("hybrid_score", r.get("expected_score", 0.0))) for r in items]
+        elif mode == "classify":
+            scores = [float(r.get("confidence", 0.0)) for r in items]
+        else:
+            scores = [float(r.get("composite_score", r.get("expected_score", r.get("score", 0.0)))) for r in items]
+
+        best_idx = max(range(len(items)), key=lambda i: scores[i])
+        worst_idx = min(range(len(items)), key=lambda i: scores[i])
+        disagreements = [float(r.get("disagreement", 0.0)) for r in items]
+        summary: Dict[str, Any] = {
+            "file": fname,
+            "chunks": len(items),
+            "mean_score": round(sum(scores) / max(1, len(scores)), 4),
+            "max_score": round(max(scores), 4),
+            "min_score": round(min(scores), 4),
+            "strongest_ref": items[best_idx].get("ref", fname),
+            "weakest_ref": items[worst_idx].get("ref", fname),
+            "max_disagreement": round(max(disagreements, default=0.0), 4),
+        }
+        if any("facet_scores" in r for r in items):
+            facet_means: Dict[str, float] = {}
+            for facet_name in FACET_WEIGHTS:
+                f_vals = [
+                    float(r["facet_scores"].get(facet_name, 0.0))
+                    for r in items
+                    if "facet_scores" in r
+                ]
+                if f_vals:
+                    facet_means[facet_name] = round(sum(f_vals) / len(f_vals), 4)
+            if facet_means:
+                summary["facet_means"] = facet_means
+                summary["weakest_facet"] = min(facet_means.items(), key=lambda kv: (kv[1], kv[0]))[0]
+        summaries.append(summary)
+    return summaries
 
 
 def _select_vega_finalists(
@@ -1700,25 +2347,43 @@ def _select_vega_finalists(
     if whole_file and len(results) <= vega_top_k:
         return list(range(len(results)))
 
+    # Prioritize inter-encoder disagreement >= 0.15 first when ensemble jury is active
+    high_disagreement = [
+        i for i, r in enumerate(results) if float(r.get("disagreement", 0.0)) >= 0.15
+    ]
+    high_disagreement.sort(key=lambda i: float(results[i].get("disagreement", 0.0)), reverse=True)
+
+    chosen: List[int] = []
+    seen = set()
+    for idx in high_disagreement:
+        if idx not in seen:
+            chosen.append(idx)
+            seen.add(idx)
+            if len(chosen) >= vega_top_k:
+                return chosen
+
     if mode == "contradiction":
         borderline = [
             i for i, r in enumerate(results) if 0.25 <= float(r.get("noul", 0.0)) <= 0.85
         ]
         borderline.sort(key=lambda i: abs(float(results[i].get("noul", 0.0)) - threshold))
-        chosen = borderline[:vega_top_k]
-        if len(chosen) < vega_top_k:
-            seen = set(chosen)
-            by_noul = sorted(
-                range(len(results)),
-                key=lambda i: float(results[i].get("noul", 0.0)),
-                reverse=True,
-            )
-            for idx in by_noul:
-                if idx not in seen:
-                    chosen.append(idx)
-                    seen.add(idx)
-                    if len(chosen) >= vega_top_k:
-                        break
+        for idx in borderline:
+            if idx not in seen:
+                chosen.append(idx)
+                seen.add(idx)
+                if len(chosen) >= vega_top_k:
+                    return chosen
+        by_noul = sorted(
+            range(len(results)),
+            key=lambda i: float(results[i].get("noul", 0.0)),
+            reverse=True,
+        )
+        for idx in by_noul:
+            if idx not in seen:
+                chosen.append(idx)
+                seen.add(idx)
+                if len(chosen) >= vega_top_k:
+                    break
         return chosen
 
     if mode == "classify":
@@ -1726,9 +2391,21 @@ def _select_vega_finalists(
             i for i, r in enumerate(results) if float(r.get("confidence", 1.0)) < 0.55
         ]
         low_conf.sort(key=lambda i: float(results[i].get("confidence", 1.0)))
-        return low_conf[:vega_top_k]
+        for idx in low_conf:
+            if idx not in seen:
+                chosen.append(idx)
+                seen.add(idx)
+                if len(chosen) >= vega_top_k:
+                    break
+        return chosen
 
-    return list(range(min(len(results), vega_top_k)))
+    for idx in range(len(results)):
+        if idx not in seen:
+            chosen.append(idx)
+            seen.add(idx)
+            if len(chosen) >= vega_top_k:
+                break
+    return chosen
 
 
 def _attach_vega_escalation(
@@ -1742,6 +2419,8 @@ def _attach_vega_escalation(
     resident_cache: bool,
     threshold: float = 0.55,
     whole_file: bool = False,
+    views: int = 1,
+    policy_path: Optional[str] = None,
 ) -> int:
     if not finalist_indices:
         return 0
@@ -1750,18 +2429,30 @@ def _attach_vega_escalation(
         print("[XLaya] Warning: --vega requested, but vegaml is not installed.", file=sys.stderr)
         return 0
 
-    v_key = f"vega:{vega_model}"
+    eff_vega_model = _resolve_vega_model(vega_model, resolved_device)
+    eff_views = max(1, min(3, int(views)))
+    v_key = f"vega:{eff_vega_model}"
     with _CACHE_LOCK:
         was_cached = v_key in _MODEL_CACHE
 
-    v_agent = _load_vega_checkpoint(vega_model, resolved_device, cache=resident_cache)
+    v_agent = _load_vega_checkpoint(
+        eff_vega_model,
+        resolved_device,
+        cache=resident_cache,
+        policy_path=policy_path,
+    )
     v_questions = _strip_noul_labels_for_vega(questions)
     texts = [results[i].get("_full_text") or results[i]["text"] for i in finalist_indices]
 
     if len(texts) == 1:
-        v_preds = [v_agent.predict(texts[0], v_questions)]
+        v_preds = [v_agent.predict(texts[0], v_questions, views=eff_views)]
     else:
-        v_preds = v_agent.predict_batch(texts, v_questions, batch_size=min(batch_size, 16))
+        v_preds = v_agent.predict_batch(
+            texts,
+            v_questions,
+            batch_size=min(batch_size, 16),
+            views=eff_views,
+        )
 
     for idx, raw_pred in zip(finalist_indices, v_preds):
         ans = _sanitize_prediction(raw_pred).get("answers", {})
@@ -1784,8 +2475,9 @@ def _attach_vega_escalation(
                 and p_cons < 0.40
             ):
                 v_noul = max(v_noul, round(p_raw * (1.0 - p_cons), 4))
-            results[idx]["vega"] = {
-                "model": vega_model,
+            vega_info: Dict[str, Any] = {
+                "model": eff_vega_model,
+                "views": eff_views,
                 "route": v_route,
                 "route_reason": v_con.get("route_reason"),
                 "abstain": v_abstain,
@@ -1795,39 +2487,90 @@ def _attach_vega_escalation(
                 "relevance": round(p_rel, 4),
                 "consistency": round(p_cons, 4),
             }
+            if "view_agreement" in v_con:
+                vega_info["view_agreement"] = round(float(v_con["view_agreement"]), 4)
+            if "outbound" in v_con:
+                vega_info["outbound"] = bool(v_con["outbound"])
+                vega_info["ood_score"] = round(float(v_con.get("ood_score", 0.0)), 4)
+            results[idx]["vega"] = vega_info
             if not v_abstain and v_noul >= threshold:
                 results[idx]["noul"] = max(float(results[idx].get("noul", 0.0)), v_noul)
                 results[idx]["flagged"] = True
         elif mode == "shortlist":
             v_rel = ans.get("rel", {})
-            results[idx]["vega"] = {
-                "model": vega_model,
+            vega_info = {
+                "model": eff_vega_model,
+                "views": eff_views,
                 "route": v_rel.get("route"),
                 "route_reason": v_rel.get("route_reason"),
                 "abstain": bool(v_rel.get("abstain", False)),
                 "prediction_set": list(v_rel.get("prediction_set", [])),
                 "expected_score": round(float(v_rel.get("expected_score", v_rel.get("score", 0.0))), 4),
             }
+            if "view_agreement" in v_rel:
+                vega_info["view_agreement"] = round(float(v_rel["view_agreement"]), 4)
+            if "outbound" in v_rel:
+                vega_info["outbound"] = bool(v_rel["outbound"])
+                vega_info["ood_score"] = round(float(v_rel.get("ood_score", 0.0)), 4)
+            results[idx]["vega"] = vega_info
         elif mode == "classify":
             v_cat = ans.get("cat", {})
-            results[idx]["vega"] = {
-                "model": vega_model,
+            vega_info = {
+                "model": eff_vega_model,
+                "views": eff_views,
                 "route": v_cat.get("route"),
                 "route_reason": v_cat.get("route_reason"),
                 "abstain": bool(v_cat.get("abstain", False)),
                 "prediction_set": list(v_cat.get("prediction_set", [])),
                 "choice": v_cat.get("choice"),
             }
+            if "view_agreement" in v_cat:
+                vega_info["view_agreement"] = round(float(v_cat["view_agreement"]), 4)
+            if "outbound" in v_cat:
+                vega_info["outbound"] = bool(v_cat["outbound"])
+                vega_info["ood_score"] = round(float(v_cat.get("ood_score", 0.0)), 4)
+            results[idx]["vega"] = vega_info
         else:
-            v_rub = ans.get("rubric", {})
-            vega_info: Dict[str, Any] = {
-                "model": vega_model,
-                "route": v_rub.get("route"),
-                "route_reason": v_rub.get("route_reason"),
-                "abstain": bool(v_rub.get("abstain", False)),
-                "prediction_set": list(v_rub.get("prediction_set", [])),
-                "expected_score": round(float(v_rub.get("expected_score", v_rub.get("score", 0.0))), 4),
-            }
+            if any(f"facet_{f}" in ans for f in FACET_WEIGHTS):
+                v_fb = _extract_facet_breakdown(ans)
+                first_f = ans.get("facet_specificity", {})
+                vega_info = {
+                    "model": eff_vega_model,
+                    "views": eff_views,
+                    "route": first_f.get("route"),
+                    "route_reason": first_f.get("route_reason"),
+                    "abstain": any(bool(ans.get(f"facet_{f}", {}).get("abstain", False)) for f in FACET_WEIGHTS),
+                    "prediction_set": list(first_f.get("prediction_set", [])),
+                    "expected_score": v_fb["composite_score"],
+                    "facet_scores": v_fb["facet_scores"],
+                    "weakest_facet": v_fb["weakest_facet"],
+                }
+                v_agrees = [
+                    float(ans[f"facet_{f}"]["view_agreement"])
+                    for f in FACET_WEIGHTS
+                    if f"facet_{f}" in ans and "view_agreement" in ans[f"facet_{f}"]
+                ]
+                if v_agrees:
+                    vega_info["view_agreement"] = round(sum(v_agrees) / len(v_agrees), 4)
+                if "outbound" in first_f:
+                    vega_info["outbound"] = bool(first_f["outbound"])
+                    vega_info["ood_score"] = round(float(first_f.get("ood_score", 0.0)), 4)
+            else:
+                v_rub = ans.get("rubric", {})
+                vega_info = {
+                    "model": eff_vega_model,
+                    "views": eff_views,
+                    "route": v_rub.get("route"),
+                    "route_reason": v_rub.get("route_reason"),
+                    "abstain": bool(v_rub.get("abstain", False)),
+                    "prediction_set": list(v_rub.get("prediction_set", [])),
+                    "expected_score": round(float(v_rub.get("expected_score", v_rub.get("score", 0.0))), 4),
+                }
+                if "view_agreement" in v_rub:
+                    vega_info["view_agreement"] = round(float(v_rub["view_agreement"]), 4)
+                if "outbound" in v_rub:
+                    vega_info["outbound"] = bool(v_rub["outbound"])
+                    vega_info["ood_score"] = round(float(v_rub.get("ood_score", 0.0)), 4)
             if "contradicts_ssot" in ans and "is_relevant" in ans:
                 p_rel = float(ans["is_relevant"].get("noul", 0.0))
                 p_cons = float(ans.get("is_consistent", {}).get("noul", 0.0))
@@ -1862,8 +2605,12 @@ def run_triage(
     pattern: str = DEFAULT_PATTERN,
     lexical_prefilter: int = 0,
     vega: bool = False,
-    vega_model: str = "0.8b",
+    vega_model: str = "auto",
     vega_top_k: int = 10,
+    views: int = 1,
+    thorough: bool = False,
+    rubric_preset: str = "default",
+    policy_path: Optional[str] = None,
     resident_cache: bool = True,
 ) -> Dict[str, Any]:
     """Execute the full 3-stage Stage 0 → Stage 1 → Stage 2 semantic triage cascade."""
@@ -1875,8 +2622,19 @@ def run_triage(
         raise ValueError("Mode 'shortlist' requires a non-empty query (--query).")
     if mode == "contradiction" and not ssot.strip():
         raise ValueError("Mode 'contradiction' requires a non-empty canonical SSOT statement (--ssot).")
-    if lang not in ("auto", "en", "multi"):
-        raise ValueError(f"Unsupported lang {lang!r}; expected 'auto', 'en', or 'multi'.")
+    if lang not in ("auto", "en", "multi", "typed", "ensemble"):
+        raise ValueError(
+            f"Unsupported lang {lang!r}; expected 'auto', 'en', 'multi', 'typed', or 'ensemble'."
+        )
+    if rubric_preset not in RUBRIC_PRESETS:
+        raise ValueError(
+            f"Unsupported rubric_preset {rubric_preset!r}; expected one of {sorted(RUBRIC_PRESETS)}."
+        )
+
+    eff_views = max(1, min(3, int(views)))
+    if thorough:
+        max_chunks = max(max_chunks, 4096)
+        lexical_prefilter = 0
 
     noul_label_map = parse_noul_labels(noul_labels)
     labels_dict = parse_label_spec(labels_spec)
@@ -1888,6 +2646,8 @@ def run_triage(
             "meta": {
                 "version": __version__,
                 "mode": mode,
+                "thorough": thorough,
+                "rubric_preset": rubric_preset if mode == "rubric" else None,
                 "files_scanned": 0,
                 "chunks_evaluated": 0,
                 "truncated_chunks": 0,
@@ -1930,6 +2690,8 @@ def run_triage(
             "meta": {
                 "version": __version__,
                 "mode": mode,
+                "thorough": thorough,
+                "rubric_preset": rubric_preset if mode == "rubric" else None,
                 "files_scanned": len(files),
                 "chunks_evaluated": 0,
                 "truncated_chunks": truncated_chunks,
@@ -1966,19 +2728,37 @@ def run_triage(
         false_desc=false_desc,
         labels=labels_dict,
         noul_label_map=noul_label_map,
+        thorough=thorough,
+        rubric_preset=rubric_preset,
     )
 
     if not laya_ok:
         enriched = fallback_evaluate(all_chunks, mode, query, ssot, labels_dict, threshold=threshold)
+        if thorough and mode == "rubric":
+            for item in enriched:
+                base_sc = float(item.get("expected_score", item.get("score", 2.0)))
+                item["facet_scores"] = {f: round(base_sc, 4) for f in FACET_WEIGHTS}
+                item["facet_min"] = round(base_sc, 4)
+                item["facet_spread"] = 0.0
+                item["weakest_facet"] = "specificity"
+                item["composite_score"] = round(base_sc, 4)
         meta: Dict[str, Any] = {
             "version": __version__,
             "laya_available": False,
             "laya_version": None,
             "model": "pure-python-fallback",
             "language_route": "fallback",
-            "language_routing": {"english": 0, "multilingual": 0, "head_guard_multilingual": False},
+            "language_routing": {
+                "english": 0,
+                "multilingual": 0,
+                "typed_decisions": 0,
+                "ensemble": 0,
+                "head_guard_multilingual": False,
+            },
             "device": "cpu",
             "mode": mode,
+            "thorough": thorough,
+            "rubric_preset": rubric_preset if mode == "rubric" else None,
             "files_scanned": len(files),
             "chunks_evaluated": len(enriched),
             "truncated_chunks": truncated_chunks,
@@ -1987,17 +2767,30 @@ def run_triage(
         if prefiltered_from is not None:
             meta["lexical_prefiltered_from"] = prefiltered_from
     else:
-        import laya  # type: ignore
-
         head_txt = _questions_head_text(questions)
         head_is_en = _is_english_text(head_txt)
 
         en_idxs: List[int] = []
         ml_idxs: List[int] = []
+        typed_idxs: List[int] = []
+        ens_en_idxs: List[int] = []
+        ens_ml_idxs: List[int] = []
+
         if lang == "en":
             en_idxs = list(range(len(all_chunks)))
         elif lang == "multi":
             ml_idxs = list(range(len(all_chunks)))
+        elif lang == "typed":
+            typed_idxs = list(range(len(all_chunks)))
+        elif lang == "ensemble":
+            if not head_is_en:
+                ens_ml_idxs = list(range(len(all_chunks)))
+            else:
+                for idx, ch in enumerate(all_chunks):
+                    if _is_english_text(ch["text"]):
+                        ens_en_idxs.append(idx)
+                    else:
+                        ens_ml_idxs.append(idx)
         elif not head_is_en:
             ml_idxs = list(range(len(all_chunks)))
         else:
@@ -2010,44 +2803,96 @@ def run_triage(
         preds_by_idx: List[Optional[Tuple[Dict[str, Any], str]]] = [None] * len(all_chunks)
         needs_tournament = mode == "classify" and len(labels_dict) > 20
 
-        for bucket_name, b_idxs in (("english", en_idxs), ("multilingual", ml_idxs)):
+        # Standard single-checkpoint buckets (english, multilingual, typed-decisions)
+        for bucket_name, b_idxs, model_tag in (
+            ("english", en_idxs, "convaiinnovations/laya"),
+            ("multilingual", ml_idxs, "convaiinnovations/laya (multilingual)"),
+            ("typed-decisions", typed_idxs, "convaiinnovations/laya (typed-decisions)"),
+        ):
             if not b_idxs:
                 continue
             with _CACHE_LOCK:
                 already_cached = bucket_name in _MODEL_CACHE
             agent = _load_laya_checkpoint(bucket_name, resolved_device, cache=resident_cache)
             b_texts = [all_chunks[i]["text"] for i in b_idxs]
-            model_tag = (
-                "convaiinnovations/laya"
-                if bucket_name == "english"
-                else "convaiinnovations/laya (multilingual)"
+            b_preds = _run_laya_agent_on_states(
+                agent,
+                b_texts,
+                questions,
+                needs_tournament=needs_tournament,
+                batch_size=batch_size,
             )
-
-            if needs_tournament:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", RuntimeWarning)
-                    b_preds = [
-                        laya.predict_tournament(agent, st, questions, group_size=16)
-                        for st in b_texts
-                    ]
-            elif len(b_texts) == 1:
-                b_preds = [agent.predict(b_texts[0], questions)]
-            else:
-                b_preds = agent.predict_batch(
-                    b_texts,
-                    questions,
-                    batch_size=batch_size,
-                    sort_by_length=True,
-                )
-
             for orig_i, pr in zip(b_idxs, b_preds):
                 preds_by_idx[orig_i] = (pr, model_tag)
 
-            # Cap peak CPU RAM when not caching models across both English and Multilingual buckets
             if not resident_cache and not already_cached:
                 with _CACHE_LOCK:
                     _MODEL_CACHE.pop(bucket_name, None)
                 del agent
+                gc.collect()
+
+        # Ensemble Jury buckets (english + typed-decisions OR multilingual + typed-decisions)
+        if ens_en_idxs or ens_ml_idxs:
+            with _CACHE_LOCK:
+                td_was_cached = "typed-decisions" in _MODEL_CACHE
+            agent_td = _load_laya_checkpoint("typed-decisions", resolved_device, cache=resident_cache)
+
+            for primary_bucket, e_idxs, w_pri, w_td, ens_tag in (
+                (
+                    "english",
+                    ens_en_idxs,
+                    0.45,
+                    0.55,
+                    "convaiinnovations/laya (ensemble:en+typed-decisions)",
+                ),
+                (
+                    "multilingual",
+                    ens_ml_idxs,
+                    0.75,
+                    0.25,
+                    "convaiinnovations/laya (ensemble:multilingual+typed-decisions)",
+                ),
+            ):
+                if not e_idxs:
+                    continue
+                with _CACHE_LOCK:
+                    pri_was_cached = primary_bucket in _MODEL_CACHE
+                agent_pri = _load_laya_checkpoint(primary_bucket, resolved_device, cache=resident_cache)
+                e_texts = [all_chunks[i]["text"] for i in e_idxs]
+                preds_pri = _run_laya_agent_on_states(
+                    agent_pri,
+                    e_texts,
+                    questions,
+                    needs_tournament=needs_tournament,
+                    batch_size=batch_size,
+                )
+                preds_td = _run_laya_agent_on_states(
+                    agent_td,
+                    e_texts,
+                    questions,
+                    needs_tournament=needs_tournament,
+                    batch_size=batch_size,
+                )
+                for orig_i, p1, p2 in zip(e_idxs, preds_pri, preds_td):
+                    blended = _blend_two_predictions(
+                        _sanitize_prediction(p1),
+                        _sanitize_prediction(p2),
+                        questions,
+                        w_a=w_pri,
+                        w_b=w_td,
+                    )
+                    preds_by_idx[orig_i] = (blended, ens_tag)
+
+                if not resident_cache and not pri_was_cached:
+                    with _CACHE_LOCK:
+                        _MODEL_CACHE.pop(primary_bucket, None)
+                    del agent_pri
+                    gc.collect()
+
+            if not resident_cache and not td_was_cached:
+                with _CACHE_LOCK:
+                    _MODEL_CACHE.pop("typed-decisions", None)
+                del agent_td
                 gc.collect()
 
         enriched = []
@@ -2060,14 +2905,18 @@ def run_triage(
             lex_val = float(ch.get("lexical_score", 0.0))
 
             if mode == "shortlist":
-                exp_s = float(ans["rel"].get("expected_score", ans["rel"]["score"]))
+                rel_ans = ans["rel"]
+                exp_s = float(rel_ans.get("expected_score", rel_ans["score"]))
                 exp_round = round(exp_s, 4)
                 hyb = round(0.82 * (exp_s / 4.0) + 0.18 * lex_val, 4)
                 item["score"] = exp_round
                 item["expected_score"] = exp_round
                 item["lexical_score"] = round(lex_val, 4)
                 item["hybrid_score"] = hyb
-                item["confidence"] = round(float(ans["rel"]["confidence"]), 4)
+                item["confidence"] = round(float(rel_ans["confidence"]), 4)
+                if "disagreement" in rel_ans:
+                    item["disagreement"] = round(float(rel_ans["disagreement"]), 4)
+                    item["model_agreement"] = round(float(rel_ans["model_agreement"]), 4)
             elif mode == "contradiction":
                 p_rel = float(ans["is_relevant"]["noul"])
                 p_cons = float(ans.get("is_consistent", {}).get("noul", 0.0))
@@ -2089,15 +2938,45 @@ def run_triage(
                 item["consistency"] = round(p_cons, 4)
                 item["flagged"] = bool(p_eff >= threshold)
                 item["confidence"] = round(float(ans["contradicts_ssot"]["confidence"]), 4)
+                if "disagreement" in ans["contradicts_ssot"]:
+                    max_dis = max(
+                        float(ans["is_relevant"].get("disagreement", 0.0)),
+                        float(ans.get("is_consistent", {}).get("disagreement", 0.0)),
+                        float(ans["contradicts_ssot"].get("disagreement", 0.0)),
+                    )
+                    item["disagreement"] = round(max_dis, 4)
+                    item["model_agreement"] = round(1.0 - max_dis, 4)
             elif mode == "classify":
-                item["choice"] = ans["cat"]["choice"]
-                item["confidence"] = round(float(ans["cat"]["confidence"]), 4)
+                cat_ans = ans["cat"]
+                item["choice"] = cat_ans["choice"]
+                item["confidence"] = round(float(cat_ans["confidence"]), 4)
+                if "disagreement" in cat_ans:
+                    item["disagreement"] = round(float(cat_ans["disagreement"]), 4)
+                    item["model_agreement"] = round(float(cat_ans["model_agreement"]), 4)
             else:
-                exp_s = float(ans["rubric"].get("expected_score", ans["rubric"]["score"]))
-                exp_round = round(exp_s, 4)
-                item["score"] = exp_round
-                item["expected_score"] = exp_round
-                item["confidence"] = round(float(ans["rubric"]["confidence"]), 4)
+                if thorough and any(f"facet_{f}" in ans for f in FACET_WEIGHTS):
+                    fb = _extract_facet_breakdown(ans)
+                    item["score"] = fb["composite_score"]
+                    item["expected_score"] = fb["composite_score"]
+                    item["composite_score"] = fb["composite_score"]
+                    item["facet_scores"] = fb["facet_scores"]
+                    item["facet_min"] = fb["facet_min"]
+                    item["facet_spread"] = fb["facet_spread"]
+                    item["weakest_facet"] = fb["weakest_facet"]
+                    item["confidence"] = fb["confidence"]
+                    if "disagreement" in fb:
+                        item["disagreement"] = fb["disagreement"]
+                        item["model_agreement"] = fb["model_agreement"]
+                else:
+                    rub_ans = ans["rubric"]
+                    exp_s = float(rub_ans.get("expected_score", rub_ans["score"]))
+                    exp_round = round(exp_s, 4)
+                    item["score"] = exp_round
+                    item["expected_score"] = exp_round
+                    item["confidence"] = round(float(rub_ans["confidence"]), 4)
+                    if "disagreement" in rub_ans:
+                        item["disagreement"] = round(float(rub_ans["disagreement"]), 4)
+                        item["model_agreement"] = round(float(rub_ans["model_agreement"]), 4)
                 if "contradicts_ssot" in ans and "is_relevant" in ans:
                     p_rel = float(ans["is_relevant"]["noul"])
                     p_cons = float(ans.get("is_consistent", {}).get("noul", 0.0))
@@ -2111,20 +2990,39 @@ def run_triage(
                     item["noul"] = 0.0
             enriched.append(item)
 
-        lang_route = (
-            "english"
-            if not ml_idxs
-            else ("multilingual" if not en_idxs else "bilingual(per-chunk)")
-        )
-        model_summary = (
-            "convaiinnovations/laya"
-            if not ml_idxs
-            else (
-                "convaiinnovations/laya (multilingual)"
-                if not en_idxs
-                else "convaiinnovations/laya (en+multilingual)"
+        if lang == "typed":
+            lang_route = "typed-decisions"
+            model_summary = "convaiinnovations/laya (typed-decisions)"
+        elif lang == "ensemble":
+            lang_route = (
+                "ensemble(en+typed)"
+                if not ens_ml_idxs
+                else ("ensemble(multi+typed)" if not ens_en_idxs else "ensemble(bilingual+typed)")
             )
-        )
+            model_summary = (
+                "convaiinnovations/laya (ensemble:en+typed-decisions)"
+                if not ens_ml_idxs
+                else (
+                    "convaiinnovations/laya (ensemble:multilingual+typed-decisions)"
+                    if not ens_en_idxs
+                    else "convaiinnovations/laya (ensemble:en+multi+typed-decisions)"
+                )
+            )
+        else:
+            lang_route = (
+                "english"
+                if not ml_idxs
+                else ("multilingual" if not en_idxs else "bilingual(per-chunk)")
+            )
+            model_summary = (
+                "convaiinnovations/laya"
+                if not ml_idxs
+                else (
+                    "convaiinnovations/laya (multilingual)"
+                    if not en_idxs
+                    else "convaiinnovations/laya (en+multilingual)"
+                )
+            )
         meta = {
             "version": __version__,
             "laya_available": True,
@@ -2132,12 +3030,16 @@ def run_triage(
             "model": model_summary,
             "language_route": lang_route,
             "language_routing": {
-                "english": len(en_idxs),
-                "multilingual": len(ml_idxs),
-                "head_guard_multilingual": (not head_is_en and lang == "auto"),
+                "english": len(en_idxs) + len(ens_en_idxs),
+                "multilingual": len(ml_idxs) + len(ens_ml_idxs),
+                "typed_decisions": len(typed_idxs) + len(ens_en_idxs) + len(ens_ml_idxs),
+                "ensemble": len(ens_en_idxs) + len(ens_ml_idxs),
+                "head_guard_multilingual": (not head_is_en and lang in ("auto", "ensemble")),
             },
             "device": resolved_device,
             "mode": mode,
+            "thorough": thorough,
+            "rubric_preset": rubric_preset if mode == "rubric" else None,
             "files_scanned": len(files),
             "chunks_evaluated": len(enriched),
             "truncated_chunks": truncated_chunks,
@@ -2159,7 +3061,10 @@ def run_triage(
         )
     elif mode == "rubric":
         enriched.sort(
-            key=lambda r: (r.get("expected_score", r.get("score", 0.0)), -r.get("noul", 0.0)),
+            key=lambda r: (
+                r.get("composite_score", r.get("expected_score", r.get("score", 0.0))),
+                -r.get("noul", 0.0),
+            ),
             reverse=True,
         )
 
@@ -2183,14 +3088,24 @@ def run_triage(
             resident_cache=resident_cache,
             threshold=threshold,
             whole_file=whole_file,
+            views=eff_views,
+            policy_path=policy_path,
         )
+        meta["vega_model_resolved"] = _resolve_vega_model(vega_model, resolved_device)
+        meta["vega_views"] = eff_views
         if mode == "contradiction":
             enriched.sort(
                 key=lambda r: (r.get("noul", 0.0), r.get("confidence", 0.0)),
                 reverse=True,
             )
 
-    eff_top_k = (0 if mode == "classify" else 10) if top_k is None else int(top_k)
+    if thorough:
+        meta["file_summaries"] = _compute_file_summaries(enriched, mode=mode)
+
+    if top_k is None:
+        eff_top_k = 0 if (mode == "classify" or thorough) else 10
+    else:
+        eff_top_k = int(top_k)
 
     # Mode-specific result slicing (BUG-A5)
     if mode == "contradiction":
@@ -2199,7 +3114,7 @@ def run_triage(
         if flagged_items:
             selected = flagged_items
         else:
-            selected = enriched[:eff_top_k] if eff_top_k > 0 else []
+            selected = enriched[:eff_top_k] if eff_top_k > 0 else (enriched if thorough else [])
     elif mode == "classify":
         selected = enriched[:eff_top_k] if eff_top_k > 0 else enriched
     else:
@@ -2239,6 +3154,7 @@ def run_self_test() -> Dict[str, Any]:
         "cpu_threads": st["cpu_threads"],
         "laya_version": st["laya_version"],
         "vegaml_version": st["vegaml_version"],
+        "recommended_vega_model": st["recommended_vega_model"],
     }
 
     with tempfile.TemporaryDirectory(prefix="xlaya_selftest_") as tmp_str:
@@ -2379,6 +3295,43 @@ def run_self_test() -> Dict[str, Any]:
             assert rt_th["english"] == 0 and rt_th["multilingual"] == 2 and rt_th["head_guard_multilingual"], rt_th
             checks["bilingual_routing"] = {"en_head": rt_en, "th_head_guard": rt_th}
 
+            # 6b. Stage 1 Ensemble Jury + Disagreement Telemetry + Thorough 4-Facet Rubric
+            ens_res = predict_direct(
+                state="ModernBERT-large uses a 512-token context window and outputs 0 LLM tokens.",
+                questions={
+                    "q": {
+                        "type": "noul",
+                        "instructions": "Does this text mention a 512-token context window?",
+                    }
+                },
+                model="ensemble",
+            )
+            ens_q = ens_res["result"]["answers"]["q"]
+            assert "disagreement" in ens_q and "model_agreement" in ens_q, ens_q
+            assert abs(ens_q["disagreement"] + ens_q["model_agreement"] - 1.0) <= 1e-3, ens_q
+            checks["stage1_ensemble_jury"] = {
+                "noul": ens_q["noul"],
+                "disagreement": ens_q["disagreement"],
+                "model_agreement": ens_q["model_agreement"],
+            }
+
+            th_res = run_triage(
+                [str(f_bi)],
+                mode="rubric",
+                thorough=True,
+                rubric_preset="architecture",
+                lang="en",
+            )
+            assert th_res["meta"]["thorough"] is True
+            assert len(th_res["meta"].get("file_summaries", [])) == 1
+            first_th = th_res["results"][0]
+            assert set(first_th["facet_scores"].keys()) == set(FACET_WEIGHTS.keys())
+            checks["thorough_4facet_rubric"] = {
+                "composite_score": first_th["composite_score"],
+                "weakest_facet": first_th["weakest_facet"],
+                "file_mean": th_res["meta"]["file_summaries"][0]["mean_score"],
+            }
+
             # 7. Hybrid shortlist verification
             sh_item = bi_en_head["results"][0]
             expected_hyb = round(
@@ -2389,24 +3342,15 @@ def run_self_test() -> Dict[str, Any]:
             checks["hybrid_shortlist"] = sh_item["hybrid_score"]
 
             # 8. Counter-Anchor Contradiction Test: A_pos ∧ A_neg
-            here = Path(__file__).resolve().parent
-            skill_candidates = [
-                here.parent / "SKILL.md",
-                here / "skills" / "xlaya" / "SKILL.md",
-            ]
-            skill_md = next((p for p in skill_candidates if p.is_file()), None)
-            if skill_md is None:
-                f_pos = tmp_dir / "pos_skill.md"
-                f_pos.write_text(
-                    "# XLaya Semantic Decision & Conformal Triage Sidecar (`/xlaya` v2.0)\n\n"
-                    "Unlike System 2 LLMs that iterate across multi-step tool loops, `laya` executes a "
-                    "deterministic encoder forward pass (`output_tokens: 0`) using ModernBERT-large's "
-                    "512-token context window (not 128 tokens) with 0 LLM output tokens.\n",
-                    encoding="utf-8",
-                )
-                pos_target = f_pos
-            else:
-                pos_target = skill_md
+            f_pos = tmp_dir / "pos_skill.md"
+            f_pos.write_text(
+                "# XLaya Semantic Decision & Conformal Triage Sidecar (`/xlaya` v2.1)\n\n"
+                "Unlike System 2 LLMs that iterate across multi-step tool loops, `laya` executes a "
+                "deterministic encoder forward pass (`output_tokens: 0`) using ModernBERT-large's "
+                "512-token context window (not 128 tokens) with 0 LLM output tokens.\n",
+                encoding="utf-8",
+            )
+            pos_target = f_pos
 
             ssot_claim = "ModernBERT-large has a 128-token context window and outputs 500 LLM tokens."
             res_pos = run_triage([str(pos_target)], mode="contradiction", ssot=ssot_claim, threshold=0.55)
@@ -2465,7 +3409,7 @@ def run_self_test() -> Dict[str, Any]:
                 "rounds": tourn_res["result"]["tournament"]["cat"]["rounds"],
             }
 
-            # 10. Vega conformal smoke check (when vegaml is installed)
+            # 10. Vega conformal + multi-view debiasing smoke check (when vegaml is installed)
             if st["vegaml_available"]:
                 vega_res = predict_direct(
                     state="ModernBERT-large uses a 512-token context window.",
@@ -2477,15 +3421,17 @@ def run_self_test() -> Dict[str, Any]:
                     },
                     vega=True,
                     vega_model="0.8b",
+                    views=2,
                 )
                 v_ans = vega_res["result"]["answers"]["chk"]
                 assert "unbound" not in v_ans
-                for req_key in ("prediction_set", "abstain", "route", "route_reason"):
+                for req_key in ("prediction_set", "abstain", "route", "route_reason", "view_agreement"):
                     assert req_key in v_ans, v_ans
                 checks["vega_conformal"] = {
                     "route": v_ans["route"],
                     "abstain": v_ans["abstain"],
                     "prediction_set": v_ans["prediction_set"],
+                    "view_agreement": v_ans["view_agreement"],
                 }
 
     return {
@@ -2505,13 +3451,25 @@ def _print_human_report(payload: Dict[str, Any], args: argparse.Namespace) -> No
     meta = payload["meta"]
     shown = payload["results"]
     vega_part = f" | vega_escalated={meta.get('vega_escalated', 0)}" if args.vega else ""
+    thorough_part = f" | thorough({meta.get('rubric_preset')})" if meta.get("thorough") else ""
     print(
         f"[XLaya v{__version__}] model={meta.get('model')} | device={meta.get('device')} "
-        f"| route={meta.get('language_route')} | mode={args.mode} "
+        f"| route={meta.get('language_route')} | mode={args.mode}{thorough_part} "
         f"| files={meta.get('files_scanned')} | chunks={meta.get('chunks_evaluated')}{vega_part} "
         f"| {meta.get('elapsed_ms')} ms"
     )
     print("-" * 98)
+
+    if meta.get("file_summaries"):
+        print("File-Level Rollup Summary:")
+        for fs in meta["file_summaries"]:
+            wf = f" | weakest_facet={fs['weakest_facet']}" if "weakest_facet" in fs else ""
+            print(
+                f"  • {fs['file']:32s} | chunks={fs['chunks']:3d} | mean={fs['mean_score']:.2f} "
+                f"(min={fs['min_score']:.2f}, max={fs['max_score']:.2f}) "
+                f"| weakest={fs['weakest_ref']}{wf}"
+            )
+        print("-" * 98)
 
     if not shown:
         print("  (No matching chunks returned.)")
@@ -2529,35 +3487,41 @@ def _print_human_report(payload: Dict[str, Any], args: argparse.Namespace) -> No
             v_tag = ""
             if "vega" in r:
                 v_tag = f" | vega={r['vega']['noul']:.3f}({r['vega']['route']})"
+            dis_tag = f" | dis={r['disagreement']:.2f}" if "disagreement" in r else ""
             print(
                 f"  [{flag_str}] P(eff)={r.get('noul', 0.0):.3f} "
-                f"(rel={r.get('relevance', 0.0):.2f} × raw={r.get('noul_raw', 0.0):.2f}){v_tag} "
+                f"(rel={r.get('relevance', 0.0):.2f} × raw={r.get('noul_raw', 0.0):.2f}){dis_tag}{v_tag} "
                 f"| {r['ref']:36s} | {r['heading'][:34]}"
             )
     elif args.mode == "shortlist":
         print(f"Top-{len(shown)} Hybrid Shortlisted Sections for query: {args.query!r}")
         for idx, r in enumerate(shown, start=1):
             v_tag = f" | vega={r['vega']['expected_score']:.2f}" if "vega" in r else ""
+            dis_tag = f" | dis={r['disagreement']:.2f}" if "disagreement" in r else ""
             print(
                 f"  {idx:2d}. hyb={r.get('hybrid_score', 0.0):.3f} "
                 f"(neural={r.get('expected_score', 0.0):.2f}/4.00, lex={r.get('lexical_score', 0.0):.2f})"
-                f"{v_tag} | {r['ref']:36s} | {r['heading'][:32]}"
+                f"{dis_tag}{v_tag} | {r['ref']:36s} | {r['heading'][:32]}"
             )
     elif args.mode == "classify":
         print(f"Classification Results ({len(shown)} chunks):")
         for r in shown:
             v_tag = f" | vega={r['vega']['choice']}({r['vega']['route']})" if "vega" in r else ""
+            dis_tag = f" | dis={r['disagreement']:.2f}" if "disagreement" in r else ""
             print(
                 f"  choice={str(r.get('choice', '')):18s} | conf={r.get('confidence', 0.0):.3f}"
-                f"{v_tag} | {r['ref']:36s} | {r['heading'][:34]}"
+                f"{dis_tag}{v_tag} | {r['ref']:36s} | {r['heading'][:34]}"
             )
     else:
         print(f"Rubric Completeness Sweep (top {len(shown)} of {meta.get('chunks_evaluated', 0)} chunks):")
         for r in shown:
             contra_part = f" | P(contra)={r.get('noul', 0.0):.3f}" if args.ssot else ""
             v_tag = f" | vega={r['vega']['expected_score']:.2f}" if "vega" in r else ""
+            facet_part = ""
+            if "facet_scores" in r:
+                facet_part = f" [weakest={r.get('weakest_facet')}:{r.get('facet_min', 0.0):.2f}]"
             print(
-                f"  score={r.get('expected_score', r.get('score', 0.0)):.2f}/4.00 "
+                f"  score={r.get('expected_score', r.get('score', 0.0)):.2f}/4.00{facet_part} "
                 f"| conf={r.get('confidence', 0.0):.3f}{contra_part}{v_tag} "
                 f"| {r['ref']:36s} | {r['heading'][:34]}"
             )
@@ -2565,7 +3529,7 @@ def _print_human_report(payload: Dict[str, Any], args: argparse.Namespace) -> No
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="XBoost /xlaya v2.0.0 — 3-Stage System 1 → System 1.5 Semantic Triage Engine"
+        description="XBoost /xlaya v2.1.0 — 3-Stage System 1 → System 1.5 Pure-Local High-Accuracy Triage Engine"
     )
     parser.add_argument(
         "paths",
@@ -2594,9 +3558,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--lang",
-        choices=["auto", "en", "multi"],
+        choices=["auto", "en", "multi", "typed", "ensemble"],
         default="auto",
-        help="Language routing: auto (per-chunk + head guard), en, or multi",
+        help="Stage 1 routing: auto, en, multi, typed (typed-decisions), or ensemble (multi-encoder jury)",
     )
     parser.add_argument(
         "--device",
@@ -2619,13 +3583,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--max-chunks",
         type=int,
         default=2048,
-        help="Maximum number of chunks to evaluate in one pass (default: 2048)",
+        help="Maximum number of chunks to evaluate in one pass (default: 2048; auto-raised to 4096 in --thorough)",
     )
     parser.add_argument(
         "--top-k",
         type=int,
         default=None,
-        help="Top results to return (default: 10 for shortlist/rubric/contradiction-diag, all [0] for classify)",
+        help="Top results to return (default: 10 for shortlist/rubric/contradiction, 0 [all] for classify/thorough)",
     )
     parser.add_argument(
         "--threshold",
@@ -2653,19 +3617,75 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vega",
         action="store_true",
-        help="Enable Stage 2 VegaML conformal escalation on top/borderline finalists",
+        help="Enable Stage 2 VegaML conformal escalation on top/borderline/high-disagreement finalists",
     )
     parser.add_argument(
         "--vega-model",
-        choices=["0.8b", "4b", "gemma-1b"],
-        default="0.8b",
-        help="VegaML reader model size for Stage 2 escalation (default: 0.8b)",
+        choices=["auto", "0.8b", "4b", "gemma-1b", "27b"],
+        default="auto",
+        help="VegaML reader model size for Stage 2 escalation (default: auto hardware-aware)",
     )
     parser.add_argument(
         "--vega-top-k",
         type=int,
         default=10,
         help="Maximum Stage 1 finalists escalated to VegaML (default: 10)",
+    )
+    parser.add_argument(
+        "--views",
+        type=int,
+        choices=[1, 2, 3],
+        default=1,
+        help="Stage 2 VegaML multi-view debiasing passes (1=single, 2=reversed options, 3=+prose paraphrase)",
+    )
+    parser.add_argument(
+        "--thorough",
+        action="store_true",
+        help="Enable full-document scan (no prefilter, all chunks) + 4-facet decomposed rubric + file_summaries",
+    )
+    parser.add_argument(
+        "--rubric-preset",
+        choices=["default", "architecture", "code_audit", "doc_sync", "research"],
+        default="default",
+        help="Domain rubric preset for --thorough 4-facet scoring (default: default)",
+    )
+    parser.add_argument(
+        "--policy-path",
+        default="",
+        help="Directory path to load/save a trained TTTHead + split-conformal calibration policy bundle",
+    )
+    parser.add_argument(
+        "--fit-rows",
+        default="",
+        help="Path to JSON/JSONL labeled rows to fit and save a persistent TTTHead + conformal policy at --policy-path",
+    )
+    parser.add_argument(
+        "--fit-questions",
+        "--questions-file",
+        dest="fit_questions",
+        default="",
+        help="Optional path to JSON questions schema for --fit-rows or multimodal prediction",
+    )
+    parser.add_argument(
+        "--target-precision",
+        type=float,
+        default=0.95,
+        help="Target precision for split-conformal calibration during --fit-rows (default: 0.95)",
+    )
+    parser.add_argument(
+        "--image",
+        default="",
+        help="Local image file path for Stage 2 VegaVision multimodal prediction",
+    )
+    parser.add_argument(
+        "--audio",
+        default="",
+        help="Local audio file path for Stage 2 VegaAudio multimodal prediction",
+    )
+    parser.add_argument(
+        "--video",
+        default="",
+        help="Local video file path for Stage 2 VegaVideo multimodal prediction",
     )
     parser.add_argument(
         "--self-test",
@@ -2689,11 +3709,83 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 0 if report.get("ok") else 1
 
+    if args.fit_rows:
+        if not args.policy_path:
+            print("[XLaya Error] --fit-rows requires --policy-path to persist the policy bundle.", file=sys.stderr)
+            return 2
+        rows_path = Path(args.fit_rows)
+        if not rows_path.is_file():
+            print(f"[XLaya Error] --fit-rows file not found: {rows_path}", file=sys.stderr)
+            return 2
+        raw_text = rows_path.read_text(encoding="utf-8").strip()
+        if rows_path.suffix.lower() == ".jsonl":
+            rows_data = [json.loads(line) for line in raw_text.splitlines() if line.strip()]
+        else:
+            rows_data = json.loads(raw_text)
+        if args.fit_questions:
+            q_data = json.loads(Path(args.fit_questions).read_text(encoding="utf-8"))
+        else:
+            q_data = _build_mode_questions(
+                mode=args.mode,
+                query=args.query,
+                ssot=args.ssot,
+                true_desc=args.true_desc,
+                false_desc=args.false_desc,
+                labels=parse_label_spec(args.labels),
+                noul_label_map=parse_noul_labels(args.noul_labels),
+                thorough=args.thorough,
+                rubric_preset=args.rubric_preset,
+            )
+        fit_res = fit_policy(
+            rows=rows_data,
+            questions=q_data,
+            policy_path=args.policy_path,
+            vega_model=args.vega_model,
+            device=args.device,
+            target_precision=args.target_precision,
+            resident_cache=False,
+        )
+        print(json.dumps(fit_res, indent=2, ensure_ascii=False))
+        return 0 if fit_res.get("ok") else 1
+
+    if args.image or args.audio or args.video:
+        if args.fit_questions:
+            q_data = json.loads(Path(args.fit_questions).read_text(encoding="utf-8"))
+        else:
+            q_data = _build_mode_questions(
+                mode=args.mode,
+                query=args.query or "Evaluate the visual or audio content accurately.",
+                ssot=args.ssot,
+                true_desc=args.true_desc,
+                false_desc=args.false_desc,
+                labels=parse_label_spec(args.labels),
+                noul_label_map=parse_noul_labels(args.noul_labels),
+                thorough=args.thorough,
+                rubric_preset=args.rubric_preset,
+            )
+        mm_res = predict_direct(
+            questions=q_data,
+            vega=True,
+            vega_model=args.vega_model,
+            views=args.views,
+            policy_path=args.policy_path,
+            image=args.image or None,
+            audio=args.audio or None,
+            video=args.video or None,
+            device=args.device,
+        )
+        print(json.dumps(mm_res, indent=2, ensure_ascii=False))
+        return 0 if mm_res.get("ok") else 1
+
     if not args.paths:
         print("[XLaya Error] At least one target file or directory path is required.", file=sys.stderr)
         return 2
 
-    effective_top_k = args.top_k if args.top_k is not None else (0 if args.mode == "classify" else 10)
+    effective_top_k = (
+        args.top_k
+        if args.top_k is not None
+        else (0 if (args.mode == "classify" or args.thorough) else 10)
+    )
 
     try:
         payload = run_triage(
@@ -2718,6 +3810,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             vega=args.vega,
             vega_model=args.vega_model,
             vega_top_k=args.vega_top_k,
+            views=args.views,
+            thorough=args.thorough,
+            rubric_preset=args.rubric_preset,
+            policy_path=args.policy_path or None,
             resident_cache=False,
         )
     except ValueError as exc:
