@@ -14,7 +14,7 @@ import sys
 import threading
 from typing import Any, Dict, List, Optional
 
-__version__ = "2.1.0"
+__version__ = "2.3.0"
 
 sys.dont_write_bytecode = True
 
@@ -130,19 +130,37 @@ MCP_TOOLS: List[Dict[str, Any]] = [
     {
         "name": "xlaya_status",
         "description": (
-            "Inspect XLaya System 1 runtime health, warm-loaded models (`en`, `multi`, `typed`, `ensemble`, `vegaml`), "
+            "Inspect XLaya System 1 runtime health, adaptive hardware profile (`auto`, `nano`, `edge`, "
+            "`workstation`, `max`), warm-loaded models (`en`, `multi`, `typed`, `ensemble`, `vegaml`), "
             "CUDA/VRAM availability, MCP server version, and idle auto-unload TTL."
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {},
+            "properties": {
+                "profile": {
+                    "type": "string",
+                    "enum": ["auto", "nano", "edge", "workstation", "max"],
+                    "default": "auto",
+                    "description": (
+                        "Optional adaptive hardware profile check "
+                        "(`auto`, `nano`, `edge`, `workstation`, `max`)."
+                    ),
+                },
+                "agent_tier": {
+                    "type": "string",
+                    "enum": ["auto", "e4b-sniper", "31b-deep"],
+                    "default": "auto",
+                    "description": "Optional target agent tier (`auto`, `e4b-sniper`, `31b-deep`).",
+                },
+            },
         },
     },
     {
         "name": "xlaya_triage",
         "description": (
-            "Run high-throughput System 1 document/section triage (`shortlist`, `contradiction`, "
-            "`rubric`, `classify`) across files or directories with optional `--thorough` 4-facet ensemble scan, "
+            "Run high-throughput System 1 document/code-graph triage (`shortlist`, `contradiction`, "
+            "`rubric`, `classify`) across files or directories with adaptive `--profile` (`nano`..`max`), "
+            "`--agent-tier` (`e4b-sniper`/`31b-deep`), `--sieve-weights`, `--thorough` 4-facet scan, "
             "multi-view debiasing (`views=1..3`), trained `policy_path`, and VegaML escalation."
         ),
         "inputSchema": {
@@ -201,6 +219,25 @@ MCP_TOOLS: List[Dict[str, Any]] = [
                     "default": "auto",
                     "description": "Compute device (`auto`, `cuda`, `mps`, `cpu`).",
                 },
+                "profile": {
+                    "type": "string",
+                    "enum": ["auto", "nano", "edge", "workstation", "max"],
+                    "default": "auto",
+                    "description": "Adaptive hardware envelope (`auto`, `nano`, `edge`, `workstation`, `max`).",
+                },
+                "agent_tier": {
+                    "type": "string",
+                    "enum": ["auto", "e4b-sniper", "31b-deep"],
+                    "default": "auto",
+                    "description": "Target SWE agent context budget tier (`auto`, `e4b-sniper`, `31b-deep`).",
+                },
+                "sieve_weights": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Optional JSON file path to evolved code-graph sieve genomes (`sieve_genomes.json`)."
+                    ),
+                },
                 "max_chars": {
                     "type": "integer",
                     "default": 1600,
@@ -247,9 +284,9 @@ MCP_TOOLS: List[Dict[str, Any]] = [
                 },
                 "vega_model": {
                     "type": "string",
-                    "enum": ["auto", "0.8b", "4b", "gemma-1b", "27b"],
+                    "enum": ["auto", "0.8b", "4b", "gemma-1b", "27b", "none"],
                     "default": "auto",
-                    "description": "VegaML model tier (`auto`, `0.8b`, `4b`, `gemma-1b`, `27b`).",
+                    "description": "VegaML model tier (`auto`, `0.8b`, `4b`, `gemma-1b`, `27b`, `none`).",
                 },
                 "vega_top_k": {
                     "type": "integer",
@@ -349,15 +386,24 @@ MCP_TOOLS: List[Dict[str, Any]] = [
                 },
                 "vega_model": {
                     "type": "string",
-                    "enum": ["auto", "0.8b", "4b", "gemma-1b", "27b"],
+                    "enum": ["auto", "0.8b", "4b", "gemma-1b", "27b", "none"],
                     "default": "auto",
-                    "description": "VegaML model tier (`auto`, `0.8b`, `4b`, `gemma-1b`, `27b`).",
+                    "description": "VegaML model tier (`auto`, `0.8b`, `4b`, `gemma-1b`, `27b`, `none`).",
                 },
                 "views": {
                     "type": "integer",
                     "enum": [1, 2, 3],
                     "default": 1,
                     "description": "Multi-view debiasing passes (`1`, `2`, or `3`; returns `view_agreement`).",
+                },
+                "profile": {
+                    "type": "string",
+                    "enum": ["auto", "nano", "edge", "workstation", "max"],
+                    "default": "auto",
+                    "description": (
+                        "Hardware execution profile (`auto`, `nano` zero-torch pure-Python sieve, "
+                        "`edge` single CPU encoder, `workstation` 16 GB GPU, `max` 40 GB+ / L4x4)."
+                    ),
                 },
                 "policy_path": {
                     "type": "string",
@@ -502,7 +548,9 @@ def dispatch_mcp_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         backend = _get_backend()
 
         if name == "xlaya_status":
-            payload = _normalize_dict_payload(backend.get_status())
+            payload = _normalize_dict_payload(
+                backend.get_status(profile=_arg_str(args, "profile", "auto"))
+            )
             payload["mcp_version"] = __version__
             payload["idle_ttl_sec"] = _get_idle_ttl_sec()
             return payload
@@ -546,6 +594,9 @@ def dispatch_mcp_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                     thorough=_arg_bool(args, "thorough", False),
                     rubric_preset=_arg_str(args, "rubric_preset", "default"),
                     policy_path=_arg_str(args, "policy_path", ""),
+                    profile=_arg_str(args, "profile", "auto"),
+                    agent_tier=_arg_str(args, "agent_tier", "auto"),
+                    sieve_weights=_arg_str(args, "sieve_weights", ""),
                 )
                 return _normalize_dict_payload(res)
             finally:
@@ -579,6 +630,7 @@ def dispatch_mcp_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                     image=image_arg,
                     audio=audio_arg,
                     video=video_arg,
+                    profile=_arg_str(args, "profile", "auto"),
                 )
                 return _normalize_dict_payload(res)
             finally:

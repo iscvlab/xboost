@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-laya_triage.py — 3-Stage System 1 → System 1.5 Semantic Triage, Multi-Facet Rubric & Conformal Cascade Engine
-Part of the XBoost Agent Skill Framework (/xlaya v2.1.0).
+laya_triage.py — 3-Stage System 1 → System 1.5 Semantic Triage, Adaptive Hardware Profile & Code-Graph Sieve Engine
+Part of the XBoost Agent Skill Framework (/xlaya v2.3.0).
 
 Architecture:
-- Stage 0 (Deterministic Chunker + Lexical Engine):
+- Stage 0 (Deterministic Chunker + Cross-Regime AST Code-Graph & Evolved Matrix Sieve):
   • 4-backtick/tilde fence-safe Markdown parser with 6-level #{1,6} breadcrumb stack
-  • Script-aware token budget estimator (English ≤ 380 est. tokens, Multilingual ≤ 780 est. tokens)
-  • Multi-format structured chunking (.md, .txt, .html/.htm, .jsonl, .json, .csv) with disambiguated refs
-  • Stdlib BM25 + code-span / CLI-flag / identifier bonus + overlapping Thai character 3-grams
+  • O(L) Python AST enclosing def/async def/class chunker, skeleton headers, & 2-Tier source-first pre-ranker
+  • Universal pure-stdlib Corpus-IDF seed propagation (f_5_tfidf) + whitened .npz & isolated NetworkX sidecars
+  • Smooth realized channel availability renormalization (M_avail, gamma_max=1.45) + 2-Stage When2Call tool gate
+  • Evolved 8-feature simplex sieve (sieve_code_graph + sieve_genomes.json) for E4B-Sniper & 31B-Deep budgets
 - Stage 1 (ModernBERT Multi-Encoder Jury — english + typed-decisions + mmBERT):
   • Thread-safe resident model cache (_MODEL_CACHE) + offline-first local HF snapshot resolution
   • Support for 'en', 'multi', 'typed' (subfolder='typed-decisions'), and 'ensemble' (0.45*en + 0.55*typed)
   • Per-item inter-model disagreement & model_agreement telemetry for automatic Stage 2 escalation
   • 4-facet decomposed rubric scoring (specificity, completeness, consistency, actionability) + file summaries
 - Stage 2 (VegaML Conformal System 1.5 Escalation & Persistent TTT Calibration):
-  • Hardware-aware vega_model selector ('auto' -> '4b' or '0.8b', plus 'gemma-1b', '27b')
+  • Adaptive hardware profiles (--profile auto|nano|edge|workstation|max + --agent-tier auto|e4b-sniper|31b-deep)
   • Multi-view test-time surface debiasing (views=1|2|3 reversing option order & prose templates -> view_agreement)
   • Persistent TTTHead + split-conformal policy training (fit_policy / load_calibration / outbound OOD guard)
   • Local multimodal inference (image, audio, video) through VegaAgent
@@ -24,8 +25,10 @@ Architecture:
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import csv
+import ctypes
 import fnmatch
 import gc
 import html
@@ -41,11 +44,12 @@ import tempfile
 import threading
 import time
 import warnings
+import zlib
 from collections import Counter
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
-__version__ = "2.1.0"
+__version__ = "2.3.0"
 
 sys.dont_write_bytecode = True
 if hasattr(sys.stdout, "reconfigure"):
@@ -94,10 +98,95 @@ EXCLUDED_DIRS = frozenset(
     {
         ".git", "node_modules", ".venv", "venv", "env", "dist", "build",
         "__pycache__", ".obsidian", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+        ".tox", ".nox", ".eggs", "site-packages",
     }
 )
 
 DEFAULT_PATTERN = "*.md,*.html,*.txt,*.json,*.jsonl,*.csv"
+CODE_PATTERN = "*.md,*.html,*.txt,*.json,*.jsonl,*.csv,*.py,*.pyi,*.toml,*.yaml,*.yml"
+XLAYA_PROFILES = ("auto", "nano", "edge", "workstation", "max")
+XLAYA_AGENT_TIERS = ("auto", "e4b-sniper", "31b-deep")
+SIEVE_FEATURE_NAMES = (
+    "bm25",
+    "ident_exact",
+    "ast_enclosing_def",
+    "call_graph_hop1",
+    "async_depends_hop2",
+    "emb_256d_cos",
+    "test_file_penalty",
+    "traceback_line_boost",
+)
+SIEVE_NEG_INDICES = frozenset({6})  # test_file_penalty is non-positive on the L1 simplex
+
+DEFAULT_SIEVE_GENOMES: Dict[str, Any] = {
+    "schema_version": "2.3.0",
+    "feature_names": list(SIEVE_FEATURE_NAMES),
+    "gamma_max": 1.45,
+    "e4b_sniper_p1": {
+        "w_core": [0.17836, 0.228133, 0.08187, 0.166449, 0.065469, 0.053293, -0.151443, 0.074983],
+        "w_halo": [0.17836, 0.228133, 0.08187, 0.166449, 0.065469, 0.053293, -0.151443, 0.074983],
+        "lambda_file_div": 0.35,
+        "platt_T": 1.67,
+        "platt_b": -0.795,
+        "conformal_q_hat": 0.5885,
+        "token_budget": 800,
+        "top_k": 3,
+    },
+    "e4b_sniper_distilled": {
+        "w_core": [0.167068, 0.296999, 0.045851, 0.155435, 0.067317, 0.062147, -0.151591, 0.053592],
+        "w_halo": [0.167068, 0.296999, 0.045851, 0.155435, 0.067317, 0.062147, -0.151591, 0.053592],
+        "lambda_file_div": 0.35,
+        "platt_T": 1.67,
+        "platt_b": -0.795,
+        "conformal_q_hat": 0.5885,
+        "token_budget": 800,
+        "top_k": 3,
+    },
+    "31b_deep": {
+        "w_core": [0.167068, 0.296999, 0.045851, 0.155435, 0.067317, 0.062147, -0.151591, 0.053592],
+        "w_halo": [0.098415, 0.159503, 0.185096, 0.128404, 0.01622, 0.18358, -0.178304, 0.050476],
+        "anchor_slots": 3,
+        "lambda_file_div": 0.16,
+        "platt_T": 1.67,
+        "platt_b": -0.795,
+        "conformal_q_hat": 0.5885,
+        "token_budget": 4096,
+        "top_k": 8,
+    },
+    "tool_gate": {
+        "schema": "factorized_2stage_v23",
+        "tau_tool_call": 0.345,
+        "temp_rel": 1.3239,
+        "temp_slot": 0.75,
+        "rel_w1": [
+            [0.34198, 0.37987, 0.9929, 0.08553, 0.02598, 0.04005, 0.02253],
+            [0.23083, 0.26423, 1.30163, 0.14012, 0.01714, 0.05001, 0.02236],
+            [0.23029, 0.34235, 1.25417, 0.13582, 0.02046, 0.05734, 0.01996],
+            [0.25638, 0.35981, 1.24085, 0.17128, 0.02972, 0.05399, 0.02714],
+            [0.30637, 0.32293, 0.88903, 0.18943, 0.01902, 0.0523, 0.02572],
+            [0.40419, 0.3075, 0.749, 0.15349, 0.02026, 0.04659, 0.02016],
+            [0.34479, 0.31181, 0.92635, 0.14946, 0.02925, 0.04881, 0.01893],
+            [0.31611, 0.2522, 0.97719, 0.19655, 0.02646, 0.05299, 0.02211],
+        ],
+        "rel_b1": [-0.50511, -0.46209, -0.47055, -0.42028, -0.48737, -0.5569, -0.46662, -0.46446],
+        "rel_w2": [0.93938, 1.09745, 0.94605, 0.93955, 1.03502, 0.92325, 0.75509, 0.9352],
+        "rel_b2": -0.46756,
+        "slot_w1": [
+            [2.31203, 0.16985, -0.14598, -0.16849, -0.50253, -0.10321, 0.19972, 0.61083, 0.20748, -0.21331, -1.29212],
+            [2.27175, 0.21759, -0.07601, -0.08156, -0.25666, -0.07834, 0.30082, 0.72833, 0.18577, -0.08771, -1.04199],
+            [0.97987, 0.08668, -0.03106, -0.02007, -0.04297, -0.48435, 5.352, 0.42469, 0.84874, -0.01858, -0.60401],
+            [2.13322, 0.17683, -0.06814, -0.05952, -0.21174, -0.06085, 0.36346, 0.65339, 0.23195, -0.05766, -0.81323],
+            [1.55528, 0.08354, -0.03804, -0.01651, -0.07002, -0.06679, 1.50322, 0.26005, 0.45668, -0.01495, -0.54949],
+            [2.08538, 0.13845, -0.04093, -0.01998, -0.14983, -0.03999, 0.98921, 0.47423, 0.29548, -0.03289, -0.50002],
+            [1.97388, 0.14195, -0.0403, -0.02331, -0.16564, -0.04718, 0.64221, 0.74331, 0.20343, -0.03471, -0.49288],
+            [2.06836, 0.13131, -0.06637, -0.05002, -0.19182, -0.04897, 0.3022, 0.78903, 0.19947, -0.07609, -0.93425],
+        ],
+        "slot_b1": [-1.32144, -1.53527, -0.39146, -1.46922, -1.11846, -1.1449, -1.31111, -1.3259],
+        "slot_w2": [0.28035, 0.32349, 1.05236, 0.41561, 0.41898, 0.41078, 0.39769, 0.29727],
+        "slot_b2": -0.25657,
+    },
+}
+
 DEFAULT_LABELS_SPEC = (
     "architecture:Architecture & specs|cli:CLI scripts & commands|docs:General prose & guides"
 )
@@ -119,7 +208,7 @@ DEFAULT_RELEVANCE_CRITERIA = [
 ]
 
 VALID_MODES = frozenset({"rubric", "contradiction", "shortlist", "classify"})
-VALID_VEGA_MODELS = frozenset({"auto", "0.8b", "08b", "4b", "gemma-1b", "27b"})
+VALID_VEGA_MODELS = frozenset({"auto", "none", "0.8b", "08b", "4b", "gemma-1b", "27b"})
 
 FACET_WEIGHTS: Dict[str, float] = {
     "specificity": 0.30,
@@ -283,8 +372,51 @@ def _configure_cpu_threads(torch_mod: Any) -> int:
     return int(torch_mod.get_num_threads())
 
 
+def _host_ram_gb() -> float:
+    """Estimate total host system RAM in GiB using stdlib without third-party imports."""
+    if os.name == "nt":
+        try:
+            class _MemStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = _MemStatusEx()
+            stat.dwLength = ctypes.sizeof(_MemStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):  # type: ignore[attr-defined]
+                return round(stat.ullTotalPhys / (1024 ** 3), 2)
+        except Exception:  # nosec B110
+            pass
+    else:
+        try:
+            meminfo = Path("/proc/meminfo")
+            if meminfo.is_file():
+                for line in meminfo.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    if line.startswith("MemTotal:"):
+                        kb = int(line.split()[1])
+                        return round(kb / (1024 ** 2), 2)
+            if hasattr(os, "sysconf"):
+                pages = os.sysconf("SC_PHYS_PAGES")
+                page_size = os.sysconf("SC_PAGE_SIZE")
+                if pages > 0 and page_size > 0:
+                    return round((pages * page_size) / (1024 ** 3), 2)
+        except Exception:  # nosec B110
+            pass
+    return 8.0
+
+
 def _resolve_device(device: str = "auto") -> str:
     req = (device or "auto").strip().lower()
+    if req == "cpu" or os.environ.get("XLAYA_PROFILE", "").strip().lower() == "nano":
+        return "cpu"
     try:
         import torch  # type: ignore
     except ImportError:
@@ -305,6 +437,195 @@ def _resolve_device(device: str = "auto") -> str:
     if resolved == "cpu":
         _configure_cpu_threads(torch)
     return resolved
+
+
+def _resolve_hardware_profile(
+    profile: str = "auto",
+    agent_tier: str = "auto",
+    device: str = "auto",
+) -> Dict[str, Any]:
+    """Resolve adaptive hardware envelope (--profile) and agent token/slot tier (--agent-tier)."""
+    raw_prof = (profile or "").strip().lower()
+    if not raw_prof or raw_prof == "auto":
+        env_prof = os.environ.get("XLAYA_PROFILE", "").strip().lower()
+        eff_prof = env_prof if env_prof else "auto"
+    else:
+        eff_prof = raw_prof
+
+    if eff_prof not in XLAYA_PROFILES:
+        raise ValueError(
+            f"Unsupported profile {profile!r}; expected one of {list(XLAYA_PROFILES)}."
+        )
+
+    raw_tier = (agent_tier or "").strip().lower()
+    if not raw_tier or raw_tier == "auto":
+        env_tier = os.environ.get("XLAYA_AGENT_TIER", "").strip().lower()
+        eff_tier = env_tier if env_tier else "auto"
+    else:
+        eff_tier = raw_tier
+
+    if eff_tier not in XLAYA_AGENT_TIERS:
+        raise ValueError(
+            f"Unsupported agent_tier {agent_tier!r}; expected one of {list(XLAYA_AGENT_TIERS)}."
+        )
+
+    profile_explicit = eff_prof != "auto"
+    tier_explicit = eff_tier != "auto"
+
+    # Strict zero-torch fast path for 'nano' (guarantees 'torch' not in sys.modules)
+    if eff_prof == "nano":
+        res_tier = "e4b-sniper" if eff_tier == "auto" else eff_tier
+        return {
+            "profile": "nano",
+            "profile_explicit": True,
+            "agent_tier": res_tier,
+            "agent_tier_explicit": tier_explicit,
+            "device": "cpu",
+            "stage0_only": True,
+            "single_encoder_only": False,
+            "vega_allowed": False,
+            "recommended_vega_model": "none",
+            "rss_budget_mb": 25,
+            "latency_budget_ms": 200,
+            "token_budget": 800 if res_tier == "e4b-sniper" else 4096,
+            "default_top_k": 3 if res_tier == "e4b-sniper" else 8,
+            "batch_size_cap": 16,
+            "cuda_device_count": 0,
+            "vram_single_gb": 0.0,
+            "vram_cluster_gb": 0.0,
+            "host_ram_gb": _host_ram_gb(),
+        }
+
+    ram_gb = _host_ram_gb()
+    laya_ok, _ = _pkg_version("laya", "laya")
+    cuda_count = 0
+    vram_single_gb = 0.0
+    vram_cluster_gb = 0.0
+    resolved_dev = "cpu"
+
+    if eff_prof == "edge" and (device or "auto").strip().lower() in ("", "auto", "cpu"):
+        resolved_dev = "cpu"
+    elif laya_ok or importlib.util.find_spec("torch") is not None:
+        try:
+            import torch  # type: ignore
+
+            if torch.cuda.is_available():
+                cuda_count = int(torch.cuda.device_count())
+                per_dev_gb: List[float] = []
+                for dev_idx in range(cuda_count):
+                    props = torch.cuda.get_device_properties(dev_idx)
+                    per_dev_gb.append(float(props.total_memory) / (1024 ** 3))
+                vram_single_gb = round(per_dev_gb[0], 2) if per_dev_gb else 0.0
+                vram_cluster_gb = round(sum(per_dev_gb), 2)
+            resolved_dev = _resolve_device(device)
+        except Exception:  # nosec B110
+            resolved_dev = "cpu"
+
+    if eff_prof == "auto":
+        if not laya_ok:
+            res_prof = "nano"
+        elif resolved_dev.startswith("cuda") and (vram_cluster_gb >= 48.0 or vram_single_gb >= 22.0):
+            res_prof = "max"
+        elif resolved_dev.startswith("cuda") and vram_single_gb >= 8.0:
+            res_prof = "workstation"
+        elif ram_gb <= 3.0 and not resolved_dev.startswith("cuda"):
+            res_prof = "nano"
+        else:
+            res_prof = "edge"
+    else:
+        res_prof = eff_prof
+
+    if res_prof == "nano":
+        res_tier = "e4b-sniper" if eff_tier == "auto" else eff_tier
+        return {
+            "profile": "nano",
+            "profile_explicit": profile_explicit,
+            "agent_tier": res_tier,
+            "agent_tier_explicit": tier_explicit,
+            "device": "cpu",
+            "stage0_only": True,
+            "single_encoder_only": False,
+            "vega_allowed": False,
+            "recommended_vega_model": "none",
+            "rss_budget_mb": 25,
+            "latency_budget_ms": 200,
+            "token_budget": 800 if res_tier == "e4b-sniper" else 4096,
+            "default_top_k": 3 if res_tier == "e4b-sniper" else 8,
+            "batch_size_cap": 16,
+            "cuda_device_count": cuda_count,
+            "vram_single_gb": vram_single_gb,
+            "vram_cluster_gb": vram_cluster_gb,
+            "host_ram_gb": ram_gb,
+        }
+
+    if res_prof == "edge":
+        res_tier = "e4b-sniper" if eff_tier == "auto" else eff_tier
+        edge_dev = "cpu" if (device or "auto").strip().lower() in ("", "auto") else resolved_dev
+        return {
+            "profile": "edge",
+            "profile_explicit": profile_explicit,
+            "agent_tier": res_tier,
+            "agent_tier_explicit": tier_explicit,
+            "device": edge_dev,
+            "stage0_only": False,
+            "single_encoder_only": True,
+            "vega_allowed": False,
+            "recommended_vega_model": "none",
+            "rss_budget_mb": 350,
+            "latency_budget_ms": 1500,
+            "token_budget": 800 if res_tier == "e4b-sniper" else 4096,
+            "default_top_k": 3 if res_tier == "e4b-sniper" else 8,
+            "batch_size_cap": 16,
+            "cuda_device_count": cuda_count,
+            "vram_single_gb": vram_single_gb,
+            "vram_cluster_gb": vram_cluster_gb,
+            "host_ram_gb": ram_gb,
+        }
+
+    if res_prof == "max":
+        res_tier = "31b-deep" if eff_tier == "auto" else eff_tier
+        return {
+            "profile": "max",
+            "profile_explicit": profile_explicit,
+            "agent_tier": res_tier,
+            "agent_tier_explicit": tier_explicit,
+            "device": resolved_dev,
+            "stage0_only": False,
+            "single_encoder_only": False,
+            "vega_allowed": True,
+            "recommended_vega_model": _resolve_vega_model("auto", resolved_dev),
+            "rss_budget_mb": 16384,
+            "latency_budget_ms": 5000,
+            "token_budget": 800 if res_tier == "e4b-sniper" else 4096,
+            "default_top_k": 3 if res_tier == "e4b-sniper" else 8,
+            "batch_size_cap": 64,
+            "cuda_device_count": cuda_count,
+            "vram_single_gb": vram_single_gb,
+            "vram_cluster_gb": vram_cluster_gb,
+            "host_ram_gb": ram_gb,
+        }
+
+    res_tier = "31b-deep" if eff_tier == "auto" else eff_tier
+    return {
+        "profile": "workstation",
+        "profile_explicit": profile_explicit,
+        "agent_tier": res_tier,
+        "agent_tier_explicit": tier_explicit,
+        "device": resolved_dev,
+        "stage0_only": False,
+        "single_encoder_only": False,
+        "vega_allowed": True,
+        "recommended_vega_model": _resolve_vega_model("auto", resolved_dev),
+        "rss_budget_mb": 4096,
+        "latency_budget_ms": 3000,
+        "token_budget": 800 if res_tier == "e4b-sniper" else 4096,
+        "default_top_k": 3 if res_tier == "e4b-sniper" else 8,
+        "batch_size_cap": 32,
+        "cuda_device_count": cuda_count,
+        "vram_single_gb": vram_single_gb,
+        "vram_cluster_gb": vram_cluster_gb,
+        "host_ram_gb": ram_gb,
+    }
 
 
 def _normalize_model_key(name: str) -> str:
@@ -446,13 +767,23 @@ def _resolve_vega_model(vega_model: str, resolved_device: str) -> str:
     if raw != "auto":
         return raw
 
-    # Hardware-aware auto-selector: prefer 4b on >=10 GB CUDA VRAM when cached locally, else 0.8b
-    if resolved_device.startswith("cuda") and _is_hf_repo_cached("Qwen/Qwen3.5-4B"):
+    # Single-GPU VRAM + verified local snapshot check (prevents uncached HF downloads or multi-GPU sum errors)
+    if (
+        resolved_device.startswith("cuda")
+        and _is_hf_repo_cached("Qwen/Qwen3.5-4B")
+        and _resolve_local_vega_snapshot("4b") is not None
+    ):
         try:
             import torch  # type: ignore
 
             if torch.cuda.is_available():
-                free_b, total_b = torch.cuda.mem_get_info()
+                dev_idx = 0
+                if ":" in resolved_device:
+                    try:
+                        dev_idx = int(resolved_device.split(":", 1)[1])
+                    except ValueError:
+                        dev_idx = 0
+                free_b, total_b = torch.cuda.mem_get_info(dev_idx)
                 if free_b >= int(9.5 * (1024 ** 3)) or total_b >= int(14.0 * (1024 ** 3)):
                     return "4b"
         except Exception:  # nosec B110
@@ -659,8 +990,9 @@ def fit_policy(
     }
 
 
-def get_status() -> Dict[str, Any]:
-    """Return current runtime, GPU/CPU, Laya/VegaML availability, and resident cache status."""
+def get_status(profile: str = "auto", agent_tier: str = "auto") -> Dict[str, Any]:
+    """Return current runtime, hardware profile, GPU/CPU, Laya/VegaML availability, and cache status."""
+    hw = _resolve_hardware_profile(profile=profile, agent_tier=agent_tier, device="auto")
     laya_ok, laya_ver = _pkg_version("laya", "laya")
     vega_ok, vega_ver = _pkg_version("vegaml", "vegaml")
 
@@ -671,37 +1003,40 @@ def get_status() -> Dict[str, Any]:
     vram_total_gb: Optional[float] = None
     vram_free_gb: Optional[float] = None
     cpu_threads = _recommended_cpu_threads()
-    default_dev = "cpu"
+    default_dev = hw["device"]
 
-    try:
-        import torch  # type: ignore
+    if hw["profile"] != "nano":
+        try:
+            import torch  # type: ignore
 
-        torch_ver = str(torch.__version__)
-        cuda_ok = bool(torch.cuda.is_available())
-        mps_ok = bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
-        cpu_threads = _configure_cpu_threads(torch)
-        if cuda_ok:
-            default_dev = "cuda"
-            gpu_name = str(torch.cuda.get_device_name(0))
-            try:
-                free_b, total_b = torch.cuda.mem_get_info()
-                vram_free_gb = round(free_b / (1024 ** 3), 2)
-                vram_total_gb = round(total_b / (1024 ** 3), 2)
-            except Exception:  # nosec B110
-                pass
-        elif mps_ok:
-            default_dev = "mps"
-        else:
-            default_dev = "cpu"
-    except ImportError:
-        pass
+            torch_ver = str(torch.__version__)
+            cuda_ok = bool(torch.cuda.is_available())
+            mps_ok = bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available())
+            cpu_threads = _configure_cpu_threads(torch)
+            if cuda_ok:
+                if default_dev == "auto":
+                    default_dev = "cuda"
+                gpu_name = str(torch.cuda.get_device_name(0))
+                try:
+                    free_b, total_b = torch.cuda.mem_get_info(0)
+                    vram_free_gb = round(free_b / (1024 ** 3), 2)
+                    vram_total_gb = round(total_b / (1024 ** 3), 2)
+                except Exception:  # nosec B110
+                    pass
+            elif mps_ok and default_dev == "auto":
+                default_dev = "mps"
+        except ImportError:
+            pass
 
     with _CACHE_LOCK:
         loaded = list(_MODEL_CACHE.keys())
 
+    rec_vega = "none" if hw["profile"] in ("nano", "edge") else _resolve_vega_model("auto", default_dev)
     return {
         "ok": True,
         "version": __version__,
+        "profile": hw["profile"],
+        "agent_tier": hw["agent_tier"],
         "python": sys.version.split()[0],
         "laya_available": laya_ok,
         "laya_version": laya_ver,
@@ -709,12 +1044,15 @@ def get_status() -> Dict[str, Any]:
         "vegaml_version": vega_ver,
         "torch_version": torch_ver,
         "cuda_available": cuda_ok,
+        "cuda_device_count": hw["cuda_device_count"],
         "mps_available": mps_ok,
         "device": default_dev,
         "gpu_name": gpu_name,
         "vram_total_gb": vram_total_gb,
         "vram_free_gb": vram_free_gb,
-        "recommended_vega_model": _resolve_vega_model("auto", default_dev),
+        "vram_cluster_gb": hw["vram_cluster_gb"],
+        "host_ram_gb": hw["host_ram_gb"],
+        "recommended_vega_model": rec_vega,
         "cpu_threads": cpu_threads,
         "loaded_models": loaded,
     }
@@ -1033,6 +1371,7 @@ def predict_direct(
     *,
     states: Optional[List[Any]] = None,
     model: str = "auto",
+    profile: str = "auto",
     vega: bool = False,
     vega_model: str = "auto",
     views: int = 1,
@@ -1048,7 +1387,10 @@ def predict_direct(
     if not questions or not isinstance(questions, dict):
         raise ValueError("predict_direct requires a non-empty 'questions' dictionary.")
 
+    hw = _resolve_hardware_profile(profile=profile, agent_tier="auto", device=device)
     eff_views = max(1, min(3, int(views or 1)))
+    if hw["profile"] == "max" and vega and int(views or 1) == 1:
+        eff_views = 3
     has_multimodal = any(x is not None and str(x).strip() != "" for x in (image, audio, video))
     is_batch = states is not None
     if not is_batch and state is None and not has_multimodal:
@@ -1057,7 +1399,72 @@ def predict_direct(
         )
 
     t0 = time.perf_counter()
-    resolved_device = _resolve_device(device)
+
+    # Strict zero-torch guard for profile == 'nano' (multimodal requires VegaAgent/torch)
+    if hw["profile"] == "nano":
+        if has_multimodal:
+            raise ValueError(
+                "Multimodal inputs ('image', 'audio', 'video') are not supported under zero-torch profile='nano'."
+            )
+        prompt_framing = {
+            "does", "mention", "mentions", "report", "text", "passage", "rate", "score",
+            "relevance", "classify", "select", "category", "whether", "state", "states",
+        }
+
+        def _nano_affinity(doc_txt: str, target_txt: str) -> float:
+            doc_low = doc_txt.lower()
+            doc_toks = set(_extract_lexical_tokens(doc_txt))
+            tgt_toks = [t for t in dict.fromkeys(_extract_lexical_tokens(target_txt)) if t not in prompt_framing]
+            anchors = _extract_technical_anchors(target_txt)
+            cov = (sum(1 for t in tgt_toks if t in doc_toks or t in doc_low) / len(tgt_toks)) if tgt_toks else 0.0
+            anc = (sum(1 for a in anchors if a in doc_low) / len(anchors)) if anchors else cov
+            cos = _cosine_256d(_hashed_256d_vec(doc_txt), _hashed_256d_vec(target_txt))
+            return max(0.0, min(1.0, 0.45 * cov + 0.35 * anc + 0.20 * cos))
+
+        items_nano: List[Any] = list(states) if is_batch else [state]
+        nano_preds: List[Dict[str, Any]] = []
+        for st_item in items_nano:
+            st_txt = st_item if isinstance(st_item, str) else _format_record(st_item)
+            ans_map: Dict[str, Any] = {}
+            for qid, qdef in questions.items():
+                qtype = str(qdef.get("type", "noul"))
+                instr = str(qdef.get("instructions", ""))
+                crit = qdef.get("criteria")
+                aff = _nano_affinity(st_txt, instr)
+                if qtype == "choice" and isinstance(crit, dict) and crit:
+                    best_k = next(iter(crit.keys()))
+                    best_v = -1.0
+                    for ck, cv in crit.items():
+                        sc = _nano_affinity(st_txt, f"{ck} {cv}")
+                        if sc > best_v:
+                            best_v = sc
+                            best_k = str(ck)
+                    ans_map[qid] = {"choice": best_k, "confidence": round(0.45 + 0.50 * max(0.0, best_v), 4)}
+                elif qtype == "score":
+                    sc_val = round(min(4.0, aff * 4.0), 4)
+                    ans_map[qid] = {"score": int(round(sc_val)), "expected_score": sc_val, "confidence": 0.60}
+                else:
+                    ans_map[qid] = {"noul": round(min(1.0, aff), 4), "confidence": 0.60}
+            nano_preds.append({"answers": ans_map})
+        out_nano: Dict[str, Any] = {
+            "ok": True,
+            "stage": "stage0_nano",
+            "profile": "nano",
+            "model": "pure-python-nano",
+            "device": "cpu",
+            "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        }
+        if is_batch:
+            out_nano["results"] = nano_preds
+        else:
+            out_nano["result"] = nano_preds[0] if nano_preds else {}
+        return out_nano
+
+    resolved_device = hw["device"] if hw["profile_explicit"] else _resolve_device(device)
+    if hw["profile"] == "edge" and not has_multimodal:
+        vega = False
+        if (model or "auto").strip().lower() == "ensemble":
+            model = "typed"
 
     # Automatically route to VegaAgent when vega=True, policy_path is set, or multimodal inputs are given
     use_vega = bool(vega or (policy_path and str(policy_path).strip()) or has_multimodal)
@@ -1239,10 +1646,18 @@ def predict_direct(
 # ---------------------------------------------------------------------------
 
 
+_PUNCT_TOKEN_CHARS = "|`{}[]()<>:;=/\\_-*#~"
+_PUNCT_DEL_TABLE = str.maketrans("", "", _PUNCT_TOKEN_CHARS)
+
+
 def _estimate_tokens(text: str) -> float:
-    ascii_count = sum(1 for ch in text if ord(ch) < 128)
-    non_ascii = len(text) - ascii_count
-    punct = sum(1 for ch in text if ch in "|`{}[]()<>:;=/\\_-*#~")
+    if text.isascii():
+        ascii_count = len(text)
+        non_ascii = 0
+    else:
+        ascii_count = sum(1 for ch in text if ord(ch) < 128)
+        non_ascii = len(text) - ascii_count
+    punct = len(text) - len(text.translate(_PUNCT_DEL_TABLE))
     return (ascii_count / 3.8) + (non_ascii * 0.9) + (punct * 0.35)
 
 
@@ -1310,6 +1725,7 @@ def _split_section_lines(
     start_ln: int,
     s_lines: List[str],
     max_chars: int,
+    is_code: bool = False,
 ) -> List[Dict[str, Any]]:
     raw_body = "\n".join(s_lines).strip()
     if not raw_body:
@@ -1318,8 +1734,20 @@ def _split_section_lines(
     first_prefix = f"[{parent_breadcrumb}]\n" if parent_breadcrumb else ""
     cont_prefix = f"[{full_breadcrumb}]\n" if full_breadcrumb else ""
 
+    def _fast_fits(txt: str) -> bool:
+        if len(txt) > max_chars:
+            return False
+        est = _estimate_tokens(txt)
+        if is_code:
+            return est <= 380.0
+        if est <= 380.0:
+            return True
+        if est > 780.0:
+            return False
+        return est <= _token_budget_for_text(txt)
+
     first_candidate = first_prefix + raw_body
-    if _fits_budget(first_candidate, max_chars):
+    if _fast_fits(first_candidate):
         return [
             _make_chunk(
                 file_path,
@@ -1358,16 +1786,25 @@ def _split_section_lines(
 
     chunks: List[Dict[str, Any]] = []
     acc_lines: List[str] = []
+    acc_chars = 0
+    acc_toks = 0.0
+    acc_non_en = False
     acc_start = start_ln
     acc_end = start_ln
     is_first_emit = True
+    first_pfx_toks = _estimate_tokens(first_prefix) if first_prefix else 0.0
+    cont_pfx_toks = _estimate_tokens(cont_prefix) if cont_prefix else 0.0
+    newline_tok = 1.0 / 3.8
 
     def emit_accumulated() -> None:
-        nonlocal acc_lines, is_first_emit
+        nonlocal acc_lines, acc_chars, acc_toks, acc_non_en, is_first_emit
         if not acc_lines:
             return
         body = "\n".join(acc_lines).strip()
         acc_lines = []
+        acc_chars = 0
+        acc_toks = 0.0
+        acc_non_en = False
         if not body:
             return
         pfx = first_prefix if is_first_emit else cont_prefix
@@ -1385,30 +1822,61 @@ def _split_section_lines(
 
     for b_start, b_end, b_lines in blocks:
         b_text = "\n".join(b_lines)
+        b_strip = b_text.strip()
+        b_tok = _estimate_tokens(b_strip)
+        b_non_en = False if is_code else bool(NON_ENGLISH_SCRIPT_RE.search(b_strip))
         pfx = first_prefix if (is_first_emit and not acc_lines) else cont_prefix
-        combined = ("\n\n".join(["\n".join(acc_lines), b_text]) if acc_lines else b_text).strip()
+        pfx_tok = first_pfx_toks if (is_first_emit and not acc_lines) else cont_pfx_toks
 
-        if _fits_budget(pfx + combined, max_chars):
+        if acc_lines:
+            comb_chars = len(pfx) + acc_chars + 2 + len(b_strip)
+            comb_toks = pfx_tok + acc_toks + 2.0 * newline_tok + b_tok
+            comb_non_en = acc_non_en or b_non_en
+            tok_lim = 380.0 if (is_code or not comb_non_en) else 780.0
+            fits_comb = (comb_chars <= max_chars) and (comb_toks <= tok_lim)
+        else:
+            tok_lim = 380.0 if (is_code or not b_non_en) else 780.0
+            fits_comb = ((len(pfx) + len(b_strip)) <= max_chars) and ((pfx_tok + b_tok) <= tok_lim)
+
+        if fits_comb:
             if not acc_lines:
                 acc_start = b_start
-            acc_lines = (acc_lines + [""] + b_lines) if acc_lines else list(b_lines)
+                acc_lines = list(b_lines)
+                acc_chars = len(b_strip)
+                acc_toks = b_tok
+                acc_non_en = b_non_en
+            else:
+                acc_lines.append("")
+                acc_lines.extend(b_lines)
+                acc_chars += 2 + len(b_strip)
+                acc_toks += 2.0 * newline_tok + b_tok
+                acc_non_en = acc_non_en or b_non_en
             acc_end = b_end
             continue
 
         emit_accumulated()
         pfx = first_prefix if is_first_emit else cont_prefix
-        if _fits_budget(pfx + b_text.strip(), max_chars):
+        pfx_tok = first_pfx_toks if is_first_emit else cont_pfx_toks
+        tok_lim_single = 380.0 if (is_code or not b_non_en) else 780.0
+        if ((len(pfx) + len(b_strip)) <= max_chars) and ((pfx_tok + b_tok) <= tok_lim_single):
             acc_start = b_start
             acc_end = b_end
             acc_lines = list(b_lines)
+            acc_chars = len(b_strip)
+            acc_toks = b_tok
+            acc_non_en = b_non_en
             continue
 
-        # Oversized single block (e.g., large code fence or GFM table): split on line boundaries
+        # Oversized single block: O(L) incremental line accumulator (zero O(L^2) string re-joining)
         line_buf: List[str] = []
+        buf_chars = 0
+        buf_toks = 0.0
+        buf_non_en = False
         lb_start = b_start
         for l_off, single_line in enumerate(b_lines):
             cur_ln = b_start + l_off
             pfx = first_prefix if is_first_emit else cont_prefix
+            pfx_tok = first_pfx_toks if is_first_emit else cont_pfx_toks
             line_budget = max(128, max_chars - len(pfx))
 
             if len(single_line) > line_budget:
@@ -1427,6 +1895,9 @@ def _split_section_lines(
                         )
                         is_first_emit = False
                     line_buf = []
+                    buf_chars = 0
+                    buf_toks = 0.0
+                    buf_non_en = False
 
                 s_strip = single_line.lstrip()
                 row_head = (
@@ -1453,8 +1924,15 @@ def _split_section_lines(
                 lb_start = cur_ln + 1
                 continue
 
-            trial = "\n".join(line_buf + [single_line]).strip()
-            if line_buf and not _fits_budget(pfx + trial, max_chars):
+            ln_tok = _estimate_tokens(single_line)
+            ln_non_en = False if is_code else bool(NON_ENGLISH_SCRIPT_RE.search(single_line))
+            trial_chars = (buf_chars + 1 + len(single_line)) if line_buf else len(single_line)
+            trial_toks = (buf_toks + newline_tok + ln_tok) if line_buf else ln_tok
+            trial_non_en = buf_non_en or ln_non_en
+            tok_lim_ln = 380.0 if (is_code or not trial_non_en) else 780.0
+            fits_ln = ((len(pfx) + trial_chars) <= max_chars) and ((pfx_tok + trial_toks) <= tok_lim_ln)
+
+            if line_buf and not fits_ln:
                 body = "\n".join(line_buf).strip()
                 if body:
                     chunks.append(
@@ -1469,10 +1947,20 @@ def _split_section_lines(
                     )
                     is_first_emit = False
                 line_buf = [single_line]
+                buf_chars = len(single_line)
+                buf_toks = ln_tok
+                buf_non_en = ln_non_en
                 lb_start = cur_ln
             else:
                 if not line_buf:
                     lb_start = cur_ln
+                    buf_chars = len(single_line)
+                    buf_toks = ln_tok
+                    buf_non_en = ln_non_en
+                else:
+                    buf_chars = trial_chars
+                    buf_toks = trial_toks
+                    buf_non_en = trial_non_en
                 line_buf.append(single_line)
 
         if line_buf:
@@ -1776,6 +2264,449 @@ def _chunk_csv(
     return chunks
 
 
+def _extract_ast_chunk_meta(
+    node: ast.AST,
+    symbol_name: str,
+    node_kind: str,
+    imported_symbols: List[str],
+) -> Dict[str, Any]:
+    defined: Dict[str, None] = {}
+    params_anns: Dict[str, None] = {}
+    calls: Dict[str, None] = {}
+    async_di: Dict[str, None] = {}
+    exceptions: Dict[str, None] = {}
+
+    def _add_unique(dst: Dict[str, None], val: str) -> None:
+        low = val.strip().lower()
+        if len(low) >= 2:
+            dst[low] = None
+
+    for part in symbol_name.replace(".", " ").split():
+        _add_unique(defined, part)
+
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        _add_unique(defined, node.name)
+        if isinstance(node, ast.AsyncFunctionDef):
+            _add_unique(async_di, node.name)
+        all_args = (
+            list(node.args.posonlyargs)
+            + list(node.args.args)
+            + list(node.args.kwonlyargs)
+        )
+        if node.args.vararg:
+            all_args.append(node.args.vararg)
+        if node.args.kwarg:
+            all_args.append(node.args.kwarg)
+        for arg in all_args:
+            _add_unique(params_anns, arg.arg)
+            if arg.annotation is not None:
+                for sub in ast.walk(arg.annotation):
+                    if isinstance(sub, ast.Name):
+                        _add_unique(params_anns, sub.id)
+                    elif isinstance(sub, ast.Attribute):
+                        _add_unique(params_anns, sub.attr)
+        for dflt in list(node.args.defaults) + [d for d in node.args.kw_defaults if d is not None]:
+            for sub in ast.walk(dflt):
+                if isinstance(sub, ast.Call):
+                    fn_name = ""
+                    if isinstance(sub.func, ast.Name):
+                        fn_name = sub.func.id
+                    elif isinstance(sub.func, ast.Attribute):
+                        fn_name = sub.func.attr
+                    if fn_name.lower() in ("depends", "security"):
+                        for call_arg in sub.args:
+                            if isinstance(call_arg, ast.Name):
+                                _add_unique(async_di, call_arg.id)
+                            elif isinstance(call_arg, ast.Attribute):
+                                _add_unique(async_di, call_arg.attr)
+        for dec in node.decorator_list:
+            for sub in ast.walk(dec):
+                if isinstance(sub, ast.Name):
+                    _add_unique(params_anns, sub.id)
+                    _add_unique(async_di, sub.id)
+                elif isinstance(sub, ast.Attribute):
+                    _add_unique(params_anns, sub.attr)
+                    _add_unique(async_di, sub.attr)
+    elif isinstance(node, ast.ClassDef):
+        _add_unique(defined, node.name)
+        for base in node.bases:
+            if isinstance(base, ast.Name):
+                _add_unique(params_anns, base.id)
+            elif isinstance(base, ast.Attribute):
+                _add_unique(params_anns, base.attr)
+
+    def _collect_expr_targets(expr: Optional[ast.AST], dst: Dict[str, None]) -> None:
+        if expr is None:
+            return
+        for inner in ast.walk(expr):
+            if isinstance(inner, ast.Call):
+                if isinstance(inner.func, ast.Name):
+                    _add_unique(dst, inner.func.id)
+                elif isinstance(inner.func, ast.Attribute):
+                    _add_unique(dst, inner.func.attr)
+            elif isinstance(inner, ast.Name):
+                _add_unique(dst, inner.id)
+
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Call):
+            if isinstance(sub.func, ast.Name):
+                _add_unique(calls, sub.func.id)
+                if sub.func.id.lower() in ("depends", "security"):
+                    for call_arg in sub.args:
+                        if isinstance(call_arg, ast.Name):
+                            _add_unique(async_di, call_arg.id)
+                        elif isinstance(call_arg, ast.Attribute):
+                            _add_unique(async_di, call_arg.attr)
+            elif isinstance(sub.func, ast.Attribute):
+                _add_unique(calls, sub.func.attr)
+                if isinstance(sub.func.value, ast.Name):
+                    _add_unique(calls, f"{sub.func.value.id}.{sub.func.attr}")
+        elif isinstance(sub, (ast.Await, ast.Yield, ast.YieldFrom)):
+            _collect_expr_targets(sub.value, async_di)
+        elif isinstance(sub, ast.AsyncFor):
+            _collect_expr_targets(sub.iter, async_di)
+        elif isinstance(sub, ast.AsyncWith):
+            for item in sub.items:
+                _collect_expr_targets(item.context_expr, async_di)
+        elif isinstance(sub, ast.Raise) and sub.exc is not None:
+            if isinstance(sub.exc, ast.Call):
+                if isinstance(sub.exc.func, ast.Name):
+                    _add_unique(exceptions, sub.exc.func.id)
+                elif isinstance(sub.exc.func, ast.Attribute):
+                    _add_unique(exceptions, sub.exc.func.attr)
+            elif isinstance(sub.exc, ast.Name):
+                _add_unique(exceptions, sub.exc.id)
+        elif isinstance(sub, ast.ExceptHandler) and sub.type is not None:
+            _collect_expr_targets(sub.type, exceptions)
+
+    return {
+        "symbol": symbol_name,
+        "node_kind": node_kind,
+        "defined_symbols": list(defined)[:48],
+        "param_and_ann_tokens": list(params_anns)[:64],
+        "called_symbols": list(calls)[:96],
+        "async_or_di_symbols": list(async_di)[:64],
+        "raised_exceptions": list(exceptions)[:32],
+        "imported_symbols": imported_symbols[:64],
+    }
+
+
+def _build_compact_skeleton_header(
+    import_stmt_map: Mapping[str, str],
+    referenced_names: Sequence[str],
+    *,
+    class_sig: str = "",
+    self_attrs: Sequence[str] = (),
+) -> str:
+    """Synthesize a compact zero-bloat AST skeleton header (<= 85 tokens) for split methods/functions."""
+    hdr_lines: List[str] = []
+    seen_imp: set[str] = set()
+    for nm in referenced_names:
+        imp_ln = import_stmt_map.get(nm.lower())
+        if imp_ln and imp_ln not in seen_imp:
+            seen_imp.add(imp_ln)
+            hdr_lines.append(imp_ln[:92])
+            if len(hdr_lines) >= 3:
+                break
+    if class_sig:
+        hdr_lines.append(class_sig[:100])
+        if self_attrs:
+            attrs_str = ", ".join(f"self.{a}" for a in list(dict.fromkeys(self_attrs))[:6])
+            hdr_lines.append(f"    # attrs: {attrs_str}"[:100])
+
+    if not hdr_lines:
+        return ""
+
+    out_lines: List[str] = []
+    for ln in hdr_lines:
+        cand = "\n".join(out_lines + [ln])
+        if _estimate_tokens(cand) > 85.0 or len(cand) > 290:
+            break
+        out_lines.append(ln)
+    return "\n".join(out_lines)
+
+
+def _chunk_python_ast(
+    file_path: Path,
+    raw_text: str,
+    rel_prefix: str,
+    max_chars: int,
+    limit_hint: int = 0,
+) -> List[Dict[str, Any]]:
+    """Parse Python source into enclosing AST class/function/method spans with DI, bases & skeleton headers."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(raw_text)
+    except (SyntaxError, ValueError):
+        return _chunk_markdown_or_text(file_path, raw_text, rel_prefix, max_chars)
+
+    lines = raw_text.splitlines()
+    if not lines:
+        return []
+
+    norm_rel = rel_prefix.replace("\\", "/")
+    if norm_rel.startswith("src/"):
+        norm_rel = norm_rel[4:]
+    mod_label = norm_rel if ("/" in norm_rel and len(norm_rel) <= 72) else file_path.name
+
+    imported_symbols: List[str] = []
+    import_stmt_map: Dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            names_short = []
+            for alias in node.names:
+                mod_tail = alias.name.split(".")[-1].lower()
+                if mod_tail and mod_tail not in imported_symbols:
+                    imported_symbols.append(mod_tail)
+                bound = (alias.asname or alias.name.split(".")[-1]).strip()
+                names_short.append(f"{alias.name} as {alias.asname}" if alias.asname else alias.name)
+                if alias.asname and alias.asname.lower() not in imported_symbols:
+                    imported_symbols.append(alias.asname.lower())
+                if bound:
+                    import_stmt_map.setdefault(bound.lower(), f"import {', '.join(names_short[:3])}")
+        elif isinstance(node, ast.ImportFrom):
+            mod_name = node.module or ""
+            if mod_name:
+                mod_tail = mod_name.split(".")[-1].lower()
+                if mod_tail and mod_tail not in imported_symbols:
+                    imported_symbols.append(mod_tail)
+            alias_strs = [
+                f"{a.name} as {a.asname}" if a.asname else a.name
+                for a in node.names[:5]
+                if a.name != "*"
+            ]
+            stmt_short = (
+                f"from {'.' * (node.level or 0)}{mod_name} import {', '.join(alias_strs)}"
+                if alias_strs
+                else ""
+            )
+            for alias in node.names:
+                nm = alias.name.lower()
+                if nm != "*" and nm not in imported_symbols:
+                    imported_symbols.append(nm)
+                bound_low = (alias.asname or alias.name).lower()
+                if stmt_short and bound_low != "*":
+                    import_stmt_map.setdefault(bound_low, stmt_short)
+
+    def _node_span(n: ast.AST) -> Tuple[int, int]:
+        decs = getattr(n, "decorator_list", None) or []
+        s_ln = min([getattr(n, "lineno", 1)] + [getattr(d, "lineno", 1) for d in decs])
+        e_ln = getattr(n, "end_lineno", s_ln) or s_ln
+        return max(1, s_ln), min(len(lines), max(s_ln, e_ln))
+
+    chunks: List[Dict[str, Any]] = []
+    covered = [False] * (len(lines) + 1)
+
+    def _emit_ast_span(
+        breadcrumb: str,
+        parent_b: str,
+        s_ln: int,
+        e_ln: int,
+        meta: Dict[str, Any],
+    ) -> None:
+        s_idx = s_ln - 1
+        seg_lines = lines[s_idx:e_ln]
+        if not any(ln.strip() for ln in seg_lines):
+            return
+        sub_chunks = _split_section_lines(
+            file_path=file_path,
+            rel_prefix=rel_prefix,
+            full_breadcrumb=breadcrumb,
+            parent_breadcrumb=parent_b,
+            start_ln=s_ln,
+            s_lines=seg_lines,
+            max_chars=max_chars,
+            is_code=True,
+        )
+        for sc in sub_chunks:
+            sc["_ast_meta"] = meta
+            chunks.append(sc)
+
+    for top_node in tree.body:
+        if isinstance(top_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            s_ln, e_ln = _node_span(top_node)
+            for ln_i in range(s_ln, e_ln + 1):
+                covered[ln_i] = True
+            kind = "async_def" if isinstance(top_node, ast.AsyncFunctionDef) else "def"
+            prefix_kw = "async def" if kind == "async_def" else "def"
+            bcrumb = f"{mod_label} > {prefix_kw} {top_node.name}"
+            meta = _extract_ast_chunk_meta(top_node, top_node.name, kind, imported_symbols)
+            meta["canonical_symbol"] = top_node.name
+            ref_syms = list(meta.get("param_and_ann_tokens") or []) + list(meta.get("called_symbols") or [])
+            meta["skeleton_header"] = _build_compact_skeleton_header(import_stmt_map, ref_syms)
+            _emit_ast_span(bcrumb, mod_label, s_ln, e_ln, meta)
+        elif isinstance(top_node, ast.ClassDef):
+            cs_ln, ce_ln = _node_span(top_node)
+            for ln_i in range(cs_ln, ce_ln + 1):
+                covered[ln_i] = True
+            cls_text_len = sum(len(lines[i - 1]) + 1 for i in range(cs_ln, ce_ln + 1))
+            methods = [
+                m for m in top_node.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+
+            # Extract class bases, class docstring summary, and self.<attr> fields once
+            cls_bases_raw: List[str] = []
+            for base in top_node.bases:
+                if isinstance(base, ast.Name):
+                    cls_bases_raw.append(base.id)
+                elif isinstance(base, ast.Attribute):
+                    cls_bases_raw.append(base.attr)
+                elif hasattr(ast, "unparse"):
+                    with contextlib.suppress(Exception):
+                        cls_bases_raw.append(ast.unparse(base)[:36])
+            cls_sig = (
+                f"class {top_node.name}({', '.join(cls_bases_raw[:4])}):"
+                if cls_bases_raw
+                else f"class {top_node.name}:"
+            )
+            cls_doc = (ast.get_docstring(top_node) or "").strip().splitlines()
+            cls_doc_first = cls_doc[0].strip()[:120] if cls_doc else ""
+            self_attrs: List[str] = []
+            for sub_n in ast.walk(top_node):
+                if isinstance(sub_n, (ast.Assign, ast.AnnAssign)):
+                    targets = sub_n.targets if isinstance(sub_n, ast.Assign) else [sub_n.target]
+                    for t_expr in targets:
+                        if (
+                            isinstance(t_expr, ast.Attribute)
+                            and isinstance(t_expr.value, ast.Name)
+                            and t_expr.value.id == "self"
+                            and t_expr.attr not in self_attrs
+                        ):
+                            self_attrs.append(t_expr.attr)
+
+            if cls_text_len <= max_chars or not methods:
+                meta = _extract_ast_chunk_meta(top_node, top_node.name, "class", imported_symbols)
+                meta["canonical_symbol"] = top_node.name
+                ref_syms = cls_bases_raw + list(meta.get("param_and_ann_tokens") or [])
+                meta["skeleton_header"] = _build_compact_skeleton_header(import_stmt_map, ref_syms)
+                _emit_ast_span(
+                    f"{mod_label} > class {top_node.name}",
+                    mod_label,
+                    cs_ln,
+                    ce_ln,
+                    meta,
+                )
+            else:
+                first_m_start, _ = _node_span(methods[0])
+                if first_m_start > cs_ln:
+                    hdr_node = ast.ClassDef(
+                        name=top_node.name,
+                        bases=top_node.bases,
+                        keywords=top_node.keywords,
+                        body=[
+                            s
+                            for s in top_node.body
+                            if not isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        ],
+                        decorator_list=top_node.decorator_list,
+                    )
+                    hdr_meta = _extract_ast_chunk_meta(
+                        hdr_node, top_node.name, "class", imported_symbols
+                    )
+                    hdr_meta["canonical_symbol"] = top_node.name
+                    hdr_meta["skeleton_header"] = _build_compact_skeleton_header(
+                        import_stmt_map, cls_bases_raw
+                    )
+                    _emit_ast_span(
+                        f"{mod_label} > class {top_node.name}",
+                        mod_label,
+                        cs_ln,
+                        first_m_start - 1,
+                        hdr_meta,
+                    )
+                cls_base_lows = [b.lower() for b in cls_bases_raw if len(b) >= 2]
+                parent_hdr = f"{mod_label} > {cls_sig}"
+                if cls_doc_first:
+                    parent_hdr = f"{parent_hdr} {cls_doc_first}"[:140]
+                for m_node in methods:
+                    ms_ln, me_ln = _node_span(m_node)
+                    mkind = "async_def" if isinstance(m_node, ast.AsyncFunctionDef) else "def"
+                    sym = f"{top_node.name}.{m_node.name}"
+                    m_meta = _extract_ast_chunk_meta(m_node, sym, mkind, imported_symbols)
+                    m_meta["canonical_symbol"] = sym
+                    # Inherit enclosing ClassDef.bases so symptom queries on base/protocol types hit split methods!
+                    merged_params = list(
+                        dict.fromkeys((m_meta.get("param_and_ann_tokens") or []) + cls_base_lows)
+                    )[:64]
+                    m_meta["param_and_ann_tokens"] = merged_params
+                    ref_syms = cls_bases_raw + merged_params + list(m_meta.get("called_symbols") or [])
+                    m_meta["skeleton_header"] = _build_compact_skeleton_header(
+                        import_stmt_map,
+                        ref_syms,
+                        class_sig=cls_sig,
+                        self_attrs=self_attrs,
+                    )
+                    _emit_ast_span(
+                        f"{mod_label} > class {top_node.name} > {m_node.name}",
+                        parent_hdr,
+                        ms_ln,
+                        me_ln,
+                        m_meta,
+                    )
+        if limit_hint > 0 and len(chunks) >= limit_hint:
+            break
+
+    # Emit uncovered module-level constants / router registrations / preamble blocks (compute AST walk once)
+    if limit_hint <= 0 or len(chunks) < limit_hint:
+        mod_meta_base: Optional[Dict[str, Any]] = None
+
+        def _get_mod_meta() -> Dict[str, Any]:
+            nonlocal mod_meta_base
+            if mod_meta_base is None:
+                shallow_mod = ast.Module(
+                    body=[
+                        s
+                        for s in tree.body
+                        if not isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                    ],
+                    type_ignores=[],
+                )
+                mod_meta_base = _extract_ast_chunk_meta(shallow_mod, "<module>", "module", imported_symbols)
+                mod_meta_base["canonical_symbol"] = "<module>"
+                mod_meta_base["skeleton_header"] = ""
+            return dict(mod_meta_base)
+
+        run_start: Optional[int] = None
+        for ln_i in range(1, len(lines) + 1):
+            if not covered[ln_i]:
+                if run_start is None:
+                    run_start = ln_i
+            else:
+                if run_start is not None:
+                    rs_idx = run_start - 1
+                    re_idx = ln_i - 1
+                    seg = lines[rs_idx:re_idx]
+                    if any(x.strip() and not x.lstrip().startswith("#") for x in seg):
+                        _emit_ast_span(
+                            f"{mod_label} [<module>]",
+                            "",
+                            run_start,
+                            ln_i - 1,
+                            _get_mod_meta(),
+                        )
+                    run_start = None
+        if run_start is not None:
+            rs_idx = run_start - 1
+            seg = lines[rs_idx:]
+            if any(x.strip() and not x.lstrip().startswith("#") for x in seg):
+                _emit_ast_span(
+                    f"{mod_label} [<module>]",
+                    "",
+                    run_start,
+                    len(lines),
+                    _get_mod_meta(),
+                )
+
+    chunks.sort(key=lambda c: (c["start_line"], c["end_line"]))
+    if limit_hint > 0 and len(chunks) > limit_hint:
+        return chunks[:limit_hint]
+    return chunks
+
+
+_AST_CHUNK_CACHE: Dict[Tuple[str, int, int], List[Dict[str, Any]]] = {}
+
+
 def chunk_file(
     file_path: Path,
     max_chars: int = 1600,
@@ -1783,7 +2714,20 @@ def chunk_file(
     rel_prefix: Optional[str] = None,
     limit_hint: int = 0,
 ) -> List[Dict[str, Any]]:
-    """Split a supported file into fence-safe or structured chunks with line/item refs."""
+    """Split a supported file into fence-safe, AST-aware, or structured chunks with line/item refs."""
+    ref_base = rel_prefix if rel_prefix is not None else file_path.name
+    ext = file_path.suffix.lower()
+    if not whole_file and ext in (".py", ".pyi"):
+        ckey = (str(file_path), max_chars, limit_hint)
+        cached_chs = _AST_CHUNK_CACHE.get(ckey)
+        if cached_chs is not None:
+            out_chs: List[Dict[str, Any]] = []
+            for c in cached_chs:
+                cp = dict(c)
+                cp["ref"] = f"{ref_base}#L{cp['start_line']}-L{cp['end_line']}"
+                out_chs.append(cp)
+            return out_chs
+
     try:
         raw_text = file_path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -1793,11 +2737,9 @@ def chunk_file(
     if not raw_text.strip():
         return []
 
-    ref_base = rel_prefix if rel_prefix is not None else file_path.name
     lines = raw_text.splitlines()
 
     if whole_file:
-        ext = file_path.suffix.lower()
         body = _strip_html_fragment(raw_text) if ext in (".html", ".htm") else raw_text
         if not body.strip():
             return []
@@ -1812,7 +2754,25 @@ def chunk_file(
         ch["_full_text"] = body[:240000]
         return [ch]
 
-    ext = file_path.suffix.lower()
+    if ext in (".py", ".pyi"):
+        fp_str = str(file_path)
+        if fp_str not in _PRERANK_FILE_TOKEN_CACHE:
+            head_txt = raw_text[:20480]
+            h_all = frozenset(_extract_lexical_tokens(head_txt))
+            d_all: set[str] = set()
+            for dm in re.finditer(
+                r"(?:^|\n)\s*(?:async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)", head_txt
+            ):
+                sym_nm = dm.group(1)
+                d_all.update({sym_nm.lower()} | set(_split_ident_parts(sym_nm)))
+            if len(_PRERANK_FILE_TOKEN_CACHE) > 16384:
+                _PRERANK_FILE_TOKEN_CACHE.clear()
+            _PRERANK_FILE_TOKEN_CACHE[fp_str] = (h_all, frozenset(d_all))
+        res_chs = _chunk_python_ast(file_path, raw_text, ref_base, max_chars, limit_hint=limit_hint)
+        if len(_AST_CHUNK_CACHE) > 4096:
+            _AST_CHUNK_CACHE.clear()
+        _AST_CHUNK_CACHE[(fp_str, max_chars, limit_hint)] = [dict(c) for c in res_chs]
+        return res_chs
     if ext in (".html", ".htm"):
         return _chunk_html(file_path, raw_text, ref_base, max_chars)
     if ext == ".jsonl":
@@ -1874,8 +2834,8 @@ def collect_target_files(paths: Sequence[str], pattern: str = DEFAULT_PATTERN) -
                 for fname in sorted(filenames):
                     fname_low = fname.lower()
                     if any(fnmatch.fnmatch(fname_low, g) for g in globs):
-                        child = (root_path / fname).resolve()
-                        if child not in seen and child.is_file():
+                        child = root_path / fname
+                        if child not in seen:
                             seen.add(child)
                             resolved_files.append(child)
 
@@ -1912,21 +2872,69 @@ def _rel_ref_prefix(file_path: Path, scan_root: Optional[Path]) -> str:
 # ---------------------------------------------------------------------------
 
 
+_CAMEL_IDENT_FIND_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*[A-Z][A-Za-z0-9]*\b")
+_CAMEL_SPLIT_STEP1_RE = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_CAMEL_SPLIT_STEP2_RE = re.compile(r"([a-z0-9])([A-Z])")
+_CODE_ANCHOR_NOISE = frozenset(
+    {
+        "true", "false", "none", "null", "nan", "inf", "self", "cls",
+        "python", "python3", "pip", "pip install", "pytest", "bash", "sh",
+        "json", "yaml", "yml", "toml", "http", "https", "utf-8", "utf8",
+    }
+)
+_PROSE_HYPHEN_PREFIXES = frozenset(
+    {
+        "built", "auto", "non", "read", "write", "end", "step", "out", "up",
+        "double", "single", "real", "user", "command", "high", "low", "third",
+        "first", "second", "long", "short", "client", "server", "case", "cross",
+        "multi", "sub", "pre", "post", "re", "co", "well", "in", "on", "off",
+        "backwards", "backward", "forward", "thread", "type", "zero", "one", "two",
+    }
+)
+_TIER2_AUX_DIRS = frozenset(
+    {
+        "docs_src", "docs", "doc", "tests", "test", "testing",
+        "examples", "example", "benchmarks", "benchmark",
+        "scripts", "devtools", "tutorials",
+    }
+)
+
+
+_CAMEL_SPLIT_CACHE: Dict[str, Tuple[str, ...]] = {}
+
+
 def _extract_lexical_tokens(text: str) -> List[str]:
     lower = text.lower()
     tokens = [w for w in LATIN_TOKEN_RE.findall(lower) if len(w) >= 2 and w not in STOPWORDS]
 
-    for run in THAI_RUN_RE.findall(text):
-        if len(run) < 3:
-            tokens.append(run)
-        else:
-            tokens.extend(run[i:i + 3] for i in range(len(run) - 2))
+    for cam in _CAMEL_IDENT_FIND_RE.findall(text):
+        pts = _CAMEL_SPLIT_CACHE.get(cam)
+        if pts is None:
+            s1 = _CAMEL_SPLIT_STEP1_RE.sub(r"\1 \2", cam)
+            s2 = _CAMEL_SPLIT_STEP2_RE.sub(r"\1 \2", s1)
+            cam_low = cam.lower()
+            pts = tuple(
+                pl
+                for pt in s2.split()
+                if len(pl := pt.lower()) >= 2 and pl not in STOPWORDS and pl != cam_low
+            )
+            if len(_CAMEL_SPLIT_CACHE) < 16384:
+                _CAMEL_SPLIT_CACHE[cam] = pts
+        if pts:
+            tokens.extend(pts)
 
-    for cjk in CJK_RUN_RE.findall(text):
-        if len(cjk) == 1:
-            tokens.append(cjk)
-        else:
-            tokens.extend(cjk[i:i + 2] for i in range(len(cjk) - 1))
+    if not text.isascii():
+        for run in THAI_RUN_RE.findall(text):
+            if len(run) < 3:
+                tokens.append(run)
+            else:
+                tokens.extend(run[i:i + 3] for i in range(len(run) - 2))
+
+        for cjk in CJK_RUN_RE.findall(text):
+            if len(cjk) == 1:
+                tokens.append(cjk)
+            else:
+                tokens.extend(cjk[i:i + 2] for i in range(len(cjk) - 1))
 
     return tokens
 
@@ -1940,6 +2948,31 @@ def _extract_technical_anchors(text: str) -> List[str]:
             if len(val) >= 2 and val not in seen:
                 seen.add(val)
                 anchors.append(val)
+    return anchors
+
+
+def _extract_code_anchors(text: str) -> List[str]:
+    """Extract clean code/symbol anchors while stripping bare version decimals and prose hyphenations."""
+    anchors: List[str] = []
+    seen: set[str] = set()
+    for is_bt, pat in ((True, BACKTICK_SPAN_RE), (True, CLI_FLAG_RE), (False, IDENT_RE)):
+        for m in pat.finditer(text):
+            raw_v = (m.group(1) if m.lastindex else m.group(0)).strip()
+            val = raw_v.lower()
+            if len(val) < 2 or len(val) > 72 or val in seen or val in _CODE_ANCHOR_NOISE:
+                continue
+            if not re.search(r"[a-z]{2,}", val):
+                continue
+            if re.fullmatch(r"v?\d+(?:\.\d+)+(?:[a-z0-9.-]*)?", val):
+                continue
+            if not is_bt and "-" in val and "_" not in val and not val.startswith("--"):
+                parts = [p for p in val.split("-") if p]
+                if parts and (parts[0] in _PROSE_HYPHEN_PREFIXES or all(p.isalpha() for p in parts)):
+                    continue
+            if is_bt and " " in val and not any(ch in val for ch in ("(", ".", "_", "/", "=")):
+                continue
+            seen.add(val)
+            anchors.append(val)
     return anchors
 
 
@@ -2010,6 +3043,2058 @@ def compute_lexical_scores(chunks: Sequence[Dict[str, Any]], query_text: str) ->
             blended = bm_norm
         scores.append(round(blended, 4))
     return scores
+
+
+# ---------------------------------------------------------------------------
+# Stage 0+: Evolved 8-Feature Code-Graph Matrix Sieve (v2.2.0, Zero Torch Dep)
+# ---------------------------------------------------------------------------
+
+_TRACEBACK_LINE_RE = re.compile(
+    r'(?:file\s+"?([^"\n]+\.[a-z0-9]{1,5})"?\s*,\s*line\s+(\d+))|'
+    r"\b([A-Za-z0-9_./\\-]+\.[a-z0-9]{1,5})(?::|#L)(\d+)\b",
+    re.IGNORECASE,
+)
+_EXCEPTION_TOKEN_RE = re.compile(r"\b([A-Z][A-Za-z0-9]*(?:Error|Exception|Warning|Timeout|Fault))\b")
+_TEST_PATH_MARKERS = ("/tests/", "/test/", "\\tests\\", "\\test\\", "conftest.py")
+
+
+def project_sieve_weights_simplex(weights: Sequence[float]) -> List[float]:
+    """Project an 8-element weight vector onto the sign-constrained L1 simplex (sum(|w|)=1, w_6<=0)."""
+    if len(weights) != len(SIEVE_FEATURE_NAMES):
+        raise ValueError(
+            f"Expected {len(SIEVE_FEATURE_NAMES)} sieve weights, got {len(weights)}."
+        )
+    constrained: List[float] = []
+    for idx, val in enumerate(weights):
+        fval = float(val)
+        if not math.isfinite(fval):
+            fval = 0.0
+        if idx in SIEVE_NEG_INDICES:
+            constrained.append(min(0.0, fval))
+        else:
+            constrained.append(max(0.0, fval))
+    l1_norm = sum(abs(x) for x in constrained)
+    if l1_norm < 1e-12:
+        fallback = DEFAULT_SIEVE_GENOMES["e4b_sniper_distilled"]["w_core"]
+        fb_norm = sum(abs(float(x)) for x in fallback)
+        return [round(float(x) / fb_norm, 6) for x in fallback]
+    return [round(x / l1_norm, 6) for x in constrained]
+
+
+def load_sieve_genomes(
+    sieve_weights: Optional[Union[str, Path, Mapping[str, Any]]] = None,
+) -> Tuple[Dict[str, Any], str]:
+    """Load evolved JSON sieve genomes from dict, explicit path, co-located policies/, or builtin default."""
+    if isinstance(sieve_weights, Mapping):
+        return dict(sieve_weights), "in_memory_dict"
+
+    cand_paths: List[Path] = []
+    raw_arg = str(sieve_weights).strip() if sieve_weights is not None else ""
+    if not raw_arg:
+        raw_arg = os.environ.get("XLAYA_SIEVE_WEIGHTS", "").strip()
+    if raw_arg:
+        p = Path(raw_arg)
+        if not p.is_file():
+            raise ValueError(f"Sieve weights JSON file not found: {raw_arg}")
+        cand_paths.append(p)
+    else:
+        here = Path(__file__).resolve().parent
+        cand_paths.extend(
+            [
+                here / "policies" / "sieve_genomes.json",
+                here.parent / "policies" / "sieve_genomes.json",
+                here.parent / "assets" / "sieve_genomes.json",
+                here / "assets" / "sieve_genomes.json",
+                here.parent / "resources" / "sieve_genomes.json",
+                here / "resources" / "sieve_genomes.json",
+            ]
+        )
+
+    for cp in cand_paths:
+        if cp.is_file():
+            data = json.loads(cp.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and ("e4b_sniper_distilled" in data or "w_core" in data):
+                return data, f"file:{cp.name}"
+    return dict(DEFAULT_SIEVE_GENOMES), "builtin_default"
+
+
+def _hashed_256d_vec(text: str) -> List[float]:
+    """Deterministic L2-normalized 256D signed subword/identifier sketch (zero external dependencies)."""
+    vec = [0.0] * 256
+    low = text.lower()
+    tokens = LATIN_TOKEN_RE.findall(low)
+    crc32 = zlib.crc32
+    has_any = False
+
+    for tok in tokens[:128]:
+        if len(tok) < 2 or tok in STOPWORDS:
+            continue
+        has_any = True
+        h = crc32(b"w:" + tok.encode("ascii", errors="ignore"))
+        vec[h & 0xFF] += 1.5 if ((h >> 8) & 1) == 0 else -1.5
+        if len(tok) >= 5:
+            tb = tok.encode("ascii", errors="ignore")
+            limit = min(len(tb) - 3, 6)
+            for i in range(limit):
+                end_i = i + 4
+                hg = crc32(tb[i:end_i], 0x9E37)
+                vec[hg & 0xFF] += 0.65 if ((hg >> 8) & 1) == 0 else -0.65
+
+    for ident in IDENT_RE.findall(text)[:48]:
+        has_any = True
+        hi = crc32(b"id:" + ident.lower().encode("ascii", errors="ignore"))
+        vec[hi & 0xFF] += 2.0 if ((hi >> 8) & 1) == 0 else -2.0
+
+    if not has_any:
+        return vec
+
+    norm = math.sqrt(sum(v * v for v in vec))
+    if norm > 1e-12:
+        inv = 1.0 / norm
+        return [v * inv for v in vec]
+    return vec
+
+
+def _cosine_256d(va: Sequence[float], vb: Sequence[float]) -> float:
+    dot = sum(a * b for a, b in zip(va, vb))
+    return max(0.0, min(1.0, dot))
+
+
+def _span_iou(ch_a: Mapping[str, Any], ch_b: Mapping[str, Any]) -> float:
+    if ch_a.get("file") != ch_b.get("file"):
+        return 0.0
+    a0, a1 = int(ch_a.get("start_line", 1)), int(ch_a.get("end_line", 1))
+    b0, b1 = int(ch_b.get("start_line", 1)), int(ch_b.get("end_line", 1))
+    inter = max(0, min(a1, b1) - max(a0, b0) + 1)
+    if inter <= 0:
+        return 0.0
+    union = max(1, (a1 - a0 + 1) + (b1 - b0 + 1) - inter)
+    return inter / union
+
+
+def _split_ident_parts(raw: str) -> List[str]:
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", raw)
+    return [p.lower() for p in re.split(r"[^A-Za-z0-9]+", spaced) if len(p) >= 3]
+
+
+def _is_same_symbol_or_overlap(ch_a: Mapping[str, Any], ch_b: Mapping[str, Any]) -> bool:
+    """Guard against split-subchunk self-echo on the same AST symbol or overlapping line span."""
+    if _span_iou(ch_a, ch_b) > 0.30:
+        return True
+    if ch_a.get("file") != ch_b.get("file"):
+        return False
+    ma = ch_a.get("_ast_meta") or {}
+    mb = ch_b.get("_ast_meta") or {}
+    sa = str(ma.get("canonical_symbol") or ma.get("symbol") or "").strip()
+    sb = str(mb.get("canonical_symbol") or mb.get("symbol") or "").strip()
+    if sa and sb and sa != "<module>" and sa == sb:
+        return True
+    return False
+
+
+def _is_tier2_aux_relpath(rel_posix: str) -> bool:
+    parts = [p.lower() for p in rel_posix.replace("\\", "/").split("/") if p]
+    if any(p in _TIER2_AUX_DIRS for p in parts[:-1]):
+        return True
+    fname = parts[-1] if parts else ""
+    return fname.startswith("test_") or fname.endswith("_test.py") or fname == "conftest.py"
+
+
+_PRERANK_FILE_TOKEN_CACHE: Dict[str, Tuple[frozenset[str], frozenset[str]]] = {}
+
+
+def _select_file_top_chunks(
+    chs: List[Dict[str, Any]],
+    query: str,
+    limit: int,
+) -> List[Dict[str, Any]]:
+    if limit <= 0 or len(chs) <= limit:
+        return chs
+    q_toks = {t for t in _extract_lexical_tokens(query) if len(t) >= 3}
+    q_ancs = _extract_code_anchors(query)
+    tb_lines: set[int] = set()
+    for m in _TRACEBACK_LINE_RE.finditer(query):
+        ln_s = m.group(2) or m.group(4)
+        if ln_s and ln_s.isdigit():
+            tb_lines.add(int(ln_s))
+    scored: List[Tuple[float, int]] = []
+    for idx_c, c in enumerate(chs):
+        sc = 0.0
+        s_ln = int(c.get("start_line", 0))
+        e_ln = int(c.get("end_line", 0))
+        if tb_lines and any(s_ln <= tl <= e_ln for tl in tb_lines):
+            sc += 120.0
+        meta = c.get("_ast_meta") or {}
+        sym_low = str(meta.get("symbol") or "").lower()
+        if sym_low:
+            if sym_low in q_ancs:
+                sc += 25.0
+            sym_parts = {sym_low} | set(_split_ident_parts(sym_low))
+            sc += 4.5 * len(q_toks & sym_parts)
+        txt_low = str(c.get("text") or "").lower()
+        for qt in q_toks:
+            if qt in txt_low:
+                sc += 1.0
+        scored.append((-sc, idx_c))
+    scored.sort()
+    keep_idxs = sorted(idx_c for _, idx_c in scored[:limit])
+    return [chs[i] for i in keep_idxs]
+
+
+def _prerank_repo_files(
+    files: Sequence[Path],
+    scan_root: Optional[Path],
+    query: str,
+) -> List[Path]:
+    """
+    2-Tier Source-First Lexical Pre-Ranker (F-08):
+      - Returns `files` untouched when 0 `.py`/`.pyi` files exist (preserving .md/.json parity).
+      - Prioritizes Tier-1 core package modules over Tier-2 `docs_src/`, `tests/`, `examples/`, `scripts/`,
+        while promoting explicitly referenced or high-overlap Tier-2 files so `max_chunks` never starves core source.
+    """
+    py_exts = (".py", ".pyi")
+    if len(files) <= 48 or not any(f.suffix.lower() in py_exts for f in files):
+        return list(files)
+
+    q_low = query.lower()
+    q_toks = list(dict.fromkeys(_extract_lexical_tokens(query)))
+    q_ancs = _extract_code_anchors(query)
+    tb_files: set[str] = set()
+    for m in _TRACEBACK_LINE_RE.finditer(query):
+        rf = (m.group(1) or m.group(3) or "").replace("\\", "/").lower()
+        if rf:
+            tb_files.add(rf)
+    for m_f in re.finditer(r"\b([A-Za-z0-9_./\\-]+\.(?:py|pyi))\b", query):
+        tb_files.add(m_f.group(1).replace("\\", "/").lower())
+
+    wants_docs = any(k in q_low for k in ("docs_src", "tutorial", "example", "docs/"))
+    wants_scripts = any(
+        k in q_low
+        for k in ("scripts/", "prepare_release", "release notes", "bump version", "mkdocs", "build script")
+    )
+    wants_tests = any(k in q_low for k in ("pytest", "conftest", "unit test", "test_", "_test.py"))
+
+    q_set = {t for t in q_toks if len(t) >= 3}
+    wants_rubi = "rubi" in q_low
+    tier1_candidates: List[Tuple[int, Path, str, set[str], set[str], set[str]]] = []
+    tier2_scored: List[Tuple[float, int, Path]] = []
+    other_files: List[Path] = []
+    df_t1: Counter[str] = Counter()
+
+    need_head_scan = len(files) > 90
+    if len(_PRERANK_FILE_TOKEN_CACHE) > 16384:
+        _PRERANK_FILE_TOKEN_CACHE.clear()
+
+    for idx_f, fp in enumerate(files):
+        if fp.suffix.lower() not in py_exts:
+            other_files.append(fp)
+            continue
+        rel = _rel_ref_prefix(fp, scan_root).replace("\\", "/")
+        rel_clean = rel[4:] if rel.startswith("src/") else rel
+        rel_low = rel_clean.lower()
+        is_t2 = _is_tier2_aux_relpath(rel_clean)
+        path_toks = set(_extract_lexical_tokens(rel_clean.replace("/", " ").replace(".", " "))) & q_set
+
+        if is_t2:
+            sc = 0.0
+            for tf in tb_files:
+                if rel_low.endswith(tf) or fp.name.lower() == tf:
+                    sc += 60.0
+            if path_toks:
+                sc += 5.5 * len(path_toks)
+            for anc in q_ancs:
+                if anc in rel_low:
+                    sc += 8.0
+            do_t2_head = need_head_scan and (
+                sc > 0.0
+                or (wants_scripts and ("scripts/" in rel_low or "devtools/" in rel_low))
+                or (wants_docs and ("docs_src/" in rel_low or "examples/" in rel_low))
+            )
+            if do_t2_head and q_set:
+                ckey_t2 = f"t2:{fp}"
+                t2_toks = _PRERANK_FILE_TOKEN_CACHE.get(ckey_t2)
+                if t2_toks is None:
+                    try:
+                        with fp.open("rb") as fh:
+                            head_txt = fh.read(6144).decode("utf-8", errors="ignore")
+                        t2_toks = (frozenset(_extract_lexical_tokens(head_txt)), frozenset())
+                        _PRERANK_FILE_TOKEN_CACHE[ckey_t2] = t2_toks
+                    except OSError:
+                        t2_toks = (frozenset(), frozenset())
+                sc += 1.35 * len(q_set & t2_toks[0])
+            if wants_scripts and ("scripts/" in rel_low or "devtools/" in rel_low):
+                sc += 18.0
+            if wants_docs and ("docs_src/" in rel_low or "examples/" in rel_low):
+                sc += 14.0
+            if wants_tests and ("test" in rel_low):
+                sc += 14.0
+            tier2_scored.append((-sc, idx_f, fp))
+        else:
+            head_hits: set[str] = set()
+            def_hits: set[str] = set()
+            if need_head_scan and q_set and (wants_rubi or "integrals/rubi/" not in rel_low):
+                ckey = str(fp)
+                cached_pair = _PRERANK_FILE_TOKEN_CACHE.get(ckey)
+                if cached_pair is None:
+                    try:
+                        with fp.open("rb") as fh:
+                            head_txt = fh.read(20480).decode("utf-8", errors="ignore")
+                        h_all = frozenset(_extract_lexical_tokens(head_txt))
+                        d_all: set[str] = set()
+                        for dm in re.finditer(
+                            r"(?:^|\n)\s*(?:async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)", head_txt
+                        ):
+                            sym_nm = dm.group(1)
+                            d_all.update({sym_nm.lower()} | set(_split_ident_parts(sym_nm)))
+                        cached_pair = (h_all, frozenset(d_all))
+                        _PRERANK_FILE_TOKEN_CACHE[ckey] = cached_pair
+                    except OSError:
+                        cached_pair = (frozenset(), frozenset())
+                head_hits = q_set & cached_pair[0]
+                def_hits = q_set & cached_pair[1]
+            for qt in (path_toks | head_hits | def_hits):
+                df_t1[qt] += 1
+            tier1_candidates.append((idx_f, fp, rel_low, path_toks, head_hits, def_hits))
+
+    n_t1 = max(1, len(tier1_candidates))
+    idf_t1 = {qt: math.log(1.4 + n_t1 / (1.0 + df_t1[qt])) for qt in q_set}
+
+    tier1_scored: List[Tuple[float, int, Path]] = []
+    for idx_f, fp, rel_low, path_toks, head_hits, def_hits in tier1_candidates:
+        sc = 1.5 if fp.name != "__init__.py" else 0.0
+        if not wants_rubi and "integrals/rubi/" in rel_low:
+            sc -= 15.0
+        for tf in tb_files:
+            if rel_low.endswith(tf) or fp.name.lower() == tf:
+                sc += 65.0
+        for anc in q_ancs:
+            if anc in rel_low:
+                sc += 9.0
+        for qt in path_toks:
+            sc += 3.8 * idf_t1.get(qt, 1.0)
+        for qt in def_hits:
+            sc += 3.2 * idf_t1.get(qt, 1.0)
+        for qt in head_hits:
+            sc += 1.15 * idf_t1.get(qt, 1.0)
+        tier1_scored.append((-sc, idx_f, fp))
+
+    tier1_scored.sort()
+    tier2_scored.sort()
+
+    # Interleave any explicitly high-scoring Tier-2 files (e.g. scripts/prepare_release.py or tutorial target)
+    promoted_t2 = [fp for neg_sc, _, fp in tier2_scored if (-neg_sc) >= 12.0][:24]
+    prom_set = set(promoted_t2)
+    rem_t2_cap = 8 if len(tier1_scored) >= 40 else 48
+    rem_t2 = [fp for _, _, fp in tier2_scored if fp not in prom_set][:rem_t2_cap]
+    ordered_t1 = [fp for _, _, fp in tier1_scored]
+
+    if promoted_t2:
+        top_t1 = ordered_t1[:32]
+        rest_t1 = ordered_t1[32:]
+        return top_t1 + promoted_t2 + rest_t1 + rem_t2 + other_files
+    return ordered_t1 + rem_t2 + other_files
+
+
+def _whiten_symbol_vectors(raw_map: Mapping[str, Any]) -> Tuple[Dict[str, List[float]], float]:
+    """
+    All-but-the-Mean + 5-step Top-1 Principal Component whitening (F-02 / F-11):
+    Collapses narrow-cone anisotropy (`rand_cos_p50 = 0.83..0.94 -> ~0.0`) and returns
+    L2-normalized whitened vectors plus adaptive random-pair p75 floor.
+    """
+    keys = [k for k in raw_map.keys() if k != "__query__"]
+    if not keys:
+        return {}, 0.15
+
+    # Fast numpy path when available (e.g. when loading .npz), with pure-Python fallback
+    np_mod = sys.modules.get("numpy")
+    if np_mod is None and len(keys) > 64:
+        with contextlib.suppress(ImportError):
+            import numpy as np_mod  # type: ignore
+
+    if np_mod is not None:
+        arr = np_mod.asarray([raw_map[k] for k in keys], dtype=np_mod.float32)
+        if arr.ndim != 2 or arr.shape[0] < 2 or arr.shape[1] < 2:
+            return {k: [float(x) for x in raw_map[k]] for k in keys}, 0.15
+        mu = arr.mean(axis=0, keepdims=True)
+        xc = arr - mu
+        # 5 deterministic power-iteration steps for Top-1 PC u_1
+        u = xc[0].copy()
+        u_norm = float(np_mod.linalg.norm(u))
+        if u_norm < 1e-8:
+            u = np_mod.ones((arr.shape[1],), dtype=np_mod.float32)
+            u_norm = float(np_mod.linalg.norm(u))
+        u = u / u_norm
+        xw = xc
+        for pc_idx in range(min(4, xc.shape[0] - 1)):
+            u = xw[min(pc_idx, xw.shape[0] - 1)].copy()
+            un0 = float(np_mod.linalg.norm(u))
+            if un0 < 1e-8:
+                break
+            u = u / un0
+            for _ in range(6):
+                proj = xw @ u
+                u_new = xw.T @ proj
+                un = float(np_mod.linalg.norm(u_new))
+                if un < 1e-8:
+                    break
+                u = u_new / un
+            if float(u[0]) < 0.0:
+                u = -u
+            xw = xw - np_mod.outer(xw @ u, u)
+        norms = np_mod.linalg.norm(xw, axis=1, keepdims=True)
+        xw = xw / np_mod.maximum(norms, 1e-8)
+
+        n_v = xw.shape[0]
+        step = max(1, n_v // 128)
+        idx_a = np_mod.arange(0, n_v - 1, step)[:128]
+        idx_b = (idx_a + max(1, n_v // 3)) % n_v
+        sample_cos = np_mod.sum(xw[idx_a] * xw[idx_b], axis=1)
+        p75 = float(np_mod.percentile(sample_cos, 75)) if sample_cos.size > 0 else 0.10
+        floor_c = max(0.08, min(0.35, p75))
+        return {keys[i]: xw[i].tolist() for i in range(n_v)}, floor_c
+
+    # Pure-stdlib fallback for small in-memory dicts without numpy
+    vecs = [[float(x) for x in raw_map[k]] for k in keys]
+    dim = len(vecs[0])
+    n_v = len(vecs)
+    if n_v < 2 or dim < 2:
+        return {keys[i]: vecs[i] for i in range(n_v)}, 0.15
+    mu_l = [sum(v[d] for v in vecs) / n_v for d in range(dim)]
+    xw_l = [[v[d] - mu_l[d] for d in range(dim)] for v in vecs]
+    for pc_idx in range(min(4, n_v - 1)):
+        u_l = list(xw_l[min(pc_idx, n_v - 1)])
+        un = math.sqrt(sum(x * x for x in u_l)) or 1.0
+        u_l = [x / un for x in u_l]
+        for _ in range(6):
+            proj_l = [sum(v[d] * u_l[d] for d in range(dim)) for v in xw_l]
+            u_next = [sum(xw_l[i][d] * proj_l[i] for i in range(n_v)) for d in range(dim)]
+            un2 = math.sqrt(sum(x * x for x in u_next))
+            if un2 < 1e-8:
+                break
+            u_l = [x / un2 for x in u_next]
+        if u_l[0] < 0.0:
+            u_l = [-x for x in u_l]
+        for i in range(n_v):
+            dot_u = sum(xw_l[i][d] * u_l[d] for d in range(dim))
+            xw_l[i] = [xw_l[i][d] - dot_u * u_l[d] for d in range(dim)]
+    out_map: Dict[str, List[float]] = {}
+    for i, k in enumerate(keys):
+        nrm = math.sqrt(sum(x * x for x in xw_l[i])) or 1.0
+        out_map[k] = [x / nrm for x in xw_l[i]]
+    return out_map, 0.12
+
+
+def _match_chunks_to_symbol_keys(
+    chunks: Sequence[Mapping[str, Any]],
+    available_keys: Sequence[str],
+) -> List[Optional[str]]:
+    """Map AST chunks to dotted symbol keys without smearing `<module>` vectors onto functions/classes."""
+    key_set = set(available_keys)
+    exact_tail_cs: Dict[str, List[str]] = {}
+    exact_tail_low: Dict[str, List[str]] = {}
+    mod_keys_low: Dict[str, str] = {}
+
+    for k in available_keys:
+        if k == "__query__":
+            continue
+        if k.endswith(".<module>") or k == "<module>":
+            mod_keys_low[k[:-9].lower() if k.endswith(".<module>") else ""] = k
+            continue
+        parts = k.split(".")
+        for n_tail in (1, 2, 3):
+            if len(parts) >= n_tail:
+                t_cs = ".".join(parts[-n_tail:])
+                exact_tail_cs.setdefault(t_cs, []).append(k)
+                exact_tail_low.setdefault(t_cs.lower(), []).append(k)
+
+    def _pick_best_key(cands: List[str], mod_dotted_low: str) -> Optional[str]:
+        if not cands:
+            return None
+        if len(cands) == 1:
+            return cands[0]
+        for c in cands:
+            cl = c.lower()
+            if mod_dotted_low and cl.startswith(mod_dotted_low + "."):
+                return c
+        core_cands = [
+            c
+            for c in cands
+            if not any(
+                seg in c.lower().split(".")
+                for seg in ("docs_src", "tests", "test", "examples", "tutorials")
+            )
+        ]
+        pool = core_cands or cands
+        return pool[0] if len(pool) <= 6 else None
+
+    matched: List[Optional[str]] = []
+    for ch in chunks:
+        ref_str = str(ch.get("ref", ""))
+        if ref_str in key_set:
+            matched.append(ref_str)
+            continue
+        meta = ch.get("_ast_meta") or {}
+        csym = str(meta.get("canonical_symbol") or meta.get("symbol") or "").strip()
+        rel_file = ref_str.split("#", 1)[0].replace("\\", "/")
+        if rel_file.startswith("src/"):
+            rel_file = rel_file[4:]
+        mod_dotted = re.sub(r"\.(?:py|pyi)$", "", rel_file).replace("/", ".")
+        if mod_dotted.endswith(".__init__"):
+            mod_dotted = mod_dotted[:-9]
+        mod_low = mod_dotted.lower()
+
+        if not csym or csym == "<module>":
+            matched.append(mod_keys_low.get(mod_low))
+            continue
+
+        full_cand = f"{mod_dotted}.{csym}" if mod_dotted else csym
+        if full_cand in key_set:
+            matched.append(full_cand)
+            continue
+        picked = _pick_best_key(exact_tail_cs.get(csym, []), mod_low)
+        if picked is None:
+            picked = _pick_best_key(exact_tail_low.get(csym.lower(), []), mod_low)
+        matched.append(picked)
+    return matched
+
+
+def extract_code_graph_features(
+    chunks: Sequence[Dict[str, Any]],
+    query: str,
+    *,
+    graph_path: Optional[Union[str, Path]] = None,
+    embeddings_path: Optional[Union[str, Path, Mapping[str, Any]]] = None,
+    out_stats: Optional[Dict[str, Any]] = None,
+) -> List[List[float]]:
+    """Compute the normalized [M x 8] cross-regime feature matrix F in [0, 1] across candidate chunks."""
+    m_len = len(chunks)
+    if m_len == 0:
+        return []
+    if not query.strip():
+        return [[0.0] * 8 for _ in range(m_len)]
+
+    q_low = query.lower()
+    q_tokens = _extract_lexical_tokens(query)
+    q_unique = list(dict.fromkeys(q_tokens))
+    q_anchors = _extract_code_anchors(query)
+    q_ident_stems: set[str] = set()
+    for anc in q_anchors:
+        q_ident_stems.add(anc)
+        for pt in _split_ident_parts(anc):
+            if pt not in STOPWORDS:
+                q_ident_stems.add(pt)
+    for qt in q_unique:
+        if len(qt) >= 4:
+            q_ident_stems.add(qt)
+
+    q_wants_tests = any(w in q_low for w in ("pytest", "conftest", "unit test", "test_", "_test.py"))
+    # Exclude generic English "stream" so OOD prompts never trigger hallucinated async boosts
+    async_kws = (
+        "astream", "async", "await", "coroutine", "depends", "dependency",
+        "lifespan", "middleware", "asgi",
+    )
+    q_wants_async = any(w in q_low for w in async_kws)
+    q_exceptions = {m.group(1).lower() for m in _EXCEPTION_TOKEN_RE.finditer(query)}
+    tb_refs: List[Tuple[str, Optional[int]]] = []
+    for m in _TRACEBACK_LINE_RE.finditer(query):
+        if m.group(1):
+            tb_refs.append((m.group(1).replace("\\", "/").lower(), int(m.group(2))))
+        elif m.group(3):
+            tb_refs.append((m.group(3).replace("\\", "/").lower(), int(m.group(4))))
+    for m_file in re.finditer(r"\b([A-Za-z0-9_./\\-]+\.(?:py|pyi|toml|yaml|yml|md))\b", query):
+        cand_f = m_file.group(1).replace("\\", "/").lower()
+        if not any(cand_f == x[0] for x in tb_refs):
+            tb_refs.append((cand_f, None))
+
+    # Pre-classify test & Tier-2 chunks first so max_bm normalization is strictly immune to test-echo crushing
+    f_test: List[float] = []
+    is_tier2_chunk: List[bool] = []
+    for ch in chunks:
+        fpath_low = str(ch.get("file", "")).lower()
+        fname_low = str(ch.get("name", "")).lower()
+        ref_rel = str(ch.get("ref", "")).split("#", 1)[0]
+        is_test = (
+            fname_low.startswith("test_")
+            or fname_low.endswith("_test.py")
+            or any(mk in fpath_low for mk in _TEST_PATH_MARKERS)
+        )
+        f_test.append(1.0 if (is_test and not q_wants_tests) else 0.0)
+        is_tier2_chunk.append(is_test or _is_tier2_aux_relpath(ref_rel))
+
+    # Pass 1: Sub-token counters (reused by both Feature 0 BM25 and Feature 5 pure-stdlib Corpus-IDF)
+    doc_counters: List[Counter[str]] = []
+    doc_lengths: List[int] = []
+    df: Counter[str] = Counter()
+    for ch in chunks:
+        toks = _extract_lexical_tokens(ch["text"])
+        cnt = Counter(toks)
+        doc_counters.append(cnt)
+        doc_lengths.append(max(1, len(toks)))
+        for qt in q_unique:
+            if qt in cnt:
+                df[qt] += 1
+
+    avgdl = sum(doc_lengths) / max(1, m_len)
+    k1, b_param = 1.5, 0.75
+    idfs = {qt: math.log(1.0 + (m_len - df[qt] + 0.5) / (df[qt] + 0.5)) for qt in q_unique}
+    theo_max = sum(idfs[qt] * (k1 + 1.0) for qt in q_unique)
+
+    raw_bm25: List[float] = []
+    f_ident: List[float] = []
+    for ch, cnt, dl in zip(chunks, doc_counters, doc_lengths):
+        sc = 0.0
+        for qt in q_unique:
+            tf = cnt.get(qt, 0)
+            if tf > 0:
+                sc += idfs[qt] * ((tf * (k1 + 1.0)) / (tf + k1 * (1.0 - b_param + b_param * (dl / avgdl))))
+        raw_bm25.append(sc)
+
+        ch_low = ch["text"].lower()
+        ref_low = str(ch.get("ref", "")).lower()
+        anc_ratio = 0.0
+        if q_anchors:
+            exact_hits = sum(1 for a in q_anchors if a in ch_low or a in ref_low)
+            anc_ratio = min(1.0, exact_hits / max(1, len(q_anchors)))
+        stem_ratio = 0.0
+        if q_ident_stems:
+            stem_hits = sum(1 for st in q_ident_stems if st in cnt or st in ref_low)
+            stem_ratio = min(1.0, stem_hits / max(1, len(q_ident_stems)))
+        # Additive / non-exclusive fusion so 1 noisy backtick never zeroes structural stems (F-05)
+        if q_anchors:
+            f_ident.append(min(1.0, max(anc_ratio, 0.75 * stem_ratio)))
+        else:
+            f_ident.append(min(1.0, 0.85 * stem_ratio))
+
+    non_test_bm = [raw_bm25[i] for i in range(m_len) if f_test[i] < 0.5]
+    max_bm = max(non_test_bm) if non_test_bm else (max(raw_bm25) if raw_bm25 else 0.0)
+    bm_denom = max(max_bm, theo_max * 0.40, 1e-6)
+    f_bm25 = [min(1.0, bm / bm_denom) if theo_max > 0 else 0.0 for bm in raw_bm25]
+
+    # Feature 2 (ast_enclosing_def) & Feature 7 (traceback_line_boost)
+    f_ast: List[float] = []
+    f_tb: List[float] = []
+
+    sym_to_chunks: Dict[str, List[int]] = {}
+    mod_to_chunks: Dict[str, List[int]] = {}
+
+    for idx, ch in enumerate(chunks):
+        meta = ch.get("_ast_meta") or {}
+        defined = meta.get("defined_symbols") or []
+        params = meta.get("param_and_ann_tokens") or []
+        async_di = meta.get("async_or_di_symbols") or []
+        exc_list = meta.get("raised_exceptions") or []
+        kind = meta.get("node_kind", "")
+
+        mod_stem = Path(str(ch.get("name", ""))).stem.lower()
+        if mod_stem and mod_stem != "__init__":
+            mod_to_chunks.setdefault(mod_stem, []).append(idx)
+        for d_sym in defined:
+            if len(d_sym) >= 3 and d_sym not in ("__init__", "main", "<module>"):
+                sym_to_chunks.setdefault(d_sym, []).append(idx)
+
+        ast_val = 0.0
+        if defined and q_ident_stems:
+            for d_sym in defined:
+                d_parts = set(_split_ident_parts(d_sym)) | {d_sym}
+                if d_sym in q_ident_stems:
+                    ast_val = max(ast_val, 1.0)
+                elif d_parts & q_ident_stems:
+                    ast_val = max(ast_val, 0.72)
+        if ast_val < 0.70 and params and q_ident_stems:
+            p_hits = sum(1 for p in params if p in q_ident_stems)
+            if p_hits > 0:
+                ast_val = max(ast_val, min(0.70, 0.35 + 0.18 * p_hits))
+        if q_wants_async and (kind == "async_def" or async_di):
+            ast_val = min(1.0, ast_val + 0.25)
+        f_ast.append(ast_val)
+
+        fpath_low = str(ch.get("file", "")).lower()
+        fname_low = str(ch.get("name", "")).lower()
+        tb_val = 0.0
+        s_ln = int(ch.get("start_line", 1))
+        e_ln = int(ch.get("end_line", 1))
+        ref_prefix_low = str(ch.get("ref", "")).split("#", 1)[0].lower()
+        for ref_f, ref_ln in tb_refs:
+            if fpath_low.endswith(ref_f) or ref_prefix_low.endswith(ref_f) or fname_low == ref_f:
+                if ref_ln is not None and (s_ln - 5) <= ref_ln <= (e_ln + 5):
+                    tb_val = max(tb_val, 1.0)
+                else:
+                    tb_val = max(tb_val, 0.75)
+        if tb_val < 0.55 and q_exceptions and exc_list:
+            if set(exc_list) & q_exceptions:
+                tb_val = max(tb_val, 0.55)
+        f_tb.append(tb_val)
+
+    # Build static AST 1-hop call/import graph (call_adj) & 2-hop async/Depends graph (async_adj),
+    # keeping external NetworkX node_link_data graphs STRICTLY ISOLATED in ext_call_adj (F-01 / F-11)
+    call_adj: List[set[int]] = [set() for _ in range(m_len)]
+    ext_call_adj: List[set[int]] = [set() for _ in range(m_len)]
+    async_adj: List[set[int]] = [set() for _ in range(m_len)]
+    ext_edges_matched = 0
+
+    if graph_path is not None and str(graph_path).strip():
+        gp = Path(str(graph_path))
+        if gp.is_file():
+            try:
+                g_data = json.loads(gp.read_text(encoding="utf-8"))
+                edges_list = g_data.get("edges") or g_data.get("links") or []
+                if edges_list:
+                    sample_e = edges_list[0]
+                    if "src" in sample_e and "dst" in sample_e:
+                        ref_idx = {str(ch.get("ref", "")): i for i, ch in enumerate(chunks)}
+                        for edge in edges_list:
+                            u = ref_idx.get(str(edge.get("src", "")))
+                            v = ref_idx.get(str(edge.get("dst", "")))
+                            if u is not None and v is not None and u != v:
+                                ext_call_adj[u].add(v)
+                                ext_call_adj[v].add(u)
+                                ext_edges_matched += 1
+                                if edge.get("kind") in ("async", "depends", "di"):
+                                    async_adj[u].add(v)
+                                    async_adj[v].add(u)
+                    else:
+                        # NetworkX node_link_data schema:
+                        # {"source": "<dotted.sym>", "target": "<dotted.sym>", "type": "calls"}
+                        node_ids = [
+                            str(n.get("id") or n.get("name") or "")
+                            for n in (g_data.get("nodes") or [])
+                            if (n.get("id") or n.get("name"))
+                        ]
+                        if not node_ids:
+                            node_ids = list(
+                                {
+                                    str(edge.get("source", ""))
+                                    for edge in edges_list
+                                    if edge.get("source")
+                                }
+                                | {
+                                    str(edge.get("target", ""))
+                                    for edge in edges_list
+                                    if edge.get("target")
+                                }
+                            )
+                        chunk_gkeys = _match_chunks_to_symbol_keys(chunks, node_ids)
+                        gkey_to_cidxs: Dict[str, List[int]] = {}
+                        for ci, gk in enumerate(chunk_gkeys):
+                            if gk and not gk.endswith(".<module>") and gk != "<module>":
+                                gkey_to_cidxs.setdefault(gk, []).append(ci)
+                        for edge in edges_list:
+                            s_id = str(edge.get("source", ""))
+                            t_id = str(edge.get("target", ""))
+                            if not s_id or not t_id or s_id == t_id:
+                                continue
+                            u_list = gkey_to_cidxs.get(s_id)
+                            v_list = gkey_to_cidxs.get(t_id)
+                            if u_list and v_list and len(u_list) <= 4 and len(v_list) <= 4:
+                                for ui in u_list:
+                                    for vi in v_list:
+                                        if not _is_same_symbol_or_overlap(chunks[ui], chunks[vi]):
+                                            ext_call_adj[ui].add(vi)
+                                            ext_call_adj[vi].add(ui)
+                                            ext_edges_matched += 1
+            except Exception:  # nosec B110
+                pass
+
+    for idx, ch in enumerate(chunks):
+        meta = ch.get("_ast_meta") or {}
+        for cal in meta.get("called_symbols") or []:
+            cal_tail = cal.split(".")[-1]
+            targets = sym_to_chunks.get(cal, []) or sym_to_chunks.get(cal_tail, [])
+            if 0 < len(targets) <= 24:
+                for tgt in targets:
+                    if tgt != idx:
+                        call_adj[idx].add(tgt)
+                        call_adj[tgt].add(idx)
+        for imp in meta.get("imported_symbols") or []:
+            m_targets = sym_to_chunks.get(imp, []) or mod_to_chunks.get(imp, [])
+            if 0 < len(m_targets) <= 16:
+                for tgt in m_targets:
+                    if tgt != idx:
+                        call_adj[idx].add(tgt)
+                        call_adj[tgt].add(idx)
+        for adi in meta.get("async_or_di_symbols") or []:
+            adi_tail = adi.split(".")[-1]
+            a_targets = sym_to_chunks.get(adi, []) or sym_to_chunks.get(adi_tail, [])
+            if 0 < len(a_targets) <= 24:
+                for tgt in a_targets:
+                    if tgt != idx:
+                        async_adj[idx].add(tgt)
+                        async_adj[tgt].add(idx)
+        if meta.get("node_kind") == "async_def" or meta.get("raised_exceptions"):
+            for exc_sym in meta.get("raised_exceptions") or []:
+                e_targets = sym_to_chunks.get(exc_sym, [])
+                if 0 < len(e_targets) <= 16:
+                    for tgt in e_targets:
+                        if tgt != idx:
+                            async_adj[idx].add(tgt)
+                            async_adj[tgt].add(idx)
+
+    seeds = [
+        min(1.0, 0.42 * f_bm25[i] + 0.30 * f_ident[i] + 0.42 * f_ast[i] + 0.25 * f_tb[i])
+        for i in range(m_len)
+    ]
+
+    # Feature 3: Monotonic envelope of AST call graph + isolated external NetworkX graph
+    f_hop1: List[float] = []
+    for i in range(m_len):
+        best_ast = 0.0
+        for nb in call_adj[i]:
+            if _is_same_symbol_or_overlap(chunks[i], chunks[nb]):
+                continue
+            damp = 1.0 / (1.0 + 0.12 * math.log1p(len(call_adj[nb])))
+            cand = seeds[nb] * damp
+            if cand > best_ast:
+                best_ast = cand
+
+        best_ext = 0.0
+        if ext_call_adj[i]:
+            t2_self = 0.35 if is_tier2_chunk[i] else 1.0
+            for nb in ext_call_adj[i]:
+                if _is_same_symbol_or_overlap(chunks[i], chunks[nb]):
+                    continue
+                t2_nb = 0.35 if is_tier2_chunk[nb] else 1.0
+                damp_e = 1.0 / (1.0 + 0.14 * math.log1p(len(ext_call_adj[nb])))
+                cand_e = seeds[nb] * damp_e * t2_self * t2_nb
+                if cand_e > best_ext:
+                    best_ext = cand_e
+
+        ext_gain = 0.85 if max(f_bm25[i], f_ident[i], f_ast[i], f_tb[i]) >= 0.04 else 0.48
+        f_hop1.append(min(1.0, max(best_ast, ext_gain * best_ext)))
+
+    # Feature 4: Smooth hub-damped 2-hop async/Depends graph (zero discontinuous degree step cliffs)
+    top16_call_nbs: List[List[int]] = [
+        sorted(call_adj[i], key=lambda x: (-seeds[x], x))[:16] if call_adj[i] else []
+        for i in range(m_len)
+    ]
+    f_hop2_async: List[float] = []
+    for i in range(m_len):
+        best_a1 = 0.0
+        for nb in async_adj[i]:
+            damp1 = 1.0 / (1.0 + 0.10 * math.log1p(len(async_adj[nb])))
+            cand1 = seeds[nb] * damp1
+            if cand1 > best_a1:
+                best_a1 = cand1
+            combined_2 = list(async_adj[nb]) + [x for x in top16_call_nbs[nb][:12] if x not in async_adj[nb]]
+            for nb2 in combined_2:
+                if nb2 == i:
+                    continue
+                damp2 = 1.0 / (1.0 + 0.14 * math.log1p(len(call_adj[nb2]) + len(async_adj[nb2])))
+                cand2 = 0.82 * seeds[nb2] * damp1 * damp2
+                if cand2 > best_a1:
+                    best_a1 = cand2
+        hub_damp_i = 1.0 / (1.0 + 0.10 * math.log1p(max(0, len(call_adj[i]) - 8)))
+        for nb in top16_call_nbs[i]:
+            for nb2 in async_adj[nb]:
+                if nb2 == i:
+                    continue
+                damp2 = 1.0 / (1.0 + 0.14 * math.log1p(len(async_adj[nb2])))
+                cand2 = 0.80 * seeds[nb2] * damp2 * hub_damp_i
+                if cand2 > best_a1:
+                    best_a1 = cand2
+        f_hop2_async.append(min(1.0, best_a1))
+
+    # Feature 5 (F-02 / F-11):
+    #   (a) Universal pure-stdlib Corpus-IDF Sub-Token Cosine Seed Propagation (`f_5_tfidf`)
+    #   (b) Monotonic All-but-the-Mean + Top-1 PC Whitened `.npz` Sidecar Upgrade (`max(f_5_tfidf, 0.85 * f_5_npz)`)
+    seed_pool = [
+        i
+        for i in range(m_len)
+        if f_test[i] < 0.5
+        and not is_tier2_chunk[i]
+        and max(f_bm25[i], f_ident[i], f_tb[i]) > 0.08
+        and seeds[i] > 0.10
+    ]
+    if not seed_pool:
+        seed_pool = [
+            i
+            for i in range(m_len)
+            if f_test[i] < 0.5
+            and max(f_bm25[i], f_ident[i], f_tb[i]) > 0.08
+            and seeds[i] > 0.10
+        ]
+    seed_pool.sort(key=lambda idx: (-seeds[idx], idx))
+    top_seeds: List[int] = []
+    for cand_s in seed_pool:
+        if any(_is_same_symbol_or_overlap(chunks[cand_s], chunks[ps]) for ps in top_seeds):
+            continue
+        top_seeds.append(cand_s)
+        if len(top_seeds) >= 5:
+            break
+
+    peak_seed = seeds[top_seeds[0]] if top_seeds else 0.0
+    f_5_tfidf = [0.0] * m_len
+
+    if top_seeds and m_len >= 3:
+        df_corpus: Counter[str] = Counter()
+        for cnt in doc_counters:
+            for tok in cnt:
+                if len(tok) >= 3:
+                    df_corpus[tok] += 1
+        max_df = max(2, int(0.25 * m_len))
+        idf_c: Dict[str, float] = {
+            tok: math.log(1.0 + (m_len + 1.0) / (dfc + 1.0))
+            for tok, dfc in df_corpus.items()
+            if 2 <= dfc <= max_df
+        }
+        if idf_c:
+            chunk_norms = [0.0] * m_len
+            for ci, cnt in enumerate(doc_counters):
+                sq = 0.0
+                for tok, tfv in cnt.items():
+                    w_idf = idf_c.get(tok)
+                    if w_idf is not None:
+                        wt = (1.0 + math.log(tfv)) * w_idf
+                        sq += wt * wt
+                chunk_norms[ci] = math.sqrt(sq)
+
+            seed_vocab: set[str] = set()
+            for s_idx in top_seeds:
+                for tok in doc_counters[s_idx]:
+                    if tok in idf_c:
+                        seed_vocab.add(tok)
+
+            postings: Dict[str, List[Tuple[int, float]]] = {}
+            for ci, cnt in enumerate(doc_counters):
+                if chunk_norms[ci] <= 1e-9:
+                    continue
+                for tok in cnt:
+                    if tok in seed_vocab:
+                        wt = (1.0 + math.log(cnt[tok])) * idf_c[tok]
+                        postings.setdefault(tok, []).append((ci, wt))
+
+            raw_prop = [0.0] * m_len
+            for rank_s, s_idx in enumerate(top_seeds):
+                nrm_s = chunk_norms[s_idx]
+                if nrm_s <= 1e-9:
+                    continue
+                decay = 1.0 / (1.0 + 0.22 * rank_s)
+                dots: Dict[int, float] = {}
+                s_cnt = doc_counters[s_idx]
+                for tok, tf_s in s_cnt.items():
+                    if tok not in postings:
+                        continue
+                    w_s = (1.0 + math.log(tf_s)) * idf_c[tok]
+                    for j_idx, w_j in postings[tok]:
+                        if j_idx != s_idx:
+                            dots[j_idx] = dots.get(j_idx, 0.0) + w_s * w_j
+                s_file = chunks[s_idx].get("file")
+                for j_idx, dot_val in dots.items():
+                    if f_test[j_idx] >= 0.5 or _is_same_symbol_or_overlap(chunks[s_idx], chunks[j_idx]):
+                        continue
+                    cos_ij = dot_val / (nrm_s * chunk_norms[j_idx])
+                    cos_pos = max(0.0, (cos_ij - 0.05) / 0.95)
+                    if cos_pos <= 0.0:
+                        continue
+                    file_damp = 0.80 if chunks[j_idx].get("file") == s_file else 1.0
+                    cand_v = seeds[s_idx] * decay * cos_pos * file_damp
+                    if cand_v > raw_prop[j_idx]:
+                        raw_prop[j_idx] = cand_v
+
+            denom_tf = max(max(raw_prop, default=0.0), 0.28 * peak_seed, 1e-6)
+            for j_idx in range(m_len):
+                if raw_prop[j_idx] > 0.0:
+                    f_5_tfidf[j_idx] = min(peak_seed, peak_seed * (raw_prop[j_idx] / denom_tf))
+
+    # Optional precomputed embeddings upgrade (dict / .json / Kaggle symbol-keyed .npz / legacy refs+vectors .npz)
+    raw_ext_embs: Optional[Dict[str, Any]] = None
+    if isinstance(embeddings_path, Mapping):
+        raw_ext_embs = dict(embeddings_path)
+    elif embeddings_path is not None and str(embeddings_path).strip():
+        ep = Path(str(embeddings_path))
+        if ep.is_file() and ep.suffix.lower() == ".json":
+            with contextlib.suppress(Exception):
+                raw_ext_embs = json.loads(ep.read_text(encoding="utf-8"))
+        elif ep.is_file() and ep.suffix.lower() == ".npz":
+            try:
+                import numpy as _np  # type: ignore
+
+                with _np.load(str(ep), allow_pickle=False) as npz:
+                    npz_files = list(npz.files)
+                    if "refs" in npz_files and "vectors" in npz_files:
+                        refs_arr = [str(r) for r in npz["refs"].tolist()]
+                        vecs_arr = npz["vectors"]
+                        raw_ext_embs = {r: vecs_arr[k] for k, r in enumerate(refs_arr)}
+                    else:
+                        raw_ext_embs = {k: npz[k] for k in npz_files if getattr(npz[k], "ndim", 0) == 1}
+            except Exception:  # nosec B110
+                raw_ext_embs = None
+
+    npz_matched_cnt = 0
+    f_emb = list(f_5_tfidf)
+    if raw_ext_embs:
+        if "__query__" in raw_ext_embs:
+            q_vec = [float(x) for x in raw_ext_embs["__query__"]]
+            for i, ch in enumerate(chunks):
+                rk = str(ch.get("ref", ""))
+                if rk in raw_ext_embs:
+                    npz_matched_cnt += 1
+                    f_emb[i] = max(f_5_tfidf[i], _cosine_256d(q_vec, raw_ext_embs[rk]))
+        elif top_seeds:
+            whitened_map, floor_c = _whiten_symbol_vectors(raw_ext_embs)
+            matched_keys = _match_chunks_to_symbol_keys(chunks, list(whitened_map.keys()))
+            npz_matched_cnt = sum(1 for mk in matched_keys if mk is not None)
+            raw_npz = [0.0] * m_len
+            denom_floor = max(0.15, 1.0 - floor_c)
+            for rank_s, s_idx in enumerate(top_seeds):
+                sk = matched_keys[s_idx]
+                if sk is None:
+                    continue
+                sv = whitened_map[sk]
+                decay = 1.0 / (1.0 + 0.22 * rank_s)
+                s_file = chunks[s_idx].get("file")
+                for j_idx in range(m_len):
+                    jk = matched_keys[j_idx]
+                    if (
+                        jk is None
+                        or j_idx == s_idx
+                        or f_test[j_idx] >= 0.5
+                        or _is_same_symbol_or_overlap(chunks[s_idx], chunks[j_idx])
+                    ):
+                        continue
+                    jv = whitened_map[jk]
+                    dot_w = sum(a * b for a, b in zip(sv, jv))
+                    cos_clean = max(0.0, (dot_w - floor_c) / denom_floor)
+                    if cos_clean <= 0.0:
+                        continue
+                    t2_damp = 0.45 if is_tier2_chunk[j_idx] else 1.0
+                    file_damp = 0.80 if chunks[j_idx].get("file") == s_file else 1.0
+                    cand_n = seeds[s_idx] * decay * cos_clean * file_damp * t2_damp
+                    if cand_n > raw_npz[j_idx]:
+                        raw_npz[j_idx] = cand_n
+            denom_npz = max(max(raw_npz, default=0.0), 0.45 * peak_seed, 1e-6)
+            for j_idx in range(m_len):
+                if matched_keys[j_idx] is not None and raw_npz[j_idx] > 0.0:
+                    f_5_npz_j = min(peak_seed, peak_seed * (raw_npz[j_idx] / denom_npz))
+                    npz_gain = 0.85 if max(f_bm25[j_idx], f_ident[j_idx], f_ast[j_idx], f_tb[j_idx]) >= 0.04 else 0.48
+                    f_emb[j_idx] = max(f_5_tfidf[j_idx], npz_gain * f_5_npz_j)
+
+    if out_stats is not None:
+        out_stats["external_graph_edges_matched"] = ext_edges_matched
+        out_stats["npz_symbols_matched"] = npz_matched_cnt
+        out_stats["top_seed_count"] = len(top_seeds)
+
+    matrix: List[List[float]] = []
+    for i in range(m_len):
+        matrix.append(
+            [
+                round(f_bm25[i], 6),
+                round(f_ident[i], 6),
+                round(f_ast[i], 6),
+                round(f_hop1[i], 6),
+                round(f_hop2_async[i], 6),
+                round(f_emb[i], 6),
+                round(f_test[i], 6),
+                round(f_tb[i], 6),
+            ]
+        )
+    return matrix
+
+
+def _platt_prob(raw_score: float, platt_t: float, platt_b: float) -> float:
+    temp = max(1e-4, float(platt_t))
+    z = max(-40.0, min(40.0, (float(raw_score) + float(platt_b)) / temp))
+    return 1.0 / (1.0 + math.exp(-z))
+
+
+def compute_channel_availability(
+    chunks: Sequence[Mapping[str, Any]],
+    feat_matrix: Sequence[Sequence[float]],
+) -> List[float]:
+    """
+    Compute smooth realized channel availability M_avail in [0, 1]^8 (F-12):
+    Prevents missing-sidecar / missing-traceback / symptom-only score starvation
+    identically across CUDA evolution, Platt/conformal calibration, CLI, and Container A.
+    """
+    m_len = len(chunks)
+    if m_len == 0 or not feat_matrix:
+        return [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+    nt = [i for i in range(m_len) if feat_matrix[i][6] < 0.5]
+    if not nt:
+        nt = list(range(m_len))
+
+    max_f1 = max((float(feat_matrix[i][1]) for i in nt), default=0.0)
+    max_f2 = max((float(feat_matrix[i][2]) for i in nt), default=0.0)
+    max_f3 = max((float(feat_matrix[i][3]) for i in nt), default=0.0)
+    max_f4 = max((float(feat_matrix[i][4]) for i in nt), default=0.0)
+    max_f5 = max((float(feat_matrix[i][5]) for i in nt), default=0.0)
+    max_f7 = max((float(feat_matrix[i][7]) for i in nt), default=0.0)
+    has_ast = any(bool(ch.get("_ast_meta")) for ch in chunks)
+
+    return [
+        1.0,
+        round(0.25 + 0.75 * min(1.0, max_f1), 6),
+        0.0 if not has_ast else round(0.25 + 0.75 * min(1.0, max_f2), 6),
+        1.0 if max_f3 > 1e-6 else (0.15 if has_ast else 0.0),
+        0.0 if not has_ast else (1.0 if max_f4 > 0.20 else (0.25 if max_f4 > 1e-6 else 0.0)),
+        1.0 if (m_len >= 2 and max_f5 > 1e-6) else 0.0,
+        1.0,
+        1.0 if max_f7 >= 0.70 else (0.50 if max_f7 >= 0.50 else 0.0),
+    ]
+
+
+def apply_active_simplex_weights(
+    weights: Sequence[float],
+    m_avail: Sequence[float],
+    gamma_max: float = 1.45,
+) -> List[float]:
+    """Renormalize positive simplex weights across realized channels with gain cap gamma_max."""
+    w = project_sieve_weights_simplex(weights)
+    pos_idxs = (0, 1, 2, 3, 4, 5, 7)
+    w_pos_total = sum(max(0.0, w[d]) for d in pos_idxs)
+    active_mass = sum(max(0.0, w[d]) * float(m_avail[d]) for d in pos_idxs)
+    scale = min(float(gamma_max), w_pos_total / max(active_mass, 1e-8)) if active_mass > 1e-8 else 1.0
+    return [
+        w[6] if d == 6 else (max(0.0, w[d]) * float(m_avail[d]) * scale)
+        for d in range(8)
+    ]
+
+
+def _chunk_total_est_tokens(ch: Mapping[str, Any]) -> int:
+    meta = ch.get("_ast_meta") or {}
+    skel = str(meta.get("skeleton_header") or "")
+    txt = str(ch.get("text") or "")
+    combined = f"{skel}\n{txt}" if (skel and skel not in txt) else txt
+    return max(1, int(round(_estimate_tokens(combined))))
+
+
+def _truncate_text_to_token_budget(text: str, budget_tokens: int) -> str:
+    if budget_tokens <= 0:
+        return ""
+    if int(round(_estimate_tokens(text))) <= budget_tokens:
+        return text
+    kept: List[str] = []
+    acc = 0.0
+    for ln in text.splitlines():
+        ln_t = _estimate_tokens(ln) + 0.3
+        if kept and (acc + ln_t) > float(budget_tokens):
+            break
+        if not kept and ln_t > float(budget_tokens):
+            char_cap = max(16, int(budget_tokens * 3.0))
+            kept.append(ln[:char_cap])
+            break
+        kept.append(ln)
+        acc += ln_t
+    return "\n".join(kept)
+
+
+def _auto_discover_sidecar_path(
+    sidecar_arg: Optional[Union[str, Path, Mapping[str, Any]]],
+    scan_root: Optional[Path],
+    suffix: str,
+) -> Optional[Union[str, Path, Mapping[str, Any]]]:
+    if sidecar_arg is None or isinstance(sidecar_arg, Mapping):
+        return sidecar_arg
+    s_str = str(sidecar_arg).strip()
+    if not s_str:
+        return None
+    sp = Path(s_str)
+    if sp.is_file():
+        return sp
+    if sp.is_dir():
+        cands = sorted(sp.glob(f"*{suffix}"))
+        if len(cands) == 1:
+            return cands[0]
+        if scan_root is not None and cands:
+            head_sha = ""
+            git_head = scan_root / ".git" / "HEAD"
+            if git_head.is_file():
+                with contextlib.suppress(Exception):
+                    htxt = git_head.read_text(encoding="utf-8", errors="ignore").strip()
+                    if len(htxt) >= 12 and not htxt.startswith("ref:"):
+                        head_sha = htxt[:16].lower()
+            rname = scan_root.name.lower()
+            for c in cands:
+                stem_l = c.stem.lower()
+                if (
+                    (head_sha and head_sha in stem_l)
+                    or stem_l == rname
+                    or rname.endswith(stem_l)
+                    or stem_l.startswith(rname.split("_")[0] + "_")
+                ):
+                    return c
+    return sidecar_arg
+
+
+def _select_sieve_slots(
+    chunks: Sequence[Dict[str, Any]],
+    feat_matrix: Sequence[Sequence[float]],
+    genome_cfg: Mapping[str, Any],
+    *,
+    agent_tier: str,
+    top_k: Optional[int] = None,
+    max_tokens: Optional[int] = None,
+    m_avail: Optional[Sequence[float]] = None,
+) -> Tuple[List[int], List[float], List[float], int]:
+    """Select ranked chunk indices under Conditional Residual Selection (UL-04), Span-IoU <= 0.30, and token wall."""
+    m_len = len(chunks)
+    if m_len == 0:
+        return [], [], [], 0
+
+    eff_m_avail = list(m_avail) if m_avail is not None else compute_channel_availability(chunks, feat_matrix)
+    gamma_max = float(genome_cfg.get("gamma_max", 1.45))
+    w_static = project_sieve_weights_simplex(genome_cfg["w_core"])
+    w_core = apply_active_simplex_weights(genome_cfg["w_core"], eff_m_avail, gamma_max=gamma_max)
+    raw_halo = genome_cfg.get("w_halo") or genome_cfg.get("w_residual") or genome_cfg["w_core"]
+    w_halo = apply_active_simplex_weights(raw_halo, eff_m_avail, gamma_max=gamma_max)
+
+    lam_div = max(
+        0.0,
+        float(genome_cfg.get("lambda_file_div", genome_cfg.get("diversity_lambda", 0.18))),
+    )
+    platt_t = max(1e-4, float(genome_cfg.get("platt_T", 0.11)))
+    platt_b = float(genome_cfg.get("platt_b", -0.24))
+    eff_top_k = int(top_k if top_k is not None and top_k > 0 else genome_cfg.get("top_k", 3))
+    eff_budget = int(
+        max_tokens if max_tokens is not None and max_tokens > 0 else genome_cfg.get("token_budget", 800)
+    )
+
+    core_scores = [
+        sum(feat_matrix[i][d] * w_core[d] for d in range(8)) for i in range(m_len)
+    ]
+    static_scores = [
+        sum(feat_matrix[i][d] * w_static[d] for d in range(8)) for i in range(m_len)
+    ]
+    halo_scores = [
+        sum(feat_matrix[i][d] * w_halo[d] for d in range(8)) for i in range(m_len)
+    ]
+    est_tokens = [_chunk_total_est_tokens(chunks[i]) for i in range(m_len)]
+
+    selected: List[int] = []
+    file_counts: Counter[str] = Counter()
+    used_tokens = 0
+    per_file_cap = 1 if eff_top_k <= 3 else 2
+    has_residual = agent_tier != "e4b-sniper" and (
+        "w_halo" in genome_cfg or "w_residual" in genome_cfg
+    )
+    anchor_slots = min(eff_top_k, int(genome_cfg.get("anchor_slots", 3))) if has_residual else eff_top_k
+    order_core = sorted(range(m_len), key=lambda idx: (-core_scores[idx], idx))
+
+    for ii in order_core:
+        if len(selected) >= anchor_slots:
+            break
+        f_key = str(chunks[ii].get("file", ""))
+        if file_counts[f_key] >= per_file_cap:
+            continue
+        if any(_span_iou(chunks[ii], chunks[prev_i]) > 0.30 for prev_i in selected):
+            continue
+        tk = est_tokens[ii]
+        if not selected and tk > eff_budget:
+            tk = eff_budget
+        elif (used_tokens + tk) > eff_budget:
+            continue
+        selected.append(ii)
+        file_counts[f_key] += 1
+        used_tokens += tk
+
+    if has_residual and len(selected) < eff_top_k:
+        anchor_file_set = set(file_counts.keys())
+        sel_set = set(selected)
+        while len(selected) < eff_top_k:
+            best_i = -1
+            best_adj = -1e9
+            for i in range(m_len):
+                if i in sel_set:
+                    continue
+                f_key = str(chunks[i].get("file", ""))
+                cnt = file_counts[f_key]
+                if cnt >= per_file_cap:
+                    continue
+                tk = est_tokens[i]
+                if (used_tokens + tk) > eff_budget:
+                    continue
+                if any(_span_iou(chunks[i], chunks[prev_i]) > 0.30 for prev_i in selected):
+                    continue
+                adj = halo_scores[i] - lam_div * float(cnt)
+                if f_key not in anchor_file_set and cnt == 0:
+                    adj += 0.045
+                if adj > best_adj:
+                    best_adj = adj
+                    best_i = i
+            if best_i < 0:
+                break
+            selected.append(best_i)
+            sel_set.add(best_i)
+            bf_key = str(chunks[best_i].get("file", ""))
+            file_counts[bf_key] += 1
+            used_tokens += est_tokens[best_i]
+
+    probs = [
+        _platt_prob(0.35 * core_scores[i] + 0.65 * static_scores[i], platt_t, platt_b)
+        for i in range(m_len)
+    ]
+    return selected, core_scores, probs, used_tokens
+
+
+def sieve_code_graph(
+    paths: Sequence[Union[str, Path]],
+    query: str,
+    *,
+    agent_tier: str = "e4b-sniper",
+    sieve_weights: Optional[Union[str, Path, Mapping[str, Any]]] = None,
+    genome_key: Optional[str] = None,
+    graph_path: Optional[Union[str, Path]] = None,
+    embeddings_path: Optional[Union[str, Path, Mapping[str, Any]]] = None,
+    top_k: Optional[int] = None,
+    max_tokens: Optional[int] = None,
+    max_chars: int = 1600,
+    max_chunks: int = 4096,
+    pattern: str = CODE_PATTERN,
+) -> Dict[str, Any]:
+    """Run zero-torch Stage 0+ AST & cross-regime matrix sieve with Slot-1 calibrated conformal abstention."""
+    t0 = time.perf_counter()
+    norm_tier = (agent_tier or "e4b-sniper").strip().lower()
+    if norm_tier == "auto":
+        norm_tier = "e4b-sniper"
+    if norm_tier not in ("e4b-sniper", "31b-deep"):
+        raise ValueError(f"Unsupported agent_tier {agent_tier!r}; expected 'e4b-sniper' or '31b-deep'.")
+
+    genomes_bundle, genome_source = load_sieve_genomes(sieve_weights)
+    if "w_core" in genomes_bundle:
+        active_key = "custom_inline"
+        genome_cfg = dict(genomes_bundle)
+    else:
+        if genome_key:
+            active_key = genome_key
+        else:
+            active_key = "31b_deep" if norm_tier == "31b-deep" else "e4b_sniper_distilled"
+        if active_key not in genomes_bundle:
+            raise ValueError(f"Genome key {active_key!r} not found in {list(genomes_bundle.keys())}.")
+        genome_cfg = dict(genomes_bundle[active_key])
+        if "gamma_max" not in genome_cfg and "gamma_max" in genomes_bundle:
+            genome_cfg["gamma_max"] = genomes_bundle["gamma_max"]
+
+    str_paths = [str(p) for p in paths]
+    files, scan_root = collect_target_files(str_paths, pattern=pattern)
+    files = _prerank_repo_files(files, scan_root, query)
+
+    eff_graph_path = _auto_discover_sidecar_path(graph_path, scan_root, ".json")
+    eff_emb_path = _auto_discover_sidecar_path(embeddings_path, scan_root, ".npz")
+
+    all_chunks: List[Dict[str, Any]] = []
+    large_repo = len(files) > 60
+    warm_cache = bool(files) and ((str(files[0]), max_chars, 0) in _AST_CHUNK_CACHE)
+    max_file_scan = (
+        (128 if len(files) > 150 else len(files))
+        if warm_cache
+        else (20 if len(files) > 55 else len(files))
+    )
+    for f_rank, fpath in enumerate(files[:max_file_scan]):
+        rel_pfx = _rel_ref_prefix(fpath, scan_root)
+        rem = max(0, max_chunks - len(all_chunks))
+        if rem <= 0:
+            break
+        per_f_lim = (
+            rem
+            if not large_repo
+            else min(rem, (48 if f_rank < 12 else 28) if warm_cache else 24)
+        )
+        f_chs = chunk_file(fpath, max_chars=max_chars, rel_prefix=rel_pfx, limit_hint=0)
+        all_chunks.extend(_select_file_top_chunks(f_chs, query, per_f_lim))
+        if len(all_chunks) >= max_chunks:
+            all_chunks = all_chunks[:max_chunks]
+            break
+
+    ext_stats: Dict[str, Any] = {}
+    feat_matrix = extract_code_graph_features(
+        all_chunks,
+        query,
+        graph_path=eff_graph_path if not isinstance(eff_graph_path, Mapping) else None,
+        embeddings_path=eff_emb_path,
+        out_stats=ext_stats,
+    )
+    m_avail = compute_channel_availability(all_chunks, feat_matrix)
+    eff_budget = int(
+        max_tokens if max_tokens is not None and max_tokens > 0 else genome_cfg.get("token_budget", 800)
+    )
+    sel_idxs, core_scores, probs, _raw_used = _select_sieve_slots(
+        all_chunks,
+        feat_matrix,
+        genome_cfg,
+        agent_tier=norm_tier,
+        top_k=top_k,
+        max_tokens=eff_budget,
+        m_avail=m_avail,
+    )
+
+    q_hat = float(genome_cfg.get("conformal_q_hat", 0.45))
+    top1_prob = probs[sel_idxs[0]] if sel_idxs else 0.0
+    max_prob = max((probs[i] for i in sel_idxs), default=0.0)
+    abstain = bool(top1_prob < (1.0 - q_hat))
+    route = "review" if abstain else "auto"
+
+    out_items: List[Dict[str, Any]] = []
+    running_tok = 0
+    for slot_pos, idx in enumerate(sel_idxs, start=1):
+        ch = all_chunks[idx]
+        meta = ch.get("_ast_meta") or {}
+        skel = str(meta.get("skeleton_header") or "")
+        raw_txt = str(ch.get("text") or "")
+        rendered = f"{skel}\n{raw_txt}" if (skel and skel not in raw_txt) else raw_txt
+        rem_budget = max(1, eff_budget - running_tok)
+        rendered_clamped = _truncate_text_to_token_budget(rendered, rem_budget)
+        slot_tok = min(rem_budget, max(1, int(round(_estimate_tokens(rendered_clamped)))))
+        running_tok += slot_tok
+        out_items.append(
+            {
+                "slot": slot_pos,
+                "role": "sniper_core" if (norm_tier == "e4b-sniper" or slot_pos <= 3) else "residual_halo",
+                "ref": ch["ref"],
+                "file": ch["file"],
+                "name": ch["name"],
+                "heading": ch["heading"],
+                "symbol": meta.get("symbol", ""),
+                "canonical_symbol": meta.get("canonical_symbol", meta.get("symbol", "")),
+                "node_kind": meta.get("node_kind", ""),
+                "skeleton_header": skel,
+                "start_line": ch["start_line"],
+                "end_line": ch["end_line"],
+                "sieve_score": round(core_scores[idx], 4),
+                "probability": round(probs[idx], 4),
+                "est_tokens": slot_tok,
+                "features": {
+                    SIEVE_FEATURE_NAMES[d]: round(feat_matrix[idx][d], 4) for d in range(8)
+                },
+            }
+        )
+
+    return {
+        "ok": True,
+        "meta": {
+            "version": __version__,
+            "engine": "xlaya-code-graph-sieve",
+            "agent_tier": norm_tier,
+            "genome_key": active_key,
+            "genome_source": genome_source,
+            "files_scanned": len(files),
+            "chunks_evaluated": len(all_chunks),
+            "selected_count": len(out_items),
+            "selected_tokens": running_tok,
+            "token_budget": eff_budget,
+            "top1_probability": round(top1_prob, 4),
+            "max_probability": round(max_prob, 4),
+            "conformal_q_hat": round(q_hat, 4),
+            "abstain": abstain,
+            "route": route,
+            "m_avail": [round(x, 4) for x in m_avail],
+            "external_graph_edges_matched": int(ext_stats.get("external_graph_edges_matched", 0)),
+            "npz_symbols_matched": int(ext_stats.get("npz_symbols_matched", 0)),
+            "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
+        },
+        "feature_names": list(SIEVE_FEATURE_NAMES),
+        "results": out_items,
+    }
+
+
+_TOOL_STOPWORDS = frozenset(
+    set(STOPWORDS)
+    | {
+        "you", "your", "please", "could", "would", "help", "need", "want", "looking",
+        "some", "tell", "use", "using", "optional", "required", "default", "parameter", "parameters",
+    }
+)
+_TOOL_GENERIC_VERBS = frozenset(
+    {
+        "find", "get", "fetch", "retrieve", "show", "give", "list", "search",
+        "check", "query", "obtain", "return", "calculate", "compute", "generate",
+        "create", "make", "perform", "run", "execute",
+    }
+)
+_TOOL_FRAMING_NOISE = frozenset(
+    {
+        "interested", "interest", "detail", "information", "info", "provide", "specify",
+        "assist", "assistance", "proceed", "latest", "current", "currently", "available",
+        "availability", "possible", "possibility", "check", "know", "like", "look",
+        "need", "want", "able", "can", "could", "would", "should", "please", "help",
+        "tell", "give", "show", "fetch", "retrieve", "get", "find", "search", "list",
+        "obtain", "calculate", "compute", "generate", "create", "make", "perform", "run",
+        "execute", "use", "base", "based", "data", "value", "result", "report", "status",
+        "summary", "overview", "specific", "certain", "particular", "any", "some", "more",
+        "about", "api", "tool", "function", "service", "system", "endpoint", "method",
+    }
+)
+_TOOL_NUMBER_WORDS = frozenset(
+    {"zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "dozen", "hundred"}
+)
+_TOOL_CAMEL_RE = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?=[A-Z][a-z]|\b)|\d+")
+_TOOL_NUM_RE = re.compile(r"(?<![A-Za-z])-?\d+(?:\.\d+)?(?![A-Za-z])")
+_TOOL_QUOTED_RE = re.compile(r"""['"]([^'"]{1,80})['"]""")
+_TOOL_LIST_LIT_RE = re.compile(r"\[[^\]\n]{1,160}\]")
+_TOOL_URL_DOMAIN_RE = re.compile(
+    r"\b(?:https?://\S+|\S+@\S+\.[A-Za-z]{2,}|[A-Za-z0-9-]+\.(?:com|org|net|io|gov|edu|co|uk|de|jp|ai|app))\b",
+    re.IGNORECASE,
+)
+_TOOL_ID_HEX_RE = re.compile(r"\b(?:[A-Za-z]+\d+[A-Za-z0-9_-]*|\d+[A-Za-z]+[A-Za-z0-9_-]*|[0-9a-f]{8,})\b")
+
+
+def _tool_stem(word: str) -> str:
+    if len(word) > 4 and word.endswith("ies"):
+        return word[:-3] + "y"
+    if len(word) > 5 and word.endswith("ing") and not word.endswith(("thing", "string", "ring", "king")):
+        base = word[:-3]
+        return base[:-1] if len(base) >= 4 and base[-1] == base[-2] else base
+    if len(word) > 5 and word.endswith(("ches", "shes", "xes", "zes", "sses")):
+        return word[:-2]
+    if len(word) > 3 and word.endswith("s") and not word.endswith(("ss", "us", "is")):
+        return word[:-1]
+    return word
+
+
+def _tool_split_tokens(text: str, *, strip_generic_verbs: bool = False) -> List[str]:
+    out: List[str] = []
+    raw_all: List[str] = []
+    for raw in re.findall(r"[A-Za-z0-9_]+", text):
+        low = raw.lower()
+        for sub in raw.split("_"):
+            if not sub:
+                continue
+            for p in _TOOL_CAMEL_RE.findall(sub):
+                pl = p.lower()
+                if len(pl) >= 2 and pl not in _TOOL_STOPWORDS:
+                    st = _tool_stem(pl)
+                    raw_all.append(st)
+                    if not (strip_generic_verbs and pl in _TOOL_GENERIC_VERBS):
+                        out.append(st)
+        if len(low) >= 3 and "_" not in low and low not in _TOOL_STOPWORDS:
+            st_low = _tool_stem(low)
+            if st_low not in raw_all:
+                raw_all.append(st_low)
+            if not (strip_generic_verbs and low in _TOOL_GENERIC_VERBS) and st_low not in out:
+                out.append(st_low)
+    return out if out else raw_all
+
+
+def extract_tool_call_features(
+    query: str,
+    tools: Sequence[Union[str, Mapping[str, Any]]],
+) -> Tuple[List[float], str]:
+    """
+    Extract 18D Sibling- & Schema-Invariant Causal 2-Stage Tool Conformal features (F-06 / Decision 4A):
+      - Stage 1 (Dims 0..6): Intrinsic per-tool intent relevance (`P(rel)`, invariant to sibling tool count)
+      - Stage 2 (Dims 7..17): Schema-invariant OpenAI/BFCL `parameters.required` + ToolBench `optional` slots
+    Returns `(features_18d, matched_tool_name)`.
+    """
+    parsed_tools: List[Mapping[str, Any]] = []
+    for item in tools or ():
+        obj: Any = item
+        if isinstance(item, str):
+            with contextlib.suppress(Exception):
+                obj = json.loads(item)
+        if isinstance(obj, Mapping):
+            fn = obj.get("function", obj)
+            if isinstance(fn, Mapping):
+                parsed_tools.append(fn)
+
+    if not parsed_tools or not query.strip():
+        return [0.0] * 18, ""
+
+    q_toks = _tool_split_tokens(query, strip_generic_verbs=True)
+    q_set = set(q_toks)
+    q_low = query.lower()
+    q_quotes = _TOOL_QUOTED_RE.findall(query)
+    q_lists = _TOOL_LIST_LIT_RE.findall(query)
+    q_urls = _TOOL_URL_DOMAIN_RE.findall(query)
+    query_unquoted = _TOOL_QUOTED_RE.sub(" ", _TOOL_LIST_LIT_RE.sub(" ", _TOOL_URL_DOMAIN_RE.sub(" ", query)))
+    q_unq_low = query_unquoted.lower()
+    q_nums = _TOOL_NUM_RE.findall(query_unquoted) + [
+        w for w in re.findall(r"\b[a-z]+\b", q_unq_low) if w in _TOOL_NUMBER_WORDS
+    ]
+    q_ids = _TOOL_ID_HEX_RE.findall(query_unquoted)
+    words_unq = re.findall(r"\b[A-Za-z][A-Za-z0-9.-]*\b", query_unquoted)
+    _scream_stop = (
+        _TOOL_STOPWORDS
+        | _TOOL_GENERIC_VERBS
+        | {
+            "now", "today", "here", "my", "me", "i", "api", "sdk", "url", "uri", "id",
+            "json", "xml", "html", "csv", "fasta", "genbank", "utc", "gmt", "http", "https",
+        }
+    )
+    # Group contiguous capitalized words into single proper-noun phrases
+    # (skipping sentence-initial word unless multi-word)
+    raw_proper_phrases: List[str] = []
+    for m_pr in re.finditer(r"\b[A-Z][A-Za-z0-9.-]*(?:\s+[A-Z][A-Za-z0-9.-]*)*\b", query_unquoted):
+        phrase = m_pr.group(0).strip()
+        p_words = phrase.split()
+        if m_pr.start() == 0 and len(p_words) == 1 and not (2 <= len(p_words[0]) <= 5 and p_words[0].isupper()):
+            continue
+        kept_w = [w for w in p_words if w.lower() not in _scream_stop]
+        if kept_w:
+            raw_proper_phrases.append(" ".join(kept_w))
+
+    q_tickers = [
+        w
+        for idx, w in enumerate(words_unq)
+        if w.lower() not in _scream_stop and 2 <= len(w) <= 5 and w.isupper() and (idx > 0 or len(w) >= 3)
+    ] + re.findall(r"\$([A-Za-z]{1,6})\b", query)
+
+    best_rank_sc = -1.0
+    best_feats: List[float] = [0.0] * 18
+    best_name = ""
+
+    for fn in parsed_tools:
+        nm = str(fn.get("name", ""))
+        leaf_flat = re.sub(r"[^a-z0-9]", "", nm.lower())
+        desc = str(fn.get("description", ""))
+        raw_params = fn.get("parameters") or fn.get("input_schema") or fn.get("arguments")
+        params = raw_params if isinstance(raw_params, Mapping) else {}
+        props = params.get("properties") if isinstance(params.get("properties"), Mapping) else {}
+
+        nm_toks = _tool_split_tokens(nm.replace(".", "_"), strip_generic_verbs=True)
+        desc_toks = _tool_split_tokens(f"{nm.replace('.', ' ')} {desc}", strip_generic_verbs=True)
+        prop_name_toks: List[str] = []
+        prop_toks: List[str] = []
+        for pk, pv in props.items():
+            pk_split = _tool_split_tokens(str(pk), strip_generic_verbs=True)
+            prop_name_toks.extend(pk_split)
+            prop_toks.extend(pk_split)
+            if isinstance(pv, Mapping):
+                prop_toks.extend(_tool_split_tokens(str(pv.get("description", "")), strip_generic_verbs=True))
+                for ev in (pv.get("enum") or ())[:12]:
+                    prop_toks.extend(_tool_split_tokens(str(ev)))
+
+        nm_set = set(nm_toks)
+        desc_set = set(desc_toks)
+        prop_name_set = set(prop_name_toks)
+        prop_set = set(prop_toks)
+        intent_set = nm_set | desc_set
+        full_set = intent_set | prop_set
+
+        compound_hits = {qt for qt in q_set if len(qt) >= 4 and leaf_flat and qt in leaf_flat}
+        nm_matched = (q_set & nm_set) | compound_hits
+        nm_denom = max(1, len(nm_set)) if nm_set else 1
+        nm_rec = min(1.0, len(nm_matched) / nm_denom) if (nm_set or compound_hits) else 0.0
+
+        q_denom = max(1, len(q_set))
+        q_cov_desc = min(1.0, len((q_set & intent_set) | compound_hits) / q_denom) if q_set else 0.0
+        q_cov_full = min(1.0, len((q_set & full_set) | compound_hits) / q_denom) if q_set else 0.0
+        sig_union = nm_set | prop_name_set
+        sig_cov = (
+            min(1.0, len((q_set & sig_union) | compound_hits) / max(1, len(sig_union)))
+            if sig_union
+            else q_cov_desc
+        )
+        prop_name_rec = (
+            min(1.0, len(q_set & prop_name_set) / max(1, len(prop_name_set)))
+            if prop_name_set
+            else nm_rec
+        )
+        harmonic_f1_intent = (2.0 * nm_rec * q_cov_full) / max(1e-6, nm_rec + q_cov_full)
+        rel_sc = (
+            0.30 * nm_rec
+            + 0.22 * q_cov_desc
+            + 0.18 * q_cov_full
+            + 0.15 * sig_cov
+            + 0.15 * harmonic_f1_intent
+        )
+
+        raw_req = params.get("required") if isinstance(params, Mapping) else None
+        if not isinstance(raw_req, list):
+            raw_req = fn.get("required")
+        req_list = raw_req if isinstance(raw_req, list) else None
+        has_toolbench_opt_tags = any(
+            isinstance(v, Mapping) and "optional" in str(v.get("type", "")).lower()
+            for v in props.values()
+        )
+        req_props: List[Tuple[str, str, str, Mapping[str, Any]]] = []
+        opt_props: List[Tuple[str, str, str, Mapping[str, Any]]] = []
+        for pk, pv in props.items():
+            pv_map = pv if isinstance(pv, Mapping) else {}
+            ptype = str(pv_map.get("type", "str")).lower()
+            pdesc_raw = str(pv_map.get("description", ""))
+            pdesc = pdesc_raw.lower()
+            if req_list is not None:
+                is_req = (pk in req_list) and ("optional" not in ptype)
+            elif has_toolbench_opt_tags:
+                is_req = ("optional" not in ptype) and ("optional" not in pdesc)
+            else:
+                is_req = False
+            if is_req:
+                req_props.append((str(pk), ptype, pdesc_raw, pv_map))
+            else:
+                opt_props.append((str(pk), ptype, pdesc_raw, pv_map))
+
+        opt_toks_all: set[str] = set()
+        opt_enums_low: set[str] = set()
+        opt_bound_nums = 0
+        opt_bound_quotes: set[str] = set()
+        for opk, _, opdesc_raw, opv in opt_props:
+            op_toks = _tool_split_tokens(opk)
+            opt_toks_all.update(op_toks)
+            for ev in (opv.get("enum") or ())[:16]:
+                opt_enums_low.add(str(ev).lower())
+            for dq in _TOOL_QUOTED_RE.findall(opdesc_raw):
+                if 1 <= len(dq.strip()) <= 32:
+                    opt_enums_low.add(dq.strip().lower())
+            for ost in set(op_toks) | {opk.lower()}:
+                if len(ost) >= 3:
+                    if re.search(rf"\b{re.escape(ost)}\b(?:\s+(?:of|is|to|=|:))?\s*-?\d+", q_unq_low) or re.search(
+                        rf"-?\d+(?:\.\d+)?%?\s+(?:\w+\s+)?{re.escape(ost)}\b", q_unq_low
+                    ):
+                        opt_bound_nums += 1
+                    for qt in q_quotes:
+                        qt_l = qt.lower()
+                        q_pat = (
+                            rf"(?:['\"]{re.escape(qt_l)}['\"]\s+(?:\w+\s+)?{re.escape(ost)}\b|"
+                            rf"\b{re.escape(ost)}\s+(?:is\s+|of\s+|=\s*)?['\"]{re.escape(qt_l)}['\"])"
+                        )
+                        if re.search(q_pat, q_low):
+                            opt_bound_quotes.add(qt_l)
+
+        eff_num_count = max(0, len(q_nums) - opt_bound_nums)
+        non_opt_quotes = [
+            qt
+            for qt in q_quotes
+            if qt.lower() not in opt_enums_low
+            and qt.lower() not in opt_bound_quotes
+            and not (set(_tool_split_tokens(qt)) <= opt_toks_all and opt_toks_all)
+        ]
+
+        # Exclude proper-noun phrases that merely repeat the tool/API/format schema names
+        schema_stems = nm_set | desc_set | prop_name_set | opt_toks_all | {_tool_stem(e) for e in opt_enums_low}
+        q_proper = [
+            ph
+            for ph in raw_proper_phrases
+            if not (set(_tool_split_tokens(ph)) <= schema_stems and bool(_tool_split_tokens(ph)))
+        ]
+
+        all_req_name_toks: set[str] = set()
+        for rpk, _, _, _ in req_props:
+            all_req_name_toks.update(_tool_split_tokens(rpk, strip_generic_verbs=True))
+
+        arg_value_toks = [
+            t
+            for t in q_toks
+            if t not in (nm_set | compound_hits)
+            and t not in _TOOL_FRAMING_NOISE
+            and t not in opt_toks_all
+            and t not in all_req_name_toks
+        ]
+        n_concrete_entities = (
+            eff_num_count + len(non_opt_quotes) + len(q_lists) + len(q_urls) + len(q_proper) + len(q_ids)
+        )
+
+        req_total = len(req_props)
+        req_filled = 0
+        missing_num_slot = 0
+        missing_id_url_slot = 0
+        param_concept_cov_sum = 0.0
+        n_num_req = 0
+
+        avail_nums = eff_num_count
+        avail_quotes = len(non_opt_quotes)
+        avail_proper = len(q_proper)
+        avail_coord_places = 2 * len(q_proper) + 2 * len(non_opt_quotes)
+        avail_ids = len(q_ids)
+        avail_urls = len(q_urls)
+        avail_lists = len(q_lists)
+        avail_tickers = len(q_tickers)
+        avail_arg_toks = len(arg_value_toks)
+
+        # Score concept overlap first and process concept-anchored slots before unanchored slots
+        scored_req_props: List[Tuple[float, int, str, str, str, Mapping[str, Any], float]] = []
+        for idx_rp, (pk, ptype, pdesc_raw, pv_map) in enumerate(req_props):
+            pk_toks = set(_tool_split_tokens(pk, strip_generic_verbs=True))
+            pd_toks = set(_tool_split_tokens(pdesc_raw.lower(), strip_generic_verbs=True))
+            p_all = pk_toks | pd_toks
+            c_cov = min(1.0, (len(q_set & p_all) / max(1, min(3, len(p_all))))) if p_all else 0.5
+            param_concept_cov_sum += c_cov
+            scored_req_props.append((-c_cov, idx_rp, pk, ptype, pdesc_raw, pv_map, c_cov))
+        scored_req_props.sort()
+
+        for _, _, pk, ptype, pdesc_raw, pv_map, c_cov in scored_req_props:
+            pk_low = pk.lower()
+            pdesc = pdesc_raw.lower()
+
+            wants_list = ("array" in ptype) or ("list" in ptype)
+            wants_num = (
+                any(k in ptype for k in ("int", "float", "number"))
+                and "str" not in ptype
+                and not wants_list
+            ) or pk_low in ("year", "age", "count", "limit", "page", "offset", "quantity")
+            is_url_email = (not wants_num) and any(
+                k in pk_low for k in ("url", "uri", "email", "domain", "website", "host", "endpoint")
+            )
+            is_coord = (not wants_num) and (
+                pk_low in ("coord", "coords", "coordinates", "lat", "lon", "lng", "latitude", "longitude")
+                or pk_low.endswith(("_lat", "_lon", "_lng"))
+            )
+            is_ticker = (not wants_num) and pk_low in ("ticker", "symbol", "stock_symbol", "ticker_symbol")
+            is_id_code = (
+                not wants_num
+                and not is_ticker
+                and (
+                    pk_low in ("id", "uuid", "mmsi", "isbn", "vin", "zipcode", "zip_code", "postal_code", "pincode")
+                    or pk_low.endswith(("_id", "_uuid"))
+                )
+            )
+
+            enum_vals = [str(ev).lower() for ev in (pv_map.get("enum") or ()) if str(ev).strip()]
+            if (
+                not enum_vals
+                and any(h in pdesc for h in ("one of:", "options are", "valid values are", "allowed values are"))
+                and not any(ex in pdesc for ex in ("e.g.", "for example", "such as", "format"))
+            ):
+                desc_qs = [q.strip().lower() for q in _TOOL_QUOTED_RE.findall(pdesc_raw) if 1 <= len(q.strip()) <= 24]
+                if 2 <= len(desc_qs) <= 10:
+                    enum_vals = desc_qs
+
+            slot_ok = False
+            if is_coord:
+                if avail_nums > 0:
+                    avail_nums -= 1
+                    slot_ok = True
+                elif avail_coord_places > 0:
+                    avail_coord_places -= 1
+                    slot_ok = True
+                else:
+                    missing_num_slot += 1
+            elif wants_num:
+                n_num_req += 1
+                if avail_nums > 0:
+                    avail_nums -= 1
+                    slot_ok = True
+                else:
+                    missing_num_slot += 1
+            elif is_url_email:
+                if avail_urls > 0:
+                    avail_urls -= 1
+                    slot_ok = True
+                elif avail_quotes > 0:
+                    avail_quotes -= 1
+                    slot_ok = True
+                elif avail_proper > 0:
+                    avail_proper -= 1
+                    slot_ok = True
+                else:
+                    missing_id_url_slot += 1
+            elif is_ticker:
+                if avail_tickers > 0:
+                    avail_tickers -= 1
+                    slot_ok = True
+                elif avail_quotes > 0:
+                    avail_quotes -= 1
+                    slot_ok = True
+                elif avail_ids > 0:
+                    avail_ids -= 1
+                    slot_ok = True
+                else:
+                    missing_id_url_slot += 1
+            elif is_id_code:
+                if avail_ids > 0:
+                    avail_ids -= 1
+                    slot_ok = True
+                elif avail_nums > 0:
+                    avail_nums -= 1
+                    slot_ok = True
+                elif avail_quotes > 0:
+                    avail_quotes -= 1
+                    slot_ok = True
+                elif avail_tickers > 0:
+                    avail_tickers -= 1
+                    slot_ok = True
+                else:
+                    missing_id_url_slot += 1
+            elif enum_vals:
+                if any(
+                    ev in q_low or (bool(_tool_split_tokens(ev)) and set(_tool_split_tokens(ev)) <= q_set)
+                    for ev in enum_vals
+                ):
+                    slot_ok = True
+                elif avail_quotes > 0:
+                    avail_quotes -= 1
+                    slot_ok = True
+                else:
+                    missing_id_url_slot += 1
+            elif wants_list:
+                if avail_lists > 0:
+                    avail_lists -= 1
+                    slot_ok = True
+                elif (
+                    avail_quotes >= 1
+                    or avail_proper >= 2
+                    or avail_nums >= 2
+                    or "," in query_unquoted
+                    or " and " in q_unq_low
+                ):
+                    if avail_quotes > 0:
+                        avail_quotes -= 1
+                    slot_ok = True
+                else:
+                    missing_num_slot += 1
+            else:
+                if avail_quotes > 0:
+                    avail_quotes -= 1
+                    slot_ok = True
+                elif avail_proper > 0:
+                    avail_proper -= 1
+                    slot_ok = True
+                elif avail_urls > 0:
+                    avail_urls -= 1
+                    slot_ok = True
+                elif avail_ids > 0:
+                    avail_ids -= 1
+                    slot_ok = True
+                elif avail_lists > 0:
+                    avail_lists -= 1
+                    slot_ok = True
+                elif avail_nums > 0:
+                    avail_nums -= 1
+                    slot_ok = True
+                elif c_cov >= 0.34 and avail_arg_toks >= 2 and n_concrete_entities >= max(0, req_total - 1):
+                    avail_arg_toks -= 2
+                    slot_ok = True
+            if slot_ok:
+                req_filled += 1
+
+        req_cov = (req_filled / req_total) if req_total > 0 else 1.0
+        unfilled_ratio = ((req_total - req_filled) / req_total) if req_total > 0 else 0.0
+        unfilled_count_norm = min(1.0, max(0, req_total - req_filled) / 3.0)
+        mean_param_cov = (param_concept_cov_sum / req_total) if req_total > 0 else 1.0
+        num_deficit = max(0, n_num_req - eff_num_count)
+        entity_per_req = min(1.0, n_concrete_entities / max(1, req_total)) if req_total > 0 else 1.0
+        concrete_val_cov = (
+            min(1.0, (n_concrete_entities + 0.35 * len(arg_value_toks)) / max(1, req_total))
+            if req_total > 0
+            else 1.0
+        )
+        entity_deficit_flag = (
+            1.0
+            if (req_total > 0 and (n_concrete_entities < req_total or req_cov < 1.0))
+            else 0.0
+        )
+
+        joint_rel_slot_harmony = harmonic_f1_intent * (0.40 + 0.60 * mean_param_cov)
+        cand_feats = [
+            round(nm_rec, 6),  # 0 (+1)
+            round(q_cov_desc, 6),  # 1 (+1)
+            round(q_cov_full, 6),  # 2 (+1)
+            round(sig_cov, 6),  # 3 (+1)
+            round(prop_name_rec, 6),  # 4 (+1)
+            round(harmonic_f1_intent, 6),  # 5 (+1)
+            round(joint_rel_slot_harmony, 6),  # 6 (+1)
+            1.0 if req_total == 0 else 0.0,  # 7 (+1): zero_req_invariant
+            round(req_cov, 6),  # 8 (+1)
+            round(unfilled_ratio, 6),  # 9 (-1)
+            round(unfilled_count_norm, 6),  # 10 (-1)
+            1.0 if missing_num_slot > 0 else 0.0,  # 11 (-1)
+            1.0 if missing_id_url_slot > 0 else 0.0,  # 12 (-1)
+            round(entity_per_req, 6),  # 13 (+1)
+            round(mean_param_cov, 6),  # 14 (+1)
+            round(concrete_val_cov, 6),  # 15 (+1)
+            round(min(1.0, num_deficit / 2.0), 6),  # 16 (-1)
+            entity_deficit_flag,  # 17 (-1)
+        ]
+        rank_sc = rel_sc + 0.22 * req_cov * min(1.0, rel_sc / 0.25)
+        if rank_sc > best_rank_sc:
+            best_rank_sc = rank_sc
+            best_feats = cand_feats
+            best_name = nm
+
+    return best_feats, best_name
+
+
+def triage_tool_call(
+    query: str,
+    tools: Sequence[Union[str, Mapping[str, Any]]],
+    *,
+    sieve_weights: Optional[Union[str, Path, Mapping[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """
+    Execute the zero-torch Factorized 2-Stage Tool-Schema Conformal Gate (`When2Call` / MCP tool routing):
+      - Stage 1: `p_rel = P(relevant_tool_exists | f[0..6])`
+      - Stage 2: `p_slots = P(required_slots_satisfied | f[7..17], rel)` (causal floor when `req_total == 0`)
+      - Exact Bayes Chain Rule: `P(tool_call) = p_rel * p_slots`,
+        `P(cannot_answer) = 1 - p_rel`, `P(rfi) = p_rel * (1 - p_slots)`
+    """
+    t0 = time.perf_counter()
+    feats, matched_tool = extract_tool_call_features(query, tools)
+    if not matched_tool or not query.strip():
+        return {
+            "ok": True,
+            "decision": "cannot_answer",
+            "abstain": True,
+            "route": "review",
+            "matched_tool": "",
+            "tool_probability": 0.0,
+            "class_probabilities": {"tool_call": 0.0, "cannot_answer": 1.0, "request_for_info": 0.0},
+            "conformal_q_hat": 0.50,
+            "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 3),
+        }
+
+    bundle, source = load_sieve_genomes(sieve_weights)
+    gate_cfg = bundle.get("tool_gate") if isinstance(bundle.get("tool_gate"), Mapping) else {}
+    tau_tool = float(gate_cfg.get("tau_tool_call", 0.50))
+
+    if gate_cfg.get("schema") == "factorized_2stage_v23" and "rel_w1" in gate_cfg and "slot_w1" in gate_cfg:
+        f_rel = feats[:7]
+        rw1, rb1 = gate_cfg["rel_w1"], gate_cfg["rel_b1"]
+        rw2, rb2 = gate_cfg["rel_w2"], float(gate_cfg["rel_b2"])
+        t_rel = max(0.05, float(gate_cfg.get("temp_rel", 1.0)))
+        h_rel = [
+            math.tanh(sum(float(rw1[h][d]) * f_rel[d] for d in range(len(f_rel))) + float(rb1[h]))
+            for h in range(len(rb1))
+        ]
+        z_rel = (sum(float(rw2[h]) * h_rel[h] for h in range(len(h_rel))) + rb2) / t_rel
+        p_rel = 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z_rel))))
+
+        f_slot = feats[7:]
+        sw1, sb1 = gate_cfg["slot_w1"], gate_cfg["slot_b1"]
+        sw2, sb2 = gate_cfg["slot_w2"], float(gate_cfg["slot_b2"])
+        t_slot = max(0.05, float(gate_cfg.get("temp_slot", 1.0)))
+        h_slot = [
+            math.tanh(sum(float(sw1[h][d]) * f_slot[d] for d in range(len(f_slot))) + float(sb1[h]))
+            for h in range(len(sb1))
+        ]
+        z_slot = (sum(float(sw2[h]) * h_slot[h] for h in range(len(h_slot))) + sb2) / t_slot
+        p_slots = 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z_slot))))
+
+        p_tool = p_rel * p_slots
+        p_cannot = 1.0 - p_rel
+        p_rfi = p_rel * (1.0 - p_slots)
+    else:
+        rel_z = 2.3 * feats[0] + 2.2 * feats[1] + 1.5 * feats[2] + 1.3 * feats[4] + 1.4 * feats[5] - 1.45
+        p_rel = 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, rel_z))))
+        if feats[7] >= 0.5:
+            p_slots = 0.94
+        else:
+            slot_z = (
+                2.5 * feats[8]
+                - 1.8 * feats[9]
+                - 2.0 * feats[11]
+                - 1.8 * feats[12]
+                + 1.2 * feats[13]
+                + 1.0 * feats[14]
+                - 1.5 * feats[16]
+                - 1.3 * feats[17]
+                - 0.85
+            )
+            p_slots = 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, slot_z))))
+        p_tool = p_rel * p_slots
+        p_cannot = 1.0 - p_rel
+        p_rfi = p_rel * (1.0 - p_slots)
+    abstain = bool(p_tool < tau_tool)
+    if not abstain:
+        decision = "tool_call"
+    else:
+        decision = "cannot_answer" if p_cannot >= p_rfi else "request_for_info"
+
+    return {
+        "ok": True,
+        "decision": decision,
+        "abstain": abstain,
+        "route": "review" if abstain else "auto",
+        "matched_tool": matched_tool,
+        "tool_probability": round(p_tool, 4),
+        "class_probabilities": {
+            "tool_call": round(p_tool, 4),
+            "cannot_answer": round(p_cannot, 4),
+            "request_for_info": round(p_rfi, 4),
+        },
+        "conformal_q_hat": round(1.0 - tau_tool, 4),
+        "genome_source": source,
+        "features": feats,
+        "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 3),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2596,6 +5681,9 @@ def run_triage(
     noul_labels: str = "",
     lang: str = "auto",
     device: str = "auto",
+    profile: str = "auto",
+    agent_tier: str = "auto",
+    sieve_weights: Optional[Union[str, Path, Mapping[str, Any]]] = None,
     max_chars: int = 1600,
     whole_file: bool = False,
     max_chunks: int = 2048,
@@ -2631,7 +5719,21 @@ def run_triage(
             f"Unsupported rubric_preset {rubric_preset!r}; expected one of {sorted(RUBRIC_PRESETS)}."
         )
 
+    hw = _resolve_hardware_profile(profile=profile, agent_tier=agent_tier, device=device)
     eff_views = max(1, min(3, int(views)))
+    if hw["profile"] == "max" and vega and int(views) == 1:
+        eff_views = 3
+        vega_top_k = max(vega_top_k, 20)
+        if batch_size == 32:
+            batch_size = 64
+    elif hw["profile"] == "edge":
+        vega = False
+        batch_size = min(batch_size, hw["batch_size_cap"])
+        if lang == "ensemble":
+            lang = "typed"
+    elif hw["profile"] == "nano":
+        vega = False
+
     if thorough:
         max_chunks = max(max_chunks, 4096)
         lexical_prefilter = 0
@@ -2639,12 +5741,33 @@ def run_triage(
     noul_label_map = parse_noul_labels(noul_labels)
     labels_dict = parse_label_spec(labels_spec)
 
-    files, scan_root = collect_target_files(paths, pattern=pattern)
+    has_sieve_arg = sieve_weights is not None and (
+        isinstance(sieve_weights, Mapping) or bool(str(sieve_weights).strip())
+    )
+    eff_pattern = pattern
+    if pattern == DEFAULT_PATTERN and (
+        hw["agent_tier_explicit"]
+        or hw["profile"] == "nano"
+        or mode == "shortlist"
+        or rubric_preset == "code_audit"
+        or has_sieve_arg
+    ):
+        eff_pattern = CODE_PATTERN
+
+    files, scan_root = collect_target_files(paths, pattern=eff_pattern)
+    if not files and pattern == DEFAULT_PATTERN and eff_pattern != CODE_PATTERN:
+        eff_pattern = CODE_PATTERN
+        files, scan_root = collect_target_files(paths, pattern=eff_pattern)
+    if mode == "shortlist" and query.strip() and files:
+        files = _prerank_repo_files(files, scan_root, query)
+
     if not files:
         return {
             "ok": True,
             "meta": {
                 "version": __version__,
+                "profile": hw["profile"],
+                "agent_tier": hw["agent_tier"],
                 "mode": mode,
                 "thorough": thorough,
                 "rubric_preset": rubric_preset if mode == "rubric" else None,
@@ -2689,6 +5812,8 @@ def run_triage(
             "ok": True,
             "meta": {
                 "version": __version__,
+                "profile": hw["profile"],
+                "agent_tier": hw["agent_tier"],
                 "mode": mode,
                 "thorough": thorough,
                 "rubric_preset": rubric_preset if mode == "rubric" else None,
@@ -2717,8 +5842,16 @@ def run_triage(
         ranked_indices.sort()
         all_chunks = [all_chunks[i] for i in ranked_indices]
 
-    laya_ok, laya_ver = _pkg_version("laya", "laya")
-    resolved_device = _resolve_device(device) if laya_ok else "cpu"
+    if hw["stage0_only"]:
+        laya_ok, laya_ver = False, None
+        resolved_device = "cpu"
+    else:
+        laya_ok, laya_ver = _pkg_version("laya", "laya")
+        resolved_device = (
+            hw["device"]
+            if (hw["profile_explicit"] and (device or "auto").strip().lower() in ("", "auto"))
+            else (_resolve_device(device) if laya_ok else "cpu")
+        )
 
     questions = _build_mode_questions(
         mode=mode,
@@ -2733,7 +5866,75 @@ def run_triage(
     )
 
     if not laya_ok:
-        enriched = fallback_evaluate(all_chunks, mode, query, ssot, labels_dict, threshold=threshold)
+        sieve_meta_extra: Dict[str, Any] = {}
+        if mode == "shortlist":
+            genomes_bundle, g_src = load_sieve_genomes(sieve_weights)
+            g_key = "31b_deep" if hw["agent_tier"] == "31b-deep" else "e4b_sniper_distilled"
+            g_cfg = dict(genomes_bundle if "w_core" in genomes_bundle else genomes_bundle[g_key])
+            if "gamma_max" not in g_cfg and isinstance(genomes_bundle, Mapping) and "gamma_max" in genomes_bundle:
+                g_cfg["gamma_max"] = genomes_bundle["gamma_max"]
+            feat_mat = extract_code_graph_features(all_chunks, query)
+            m_avail = compute_channel_availability(all_chunks, feat_mat)
+            sel_top = top_k if (top_k is not None and top_k > 0) else (
+                hw["default_top_k"] if (hw["agent_tier_explicit"] or hw["profile"] == "nano") else 10
+            )
+            sel_bud = hw["token_budget"] if (hw["agent_tier_explicit"] or hw["profile"] == "nano") else 100000
+            sel_idxs, core_sc, probs, used_tok = _select_sieve_slots(
+                all_chunks,
+                feat_mat,
+                g_cfg,
+                agent_tier=hw["agent_tier"],
+                top_k=sel_top,
+                max_tokens=sel_bud,
+                m_avail=m_avail,
+            )
+            q_hat = float(g_cfg.get("conformal_q_hat", 0.45))
+            top1_prob = probs[sel_idxs[0]] if sel_idxs else 0.0
+            max_prob = max((probs[i] for i in sel_idxs), default=0.0)
+            abstain = bool(top1_prob < (1.0 - q_hat))
+            sieve_meta_extra = {
+                "top1_probability": round(top1_prob, 4),
+                "max_probability": round(max_prob, 4),
+                "conformal_q_hat": round(q_hat, 4),
+                "abstain": abstain,
+                "route": "review" if abstain else "auto",
+                "m_avail": [round(x, 4) for x in m_avail],
+            }
+            sel_rank = {idx: pos for pos, idx in enumerate(sel_idxs)}
+            enriched = []
+            ordered_all = list(sel_idxs) + [i for i in range(len(all_chunks)) if i not in sel_rank]
+            for i in ordered_all:
+                ch = all_chunks[i]
+                pr_val = round(probs[i], 4)
+                exp_sc = round(4.0 * pr_val, 4)
+                item = dict(ch)
+                item.update(
+                    {
+                        "engine": "xlaya-nano-sieve" if hw["profile"] == "nano" else "pure-python-fallback",
+                        "score": exp_sc,
+                        "expected_score": exp_sc,
+                        "sieve_score": round(core_sc[i], 4),
+                        "hybrid_score": round(
+                            (1.0 + 0.01 * (len(sel_idxs) - sel_rank[i])) * pr_val
+                            if i in sel_rank
+                            else 0.5 * pr_val,
+                            4,
+                        ),
+                        "noul": 0.0,
+                        "confidence": pr_val,
+                        "selected_slot": (sel_rank[i] + 1) if i in sel_rank else None,
+                    }
+                )
+                enriched.append(item)
+            if hw["agent_tier_explicit"] or hw["profile"] == "nano":
+                top_k = len(sel_idxs)
+        else:
+            enriched = fallback_evaluate(all_chunks, mode, query, ssot, labels_dict, threshold=threshold)
+            if hw["profile"] == "nano":
+                for item in enriched:
+                    item["engine"] = "xlaya-nano-sieve"
+            g_src = "stage0_fallback"
+            used_tok = sum(max(1, int(round(_estimate_tokens(c["text"])))) for c in all_chunks[:10])
         if thorough and mode == "rubric":
             for item in enriched:
                 base_sc = float(item.get("expected_score", item.get("score", 2.0)))
@@ -2744,10 +5945,14 @@ def run_triage(
                 item["composite_score"] = round(base_sc, 4)
         meta: Dict[str, Any] = {
             "version": __version__,
+            "profile": hw["profile"],
+            "agent_tier": hw["agent_tier"],
+            "genome_source": g_src,
+            "selected_tokens": used_tok,
             "laya_available": False,
             "laya_version": None,
-            "model": "pure-python-fallback",
-            "language_route": "fallback",
+            "model": "xlaya-nano-sieve" if hw["profile"] == "nano" else "pure-python-fallback",
+            "language_route": "nano" if hw["profile"] == "nano" else "fallback",
             "language_routing": {
                 "english": 0,
                 "multilingual": 0,
@@ -2764,6 +5969,7 @@ def run_triage(
             "truncated_chunks": truncated_chunks,
             "vega_escalated": 0,
         }
+        meta.update(sieve_meta_extra)
         if prefiltered_from is not None:
             meta["lexical_prefiltered_from"] = prefiltered_from
     else:
@@ -2787,7 +5993,9 @@ def run_triage(
                 ens_ml_idxs = list(range(len(all_chunks)))
             else:
                 for idx, ch in enumerate(all_chunks):
-                    if _is_english_text(ch["text"]):
+                    is_py = str(ch.get("name", "")).lower().endswith((".py", ".pyi"))
+                    is_en_ch = (not NON_ENGLISH_SCRIPT_RE.search(ch["text"])) if is_py else _is_english_text(ch["text"])
+                    if is_en_ch:
                         ens_en_idxs.append(idx)
                     else:
                         ens_ml_idxs.append(idx)
@@ -2795,7 +6003,9 @@ def run_triage(
             ml_idxs = list(range(len(all_chunks)))
         else:
             for idx, ch in enumerate(all_chunks):
-                if _is_english_text(ch["text"]):
+                is_py = str(ch.get("name", "")).lower().endswith((".py", ".pyi"))
+                is_en_ch = (not NON_ENGLISH_SCRIPT_RE.search(ch["text"])) if is_py else _is_english_text(ch["text"])
+                if is_en_ch:
                     en_idxs.append(idx)
                 else:
                     ml_idxs.append(idx)
@@ -3025,6 +6235,8 @@ def run_triage(
             )
         meta = {
             "version": __version__,
+            "profile": hw["profile"],
+            "agent_tier": hw["agent_tier"],
             "laya_available": True,
             "laya_version": laya_ver,
             "model": model_summary,
@@ -3048,10 +6260,54 @@ def run_triage(
         if prefiltered_from is not None:
             meta["lexical_prefiltered_from"] = prefiltered_from
 
-    # Mode-specific sorting
+        if mode == "shortlist" and (hw["agent_tier_explicit"] or has_sieve_arg):
+            genomes_bundle, g_src = load_sieve_genomes(sieve_weights)
+            g_key = "31b_deep" if hw["agent_tier"] == "31b-deep" else "e4b_sniper_distilled"
+            g_cfg = genomes_bundle if "w_core" in genomes_bundle else genomes_bundle[g_key]
+            feat_mat = extract_code_graph_features(all_chunks, query)
+            sel_top = top_k if (top_k is not None and top_k > 0) else hw["default_top_k"]
+            sel_idxs, core_sc, probs, used_tok = _select_sieve_slots(
+                all_chunks,
+                feat_mat,
+                g_cfg,
+                agent_tier=hw["agent_tier"],
+                top_k=sel_top,
+                max_tokens=hw["token_budget"],
+            )
+            q_hat = float(g_cfg.get("conformal_q_hat", 0.15))
+            max_prob = max((probs[i] for i in sel_idxs), default=0.0)
+            abstain = bool(max_prob < (1.0 - q_hat))
+            sel_rank = {idx: pos for pos, idx in enumerate(sel_idxs)}
+            for idx_e, item in enumerate(enriched):
+                pr_v = probs[idx_e]
+                exp_v = float(item.get("expected_score", 0.0))
+                item["sieve_score"] = round(core_sc[idx_e], 4)
+                item["sieve_probability"] = round(pr_v, 4)
+                base_hyb = 0.55 * (exp_v / 4.0) + 0.45 * pr_v
+                if idx_e in sel_rank:
+                    item["selected_slot"] = sel_rank[idx_e] + 1
+                    item["hybrid_score"] = round(base_hyb + 0.25 - 0.005 * sel_rank[idx_e], 4)
+                else:
+                    item["selected_slot"] = None
+                    item["hybrid_score"] = round(0.5 * base_hyb, 4)
+            meta["genome_source"] = g_src
+            meta["selected_tokens"] = used_tok
+            meta["max_probability"] = round(max_prob, 4)
+            meta["conformal_q_hat"] = round(q_hat, 4)
+            meta["abstain"] = abstain
+            meta["route"] = "review" if abstain else "auto"
+            if top_k is None or hw["agent_tier_explicit"]:
+                top_k = len(sel_idxs)
+
+    # Mode-specific sorting (preserve selected_slot order strictly above non-selected items)
     if mode == "shortlist":
         enriched.sort(
-            key=lambda r: (r.get("hybrid_score", 0.0), r.get("expected_score", 0.0)),
+            key=lambda r: (
+                1 if r.get("selected_slot") is not None else 0,
+                -(int(r["selected_slot"]) if r.get("selected_slot") is not None else 999999),
+                r.get("hybrid_score", 0.0),
+                r.get("expected_score", 0.0),
+            ),
             reverse=True,
         )
     elif mode == "contradiction":
@@ -3069,7 +6325,7 @@ def run_triage(
         )
 
     # Stage 2: Opt-in VegaML Conformal Escalation
-    if vega and laya_ok:
+    if vega and laya_ok and hw["vega_allowed"]:
         finalist_idxs = _select_vega_finalists(
             results=enriched,
             mode=mode,
@@ -3121,7 +6377,7 @@ def run_triage(
         selected = enriched[:eff_top_k] if eff_top_k > 0 else enriched
 
     clean_results = [
-        {k: v for k, v in item.items() if k not in ("text", "_full_text")}
+        {k: v for k, v in item.items() if k not in ("text", "_full_text", "_ast_meta")}
         for item in selected
     ]
     meta["results_returned"] = len(clean_results)
@@ -3434,6 +6690,146 @@ def run_self_test() -> Dict[str, Any]:
                     "view_agreement": v_ans["view_agreement"],
                 }
 
+        # 11. v2.2.0 Pure-Python AST Code-Graph Sieve & Profile/Tier Gate (always runs, 0 torch needed)
+        code_dir = tmp_dir / "mini_repo"
+        (code_dir / "security").mkdir(parents=True, exist_ok=True)
+        (code_dir / "routers").mkdir(parents=True, exist_ok=True)
+        (code_dir / "tests").mkdir(parents=True, exist_ok=True)
+        (code_dir / "security" / "oauth.py").write_text(
+            "def decode_jwt_token(raw_token: str) -> dict:\n"
+            "    if not raw_token or '.' not in raw_token:\n"
+            "        raise ValueError('MalformedBearerTokenError: missing JWT segments')\n"
+            "    return {'sub': raw_token.split('.')[0]}\n\n"
+            "async def verify_current_user(token: str) -> dict:\n"
+            "    return decode_jwt_token(token)\n",
+            encoding="utf-8",
+        )
+        (code_dir / "routers" / "users.py").write_text(
+            "from security.oauth import verify_current_user\n\n"
+            "def Depends(dep):\n"
+            "    return dep\n\n"
+            "async def get_profile_endpoint(user: dict = Depends(verify_current_user)) -> dict:\n"
+            "    return {'profile': user}\n",
+            encoding="utf-8",
+        )
+        (code_dir / "tests" / "test_oauth.py").write_text(
+            "from security.oauth import decode_jwt_token\n\n"
+            "def test_decode_jwt_token_malformed():\n"
+            "    # Mentions MalformedBearerTokenError and get_profile_endpoint in test fixture\n"
+            "    assert decode_jwt_token('alice.sig')['sub'] == 'alice'\n",
+            encoding="utf-8",
+        )
+        (code_dir / "unrelated_billing.py").write_text(
+            "def compute_invoice_vat(subtotal: float) -> float:\n"
+            "    return round(subtotal * 0.07, 2)\n",
+            encoding="utf-8",
+        )
+
+        sieve_q = (
+            "Traceback in get_profile_endpoint: MalformedBearerTokenError raised during "
+            "Depends(verify_current_user) token validation"
+        )
+        nano_triage = run_triage(
+            [str(code_dir)],
+            mode="shortlist",
+            query=sieve_q,
+            profile="nano",
+            agent_tier="e4b-sniper",
+            top_k=4,
+        )
+        assert nano_triage["meta"]["profile"] == "nano", nano_triage["meta"]
+        assert nano_triage["meta"]["agent_tier"] == "e4b-sniper", nano_triage["meta"]
+        assert nano_triage["meta"]["files_scanned"] == 4, nano_triage["meta"]
+        assert "abstain" in nano_triage["meta"] and nano_triage["meta"]["route"] in ("auto", "review")
+        top_files = [r["file"] for r in nano_triage["results"][:2]]
+        assert any("oauth.py" in f for f in top_files) and any("users.py" in f for f in top_files), top_files
+
+        mm_blocked = False
+        try:
+            predict_direct(questions={"q": {"type": "noul", "instructions": "x"}}, image="dummy.png", profile="nano")
+        except ValueError:
+            mm_blocked = True
+        assert mm_blocked, "predict_direct(..., profile='nano', image=...) must reject multimodal without torch"
+
+        nano_pred = predict_direct(
+            state="Raised MalformedBearerTokenError in decode_jwt_token when bearer header was empty.",
+            questions={
+                "kind": {
+                    "type": "choice",
+                    "instructions": "Classify the software defect category.",
+                    "criteria": {
+                        "auth_bug": "JWT bearer token authentication validation failure",
+                        "billing": "Invoice VAT tax rounding calculation",
+                    },
+                },
+                "sev": {
+                    "type": "score",
+                    "instructions": "Score relevance to authentication token validation.",
+                },
+                "has_err": {
+                    "type": "noul",
+                    "instructions": "Does this report mention MalformedBearerTokenError?",
+                },
+            },
+            profile="nano",
+        )
+        assert nano_pred["ok"] is True and nano_pred["profile"] == "nano", nano_pred
+        assert nano_pred["result"]["answers"]["kind"]["choice"] == "auth_bug", nano_pred
+        assert nano_pred["result"]["answers"]["has_err"]["noul"] > 0.5, nano_pred
+
+        proj_w = project_sieve_weights_simplex([0.4, 0.3, 0.2, 0.2, 0.1, 0.1, 0.5, 0.2])
+        assert proj_w[6] <= 0.0 and abs(sum(abs(x) for x in proj_w) - 1.0) <= 1e-4, proj_w
+        checks["v22_profiles_and_code_sieve"] = {
+            "nano_top2_files": top_files,
+            "nano_choice": nano_pred["result"]["answers"]["kind"]["choice"],
+            "nano_multimodal_guarded": mm_blocked,
+            "simplex_l1": round(sum(abs(x) for x in proj_w), 6),
+        }
+
+        # 12. v2.3.0 Cross-Regime Sieve, Skeleton Header, Token Wall & 2-Stage Tool Gate
+        sieve_r2 = sieve_code_graph([str(code_dir)], sieve_q, agent_tier="e4b-sniper")
+        assert sieve_r2["ok"] is True and sieve_r2["meta"]["selected_tokens"] <= 800, sieve_r2["meta"]
+        assert len(sieve_r2["meta"]["m_avail"]) == 8, sieve_r2["meta"]
+        tc_hit = triage_tool_call(
+            "Convert RGB color code 255, 0, 0 to CMYK.",
+            [
+                {
+                    "name": "rgb_to_cmyk",
+                    "description": "Converts an RGB color code to CMYK.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "r": {"type": "int", "description": "Red component (0-255)"},
+                            "g": {"type": "int", "description": "Green component (0-255)"},
+                            "b": {"type": "int", "description": "Blue component (0-255)"},
+                        },
+                        "required": ["r", "g", "b"],
+                    },
+                }
+            ],
+        )
+        tc_miss = triage_tool_call(
+            "What is the capital of France?",
+            [
+                {
+                    "name": "rgb_to_cmyk",
+                    "description": "Converts an RGB color code to CMYK.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"r": {"type": "int"}},
+                        "required": ["r"],
+                    },
+                }
+            ],
+        )
+        assert tc_hit["abstain"] is False and tc_hit["decision"] == "tool_call", tc_hit
+        assert tc_miss["abstain"] is True and tc_miss["decision"] in ("cannot_answer", "request_for_info"), tc_miss
+        checks["v23_cross_regime_and_tool_gate"] = {
+            "sieve_selected_tokens": sieve_r2["meta"]["selected_tokens"],
+            "tool_hit_prob": tc_hit["tool_probability"],
+            "tool_miss_decision": tc_miss["decision"],
+        }
+
     return {
         "ok": True,
         "version": __version__,
@@ -3452,8 +6848,11 @@ def _print_human_report(payload: Dict[str, Any], args: argparse.Namespace) -> No
     shown = payload["results"]
     vega_part = f" | vega_escalated={meta.get('vega_escalated', 0)}" if args.vega else ""
     thorough_part = f" | thorough({meta.get('rubric_preset')})" if meta.get("thorough") else ""
+    profile_part = f" | profile={meta.get('profile')}" if meta.get("profile") else ""
+    tier_part = f" | tier={meta.get('agent_tier')}" if meta.get("agent_tier") else ""
     print(
-        f"[XLaya v{__version__}] model={meta.get('model')} | device={meta.get('device')} "
+        f"[XLaya v{__version__}] model={meta.get('model')} | device={meta.get('device')}"
+        f"{profile_part}{tier_part} "
         f"| route={meta.get('language_route')} | mode={args.mode}{thorough_part} "
         f"| files={meta.get('files_scanned')} | chunks={meta.get('chunks_evaluated')}{vega_part} "
         f"| {meta.get('elapsed_ms')} ms"
@@ -3529,7 +6928,10 @@ def _print_human_report(payload: Dict[str, Any], args: argparse.Namespace) -> No
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="XBoost /xlaya v2.1.0 — 3-Stage System 1 → System 1.5 Pure-Local High-Accuracy Triage Engine"
+        description=(
+            "XBoost /xlaya v2.3.0 — 5-Tier Hardware-Adaptive System 1 → System 1.5 "
+            "Triage & Cross-Regime Code-Graph Sieve Engine"
+        )
     )
     parser.add_argument(
         "paths",
@@ -3569,6 +6971,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Execution device: auto, cuda, mps, or cpu (default: auto)",
     )
     parser.add_argument(
+        "--profile",
+        choices=list(XLAYA_PROFILES),
+        default="auto",
+        help=(
+            "Hardware execution profile: auto, nano (0-torch <25 MB), edge (CPU single encoder), "
+            "workstation (16 GB), max (40 GB+ / L4x4)"
+        ),
+    )
+    parser.add_argument(
+        "--agent-tier",
+        choices=list(XLAYA_AGENT_TIERS),
+        default="auto",
+        help=(
+            "Downstream SWE agent tier: auto, e4b-sniper (K=3, <=800 tok precision sieve), "
+            "or 31b-deep (K=8, <=4096 tok conditional residual graph sieve)"
+        ),
+    )
+    parser.add_argument(
+        "--sieve-weights",
+        default="",
+        help="Optional path to evolved JSON sieve_genomes.json policy file",
+    )
+    parser.add_argument(
         "--max-chars",
         type=int,
         default=1600,
@@ -3606,7 +7031,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--pattern",
         default=DEFAULT_PATTERN,
-        help=f"Comma-separated glob patterns for directory scans (default: {DEFAULT_PATTERN})",
+        help=(
+            f"Comma-separated glob patterns for directory scans (default: {DEFAULT_PATTERN}; "
+            "auto-expands to code files for code_audit/shortlist)"
+        ),
     )
     parser.add_argument(
         "--lexical-prefilter",
@@ -3621,7 +7049,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--vega-model",
-        choices=["auto", "0.8b", "4b", "gemma-1b", "27b"],
+        choices=["auto", "0.8b", "4b", "gemma-1b", "27b", "none"],
         default="auto",
         help="VegaML reader model size for Stage 2 escalation (default: auto hardware-aware)",
     )
@@ -3633,6 +7061,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--views",
+        "--vega-views",
+        dest="views",
         type=int,
         choices=[1, 2, 3],
         default=1,
@@ -3657,7 +7087,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fit-rows",
         default="",
-        help="Path to JSON/JSONL labeled rows to fit and save a persistent TTTHead + conformal policy at --policy-path",
+        help=(
+            "Path to CSV/JSON/JSONL labeled rows to fit and save a persistent "
+            "TTTHead + conformal policy at --policy-path"
+        ),
     )
     parser.add_argument(
         "--fit-questions",
@@ -3690,7 +7123,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="Run built-in deterministic + neural + conformal self-test suite and exit",
+        help="Run built-in deterministic + neural + conformal + code-sieve self-test suite and exit",
     )
     parser.add_argument(
         "--json",
@@ -3717,10 +7150,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not rows_path.is_file():
             print(f"[XLaya Error] --fit-rows file not found: {rows_path}", file=sys.stderr)
             return 2
-        raw_text = rows_path.read_text(encoding="utf-8").strip()
-        if rows_path.suffix.lower() == ".jsonl":
+        if rows_path.suffix.lower() == ".csv":
+            rows_data: Any = str(rows_path)
+        elif rows_path.suffix.lower() == ".jsonl":
+            raw_text = rows_path.read_text(encoding="utf-8").strip()
             rows_data = [json.loads(line) for line in raw_text.splitlines() if line.strip()]
         else:
+            raw_text = rows_path.read_text(encoding="utf-8").strip()
             rows_data = json.loads(raw_text)
         if args.fit_questions:
             q_data = json.loads(Path(args.fit_questions).read_text(encoding="utf-8"))
@@ -3773,6 +7209,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             audio=args.audio or None,
             video=args.video or None,
             device=args.device,
+            profile=args.profile,
         )
         print(json.dumps(mm_res, indent=2, ensure_ascii=False))
         return 0 if mm_res.get("ok") else 1
@@ -3814,6 +7251,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             thorough=args.thorough,
             rubric_preset=args.rubric_preset,
             policy_path=args.policy_path or None,
+            profile=args.profile,
+            agent_tier=args.agent_tier,
+            sieve_weights=args.sieve_weights or None,
             resident_cache=False,
         )
     except ValueError as exc:
