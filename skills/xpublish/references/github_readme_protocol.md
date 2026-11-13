@@ -1,7 +1,8 @@
-# GitHub Repository Publishing, Visual README & Upstream PR Protocol (`v1.4`)
+# GitHub Repository Publishing, Visual README & Upstream PR Protocol (`v1.5`)
 
-> **Scope**: Universal, domain-agnostic standard for authoring high-impact open-source GitHub repositories across **Agent Skills**, **MCP Server Bridges**, **Desktop GIS/CAD Plugins (QGIS / Rhino / Grasshopper)**, and **CLI / Compute Engines**, plus cross-account profile synchronization and Upstream Pull Requests (`PRs`) via `/xpublish` (`audit_engine.py`, `package_qgis.py`, `check_qt6.py`).  
-> **Core Philosophy**: **Executive Scannability in `< 5 Seconds`**, **Zero-Iframe Visual Bar Charts (`0 ms` Render)**, **White-Mode Minimalist Mermaid Diagrams (`< 30 KB` SVG)**, **Viewport-Safe Table Geometry (`≤ 4` Prose Columns)**, **Zero-Mojibake `UTF-16LE` Clipboard Automation**, **Single-Pass Review-Bot Convergence (`--platform pr`)**, and **Progressive Disclosure (`<details>`)**.
+> **Scope**: Canonical specification for authoring open-source GitHub repositories, research/benchmark visuals, Release Notes, and Upstream Pull Requests (`PRs`) across **Agent Skills (`Archetype A`)**, **MCP Server Bridges (`Archetype B`)**, **Desktop GIS/CAD Plugins (`Archetype C`)**, and **CLI / Compute / Solver Engines (`Archetype D`)**.  
+> **Governing Invariants**: **Executive Scannability (`< 5 s`)** • **Zero-Iframe `20-Block` Bar Tables (`0 ms` Render)** • **White-Mode Minimalist Mermaid (`< 30 KB` SVG, `0` Lexer Hazards)** • **Publication-Grade Vector-First Static Figures & Pre-Rendered Release Embeds (`§3.D`)** • **Viewport-Safe Table Geometry (`≤ 4` Prose Columns in `840px` PR Boxes)** • **Tri-OS Zero-Mojibake Clipboard (`CF_UNICODETEXT` `UTF-16LE` / `pbcopy` / `wl-copy`)** • **Diff-Scoped Review-Bot Convergence (`--platform pr`)**.  
+> **Active Enforcement Engines**: `skills/xpublish/scripts/audit_engine.py` • `skills/xpublish/scripts/package_qgis.py` • `skills/xpublish/scripts/check_qt6.py` • `skills/xsync/scripts/audit_workspace_docs.py`
 
 ---
 
@@ -30,6 +31,7 @@ Every public repository `README.md` follows a clean 6-layer visual hierarchy, ad
    - Maximum **`1–2` White-Mode Mermaid `flowchart` diagrams** (`< 30 KB` SVG each) with minimal text:
      - **Diagram A (System Architecture & Ecosystem)**: How the tool connects inputs, core modules, and host platforms/plugins (marking active modules as `(LIVE)` and planned extensions with a small `(coming soon)` subtitle).
      - **Diagram B (Usage Workflow)**: `1. Trigger / Entry Point` → `2. Core Processing / Selection` → `3. Output / Canvas State`.
+   - When the repository or release includes static/publication figures (`docs/figures/*.svg|png`, paper plates, or benchmark charts), follow `§3.D` rather than mixing flowcharts with SaaS metric cards.
 4. **`## 2. Quick Start & Installation`**:
    - Copy-pasteable installation and minimal working usage examples (CLI command, slash command, MCP config JSON, or plugin UI steps).
 5. **`## 3. Benchmarks, Verification & Deep Reference`**:
@@ -41,19 +43,18 @@ Every public repository `README.md` follows a clean 6-layer visual hierarchy, ad
 
 ## 2. Instant-Render Native Markdown Horizontal Bar Charts (`0 ms` Load)
 
-### Why We Ban `xychart-beta` on GitHub
-Never use Mermaid's experimental `xychart-beta` in GitHub Markdown:
-1. **Coordinate Transpose Bug**: Combining `horizontal` with `bar [...]` and `line [...]` plots `bar` in `(y, x)` space while `line` plots in `(x, y)` space, causing lines to shoot vertically off the bottom of the canvas.
-2. **Literal Quoted Labels & Missing Legends**: `xychart-beta` renders literal `"..."` quotation marks around axis labels and provides no series legend (`Bar 1`, `Line 1`).
-3. **Iframe Timeout Penalty**: Every Mermaid block on GitHub spawns a separate sandboxed `viewscreen.githubusercontent.com` iframe (`~2 MB` JS payload). Having `4–5` charts on one page causes multi-second loading spinners and frequent `Unable to render rich display` timeouts.
+### 2.1 Structural Failure Modes of Mermaid `xychart-beta` (Banned on GitHub)
+Mermaid's experimental `xychart-beta` is prohibited across all repository and PR Markdown files due to three deterministic rendering defects:
+1. **Coordinate Transpose Defect**: Combining `horizontal` with `bar [...]` and `line [...]` plots `bar` series in `(y, x)` coordinates while evaluating `line` series in `(x, y)` coordinates, projecting lines vertically off the canvas.
+2. **Unstripped Quote Literals & Missing Legend DOM**: Axis labels render with literal `"..."` characters and emit `0` legend nodes (`Bar 1`, `Line 1`).
+3. **Sandboxed Iframe Payload Penalty (`~2 MB` JS / Block)**: Each Mermaid block spawns an isolated `viewscreen.githubusercontent.com` iframe. Placing `> 2` blocks on a single page triggers multi-second hydration stalls and `Unable to render rich display` timeouts.
 
-### The Standard: 20-Block Unicode Bar Table (`█` + `░`)
-Always render quantitative comparisons using a **20-character Native Markdown Horizontal Bar Table**:
-- **Filled Block**: `█` (`U+2588` Full Block)
-- **Empty Track**: `░` (`U+2591` Light Shade)
-- **Formula (`20` characters total)**:
-  - For metrics where **Higher = Better** (Speedup, Accuracy, Coverage, Recall, Compression): `filled = round(20 * value / max_reference)`
-  - For metrics where **Lower = Better** (Latency, Manual Steps, Resource Usage): Either plot the **Efficiency / Reduction %** (`-97.5% Noise`) or plot the relative footprint and explicitly label `(Lower = Better)`.
+### 2.2 Canonical `20-Block` Unicode Bar Formulation (`█` + `░`)
+All inline scalar comparisons use a **20-character Native Markdown Horizontal Bar Table** (`0 ms` DOM paint, `0` iframe overhead):
+- **Glyph Set**: Filled block `█` (`U+2588`) and light shade track `░` (`U+2591`), satisfying `N_filled + N_empty == 20`.
+- **Normalization Rule**:
+  - **Higher-is-Better Objectives** (Throughput, Speedup, Recall, Accuracy, Compression): `N_filled = round(20 · x / x_max)`.
+  - **Lower-is-Better Objectives** (Latency, Memory, Error, Overhead): Either plot the **Reduction Ratio** (`-97.5% Overhead`) or plot `N_filled = max(1, round(20 · x / x_baseline))` with an explicit `(Lower = Better)` column annotation.
 
 #### Universal Reusable Template
 ```markdown
@@ -163,11 +164,22 @@ flowchart LR
     style Step3 fill:#f8fafc,stroke:#94a3b8,color:#0f172a
 ```
 
+### D. Publication-Grade Vector-First Static Figures & Release Diagrams (`Anti-"AI Dashboard"` Standard)
+
+> **Context-Conditioned Scope**: Governs static conceptual architecture plates, quantitative benchmark charts, academic paper/writeup figures (`docs/figures/`), and visual embeds inside GitHub Release Notes. *(Live host UI screenshots, desktop CAD/GIS viewport captures, and interactive web app previews remain exempt from 2-ink constraints.)*
+
+| Trap ID & Anti-Pattern | Defect Signature | Visual / Rendering Failure Mode | Mandatory Publication Invariant & Fix |
+| :--- | :--- | :--- | :--- |
+| **`FIG-01` — Hybrid Flowchart + KPI Card Poster** | Bolting SaaS-style metric tiles, summary cards, or prize/track pill badges underneath an architecture diagram | Conflates system topology (`inputs → pipeline → outputs`) with promotional scorecards; signals auto-generated infographic styling to academic/technical reviewers | Separate topology from telemetry: keep `Figure 1` strictly to structural data/control flow; report scalar metrics in XY plots, `20-block` bars (`§2`), or `booktabs` tables (`§5`). |
+| **`FIG-02` — Multi-Hue Neon Palette, Shadows & Blanket Monospace** | `> 2` saturated accent hues, drop shadows, glossy gradients, `rounded-2xl` pill badges, or `JetBrains Mono` / `Consolas` on all prose labels | Reduces luminance contrast on print/PDF, creates visual clutter, and obscures typographic hierarchy between prose headers and code tokens | Enforce a pure `#ffffff` canvas, editorial Serif or Neo-Grotesque titles + sans-serif annotations (monospace strictly for code/CLI/path identifiers), hairline `0.5–0.75pt` (`1px`) strokes (`#1f2937` / `#334155`), `0` shadows/pills, and **`≤ 2` muted accent inks** (e.g., Oxford Navy `#1e3a5f` + Crimson/Rust `#b91c1c`). |
+| **`FIG-03` — 4-Spine Boxed Plots & Unchecked Label Collisions** | Default 4-sided plot frames, internal legend boxes overlapping trajectories, or uninspected raster exports | Top/right spines add non-data ink (Tufte); dense error bars or pareto frontiers collide with text annotations at target column width | Set `spines['top'].set_visible(False)` and `spines['right'].set_visible(False)`, place direct series/endpoint labels outside dense clusters, and visually inspect the rasterized output at `100%` scale to verify `0` text overlaps. |
+| **`FIG-04` — Raw Fenced ` ```mermaid ` in GitHub Release Notes** | Pasting raw ` ```mermaid ` blocks into a GitHub Release description (`releases/tag/v*`) | GitHub Release views, email notification digests, and Atom/RSS feeds frequently fail to hydrate the `viewscreen` Mermaid JS runtime, exposing raw source text | Author figures vector-first (`SVG`/`PDF` via `Matplotlib` or `/diagram-design` `§4`, with optional `/illustrator` finish), export `300 DPI` / `2×` PNG rasters when required, and embed pre-rendered raw `PNG`/`SVG` URLs in Release Notes. |
+
 ---
 
 ## 4. Viewport-Safe Table Column Geometry (`README.md` vs. Pull Request Box)
 
-GitHub renders Markdown tables inside fixed-width containers (`~890px` for repository `README.md` files, and only **`~820-840px` inside Pull Request / Issue comment boxes**). When a table has too many descriptive columns or unbreakable inline code spans (`> 30` chars), the rightmost column gets crushed (`Measured In...`) or forces an ugly horizontal scrollbar.
+GitHub constrains Markdown tables to fixed-width DOM containers (`~890px` in repository `README.md` views and **`~820–840px` inside Pull Request / Issue comment boxes**). Exceeding column or token-width bounds forces horizontal scrollbars or truncates rightmost verification columns.
 
 | Table Context & Type | Max Columns | Column Merging & Token Width Rules |
 | :--- | :---: | :--- |
@@ -178,19 +190,19 @@ GitHub renders Markdown tables inside fixed-width containers (`~890px` for repos
 
 ## 5. Progressive Disclosure (`<details>` for Deep Specs & Academic `booktabs`)
 
-To prevent `README.md` files from becoming walls of text while still providing 100% technical completeness:
-1. **Surface Layer**: Keep visible tables concise (`≤ 8` rows per table), with clear units (`ms`, `s`, `%`, `LOC`) and **bolded best results**.
-2. **Collapsible Deep Layer (`<details>`)**: Place lengthy reference material inside collapsible `<details>` blocks directly beneath the summary table:
-   - *For Agent Skills, MCP Bridges & Plugins*: Collapsible full tool/command parameter schemas, configuration JSONs, or Qt5/Qt6 compatibility matrices.
-   - *For Research & Benchmark Repos*: Collapsible **LaTeX (`booktabs`)** source tables (`\toprule`, `\midrule`, `\bottomrule`) for direct copy-paste into academic manuscripts.
+To preserve top-level scannability (`< 5 s`) while retaining 100% technical and mathematical completeness:
+1. **Surface Summary Layer**: Restrict visible tables to `≤ 8` rows with explicit physical/computational units (`ms`, `s`, `%`, `LOC`, `MiB`) and **bolded Pareto-optimal / best results**.
+2. **Collapsible Reference Layer (`<details>`)**: Encapsulate exhaustive specification tables inside collapsible `<details>` blocks immediately below the surface table:
+   - *For Agent Skills, MCP Bridges & Plugins*: Full JSON-RPC tool schemas, CLI flag matrices, or `Qt5`/`Qt6` enum migration tables.
+   - *For Research, Solver & Benchmark Repos*: Complete **LaTeX (`booktabs`)** source tables (`\toprule`, `\midrule`, `\bottomrule`) for direct inclusion in academic manuscripts.
 
 ---
 
 ## 6. Upstream Pull Request (`PR`), Dual-Credit & Review-Bot Convergence Protocol
 
-### A. High-Impact PR Title Formula (`55-78` Characters)
-- **Why Length & Framing Matter**: Titles over `~80` characters truncate (`...`) in GitHub's PR input box, PR list, email notifications, and `git log --oneline`. Conversely, vague titles (`fix bugs & update code`) fail to communicate engineering value to maintainers or portfolio reviewers.
-- **Canonical Formula (`55-78` chars)**:
+### A. Quantitative PR Title Formulation (`55–78` Characters)
+- **Viewport Truncation Constraint**: GitHub truncates PR titles exceeding `~80` characters (`...`) across PR index views, email headers, and `git log --oneline`, whereas generic titles (`fix bugs & update code`) omit empirical signal.
+- **Canonical Formula (`55–78` chars)**:
   ```text
   <type>(<scope>): <quantified improvement / capability> & <headline feature>
   ```
@@ -279,7 +291,7 @@ When contributing to external upstream repositories, enforce these four rules be
    - Write auto-closing keywords (`Fixes #N`, `Closes #N`, `Resolves #N`) **only** when the PR satisfies `100%` of the issue's stated sub-requirements, acceptance checkboxes, and target platforms.
    - When a PR intentionally addresses a subset of a multi-part issue (or fixes one platform/module while leaving sibling items open), use non-closing references (`Part of #N` or `Addresses #N`) and explicitly state which items are covered vs. remaining so neither maintainers nor review bots flag a scope mismatch.
 3. **Diff-Scoped Hygiene (`audit_engine.py --platform pr`)**:
-   - Always run [`../scripts/audit_engine.py`](../scripts/audit_engine.py) with `--platform pr` prior to `git push`.
+   - Always run `audit_engine.py` (`skills/xpublish/scripts/audit_engine.py`) with `--platform pr` prior to `git push`.
    - Format and lint (`ruff`, `flake8`, `black`, `prettier`) **strictly on touched lines/files** so the PR diff never includes unrelated style churn or fails on pre-existing upstream lint debt.
 4. **Automated Review-Bot & Outside-Diff Convergence (`@coderabbitai`, etc.)**:
    - After opening or pushing to a PR on repositories with automated review bots (`@coderabbitai[bot]`, `sourcery-ai`, `sonarcloud`), fetch **both**:
@@ -291,15 +303,15 @@ When contributing to external upstream repositories, enforce these four rules be
 
 ## 7. Cross-Account Profile & Mirror Synchronization Hygiene
 
-When updating a repository's version badge or headline metrics across an organization profile (`<org>/.github/profile/README.md`) and personal profile (`<user>/<user>/README.md`):
-1. **Pull Before Push**: Always run `git pull --rebase origin main` before pushing profile READMEs that may have been edited from another machine or web UI.
-2. **Post-Merge Duplicate Row Check**: If a merge conflict occurs on a portfolio table row (e.g., an older version row vs. an upgraded version row), never blindly keep both lines—inspect the table to ensure **zero duplicate index rows** (e.g., two `01 //` rows) remain before pushing.
+When propagating a repository's version badge or empirical metrics across an organization profile (`<org>/.github/profile/README.md`) and personal profile (`<user>/<user>/README.md`):
+1. **Rebase Before Push**: Execute `git pull --rebase origin main` prior to pushing profile READMEs to incorporate concurrent remote commits cleanly.
+2. **Post-Merge Index Deduplication**: When resolving merge conflicts on numbered portfolio tables, verify `1:1` primary-key uniqueness (`0` duplicate index rows such as two `01 //` entries) prior to pushing.
 
 ---
 
 ## 8. Pre-Publish Verification Checklist (Automated Gate)
 
-Before pushing any `README.md`, benchmark report, or Upstream PR to GitHub, run these 7 deterministic checks:
+Before pushing any `README.md`, benchmark report, Release body, or Upstream PR to GitHub, run these 9 deterministic checks:
 
 - [ ] **Iframe Budget (`≤ 2` Mermaid Blocks per Page)**: Does `README.md` contain at most `2` `flowchart` blocks and **`0` `xychart-beta` blocks**?
 - [ ] **White-Mode Canvas Wrapper**: Does every Mermaid block include `%%{init: {'theme': 'neutral'}}%%` and an outer `subgraph Canvas [" "]` with `style Canvas fill:#ffffff,...`?
@@ -309,6 +321,8 @@ Before pushing any `README.md`, benchmark report, or Upstream PR to GitHub, run 
   - `0` occurrences of chained `&` edges (`A & B --> C`)
   - `0` multi-byte emojis inside ` ```mermaid ` blocks
 - [ ] **Live `mermaid.ink` Compiler Check**: Does every Mermaid block compile via `https://mermaid.ink/svg/pako:...` with `HTTP 200`, `role="flowchart-v2"`, `SyntaxError=False`, and SVG size `< 30 KB`?
+- [ ] **Publication-Grade Static Figures (`§3.D`)**: Are static diagrams cleanly separated from KPI metric cards/pill badges, restricted to `#ffffff` + `≤ 2` muted accent inks (`0` shadows), with hidden top/right spines on plots and `0` overlapping labels at `100%` raster scale?
+- [ ] **Release Notes Diagram Embed**: Do GitHub Release Notes use pre-rendered raw `PNG`/`SVG` image links (`§3.D.4`) instead of fenced ` ```mermaid ` blocks?
 - [ ] **Viewport-Safe Table Width (`≤ 4` Prose Columns)**: Do all explanatory/fix tables have `≤ 4` columns (`# & Target` merged) so the rightmost column never clips inside an `840px` GitHub PR box?
 - [ ] **Zero-Mojibake Encoding Check**: Were all clipboard/file writes executed via UTF-8 (`encoding="utf-8"`) or Win32 `CF_UNICODETEXT` (`UTF-16LE`) with `0` replacement characters (`\ufffd`)?
 - [ ] **Link, Diff & Mirror Integrity**: Do `audit_workspace_docs.py --allow-latex` and `audit_engine.py --platform <github|pr>` pass with `0` blocking issues and `0` advisory warnings?

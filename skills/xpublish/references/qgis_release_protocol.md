@@ -1,18 +1,20 @@
 # QGIS Plugin Release & Publishing Protocol (`/xpublish --platform qgis`)
 
-> **Scope**: Deterministic release packaging, Qt6 forward-compatibility enforcement, and publication protocol for the official QGIS Python Plugins Repository ([plugins.qgis.org](https://plugins.qgis.org/plugins/)) via [`../SKILL.md`](../SKILL.md) (`/xpublish`, aliases `/xpublish-qgis`, `/publish-qgis`).  
-> **Guarantees**: Eliminates packaging rejections, enforces semantic versioning, guarantees the green **"QGIS 4 Ready"** badge, and validates metadata against Django/Python `configparser` interpolation constraints.
+> **Scope**: Canonical specification for deterministic ZIP archive packaging, `qgis.PyQt` AST forward-compatibility enforcement (`QGIS 3.16+` ↔ `QGIS 4.x / Qt6`), and portal publication on the Official QGIS Python Plugins Repository ([plugins.qgis.org](https://plugins.qgis.org/plugins/)) via [`../SKILL.md`](../SKILL.md) (`/xpublish`, aliases `/xpublish-qgis`, `/publish-qgis`).  
+> **Governing Invariants**: Single-root `<package_slug>/` archive topology (`0` root-level loose files), `0` unescaped `%` characters in `metadata.txt` (`configparser` interpolation guard), `100%` scoped `Qt6` enums via `qgis.PyQt` (`"QGIS 4 Ready"` badge), fixed ZIP epoch `(2026, 1, 1, 0, 0, 0)` with `0o644` permissions, and `0` bundled linter/scanner config files (`Validated` vs. `Validated (configured)`).  
+> **Active Enforcement Engines**: [`../scripts/audit_engine.py`](../scripts/audit_engine.py) • [`../scripts/check_qt6.py`](../scripts/check_qt6.py) • [`../scripts/package_qgis.py`](../scripts/package_qgis.py)
 
 ---
 
-## 1. Non-Negotiable QGIS Packaging Invariants
+## 1. Non-Negotiable QGIS Packaging Invariants (`FALS-QGIS-*`)
 
-| Invariant | Mandatory Requirement |
-| :--- | :--- |
-| **1. Root Slug Continuity** | The ZIP file MUST have a single top-level folder matching the portal's original `package_name`. NEVER zip loose files at the root. |
-| **2. Zero Raw `%` in INI** | Python's `configparser` treats `%` as variable interpolation. Always write `percent` or `%%` in `metadata.txt`. |
-| **3. `classFactory` Hook** | `__init__.py` MUST define `def classFactory(iface): return MyPlugin(iface)`. |
-| **4. Qt6 / QGIS 4 Scoping** | All enums must be scoped (`Qt.AlignmentFlag.AlignCenter`) and imported via the `qgis.PyQt` shim to earn the green **"QGIS 4 Ready"** badge. |
+| Invariant ID & Name | Defect Signature | Portal / Runtime Failure Mode | Mandatory Guardrail & Fix |
+| :--- | :--- | :--- | :--- |
+| **`FALS-QGIS-01` — Root Slug Mismatch or Loose Root Files** | Zipping loose `.py` files at archive root, or changing top-level directory from `Y` to `X-main` across releases | Portal rejects upload with `Plugin folder name mismatch` or `Zip file must contain a single top-level directory` | Resolve canonical `<package_slug>` via the 5-rung ladder (`§3 Step 3`) and prefix every ZIP entry with `<package_slug>/`. |
+| **`FALS-QGIS-02` — Unescaped `%` in `metadata.txt`** | Writing raw `50% faster` in `description=` or `about=` INI fields | Python `configparser` raises `InterpolationSyntaxError: '%' must be followed by '%' or '('` on portal ingestion and plugin load | Write `percent` or escaped `%%` in `metadata.txt`; verified pre-build by `audit_engine.py --platform qgis`. |
+| **`FALS-QGIS-03` — Missing `classFactory(iface)` Entrypoint** | Missing `__init__.py` or omitting `def classFactory(iface):` | QGIS plugin loader fails at startup with `AttributeError: module has no attribute 'classFactory'` | Define `def classFactory(iface): return MyPlugin(iface)` in `<package_slug>/__init__.py`. |
+| **`FALS-QGIS-04` — Unscoped PyQt5 Enums & Direct `PyQt5` Imports** | `from PyQt5.QtCore import Qt` or unscoped `Qt.AlignCenter`, `QDialog.Accepted` | Fails `plugins.qgis.org` `pyqt5_to_pyqt6.py` AST check, triggers red `Qt6 Check` warning banner, and crashes under QGIS 4 (`Qt6`) | Import strictly from `qgis.PyQt.*` and scope all enums (`Qt.AlignmentFlag.AlignCenter`); verify via `check_qt6.py`. |
+| **`FALS-QGIS-05` — Bundled Linter Configs Triggering `Validated (configured)`** | Including `.flake8`, `.bandit`, or `.secrets.baseline` inside the release `.zip` | Portal security scanner flags the archive as developer-overridden **`Validated (configured)`** instead of clean **`Validated`** | Strip all dot-config and test files automatically via `package_qgis.py` runtime whitelist. |
 
 ---
 
