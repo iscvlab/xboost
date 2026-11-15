@@ -1,7 +1,7 @@
 # XBoost (`v3.5.0`) — Empirical Benchmark & Token Economics Report
 
 > **Reproducible Verification Harness**: Generated deterministically by [`benchmarks/run_xboost_benchmark.py`](./run_xboost_benchmark.py)  
-> **Corpus Scope**: `115` Installed Agent Skills • `232` Repository Markdown Specs • `602` Obsidian Second Brain Nodes • `442` Real IDE Sessions (`810` Prompt Turns) • `22` Upstream Open-Source Contributions (`5 MERGED`)  
+> **Corpus Scope**: `117` Installed Agent Skills • `279` Repository Markdown Specs • `605` Obsidian Second Brain Nodes • `469` Real IDE Sessions (`985` Prompt Turns) • `22` Upstream Open-Source Contributions (`5 MERGED`)  
 > **Statistical Rigor**: Timing benchmarks execute `3` warm-up passes followed by `N = 30` timed iterations (`time.perf_counter_ns()`), reporting **Median (`P50`)**, **Mean ± StdDev**, **IQR (`P25–P75`)**, and **`P95`**.
 
 ---
@@ -10,33 +10,33 @@
 
 | Evaluation Dimension | Workflow / Cohort Configuration | Visual Comparison Bar | Measured Result & Delta vs. Baseline |
 | :--- | :--- | :--- | :--- |
-| **1. Red-Team Defect Catch Rate ↑**<br>*(25 Seeded Defects across 5 Pillars)* | **Level 3: Full 5-Stage + 10 CLI Gates**<br>Level 2: `/xbrief` + `/xdeep-research` + `/xboost`<br>Level 1: `/xboost` Standalone (2 Gates)<br>Level 0: Prompt-Only Baseline (0 Gates) | `████████████████████` **`100.0% (25/25)`**<br>`████████████████░░░░` `80.0% (20/25)`<br>`████████░░░░░░░░░░░░` `40.0% (10/25)`<br>`░░░░░░░░░░░░░░░░░░░░` `0.0% (0.0%)` | **`0` False Positives in Median `8.72 ms`** ✨<br>`4` Active CLI Verification Gates<br>`2` Active CLI Verification Gates<br>No Deterministic Pre-LLM Enforcement |
-| **2. Context Noise Compression ↑**<br>*(834 Repo + Vault Files, `1.64M` tok)* | **`/xbrief` (`Cap 8`) Repo-Only**<br>**`/xbrief` (`Cap 8`) + `/xobsidian` (`2-Hop`)**<br>Unbounded Repo + Vault Crawl | `████████████████████` **`97.06% Removed (34.0×)`**<br>`████████████████████` **`96.78% Removed (31.1×)`**<br>`░░░░░░░░░░░░░░░░░░░░` `0.0% Removed (1.0×)` | **`48,249` tok in Median `1.2 ms`** ✨<br>**`52,789` tok (`12` files) in `1.22 ms`** ✨<br>`1,639,692` tok (`834` files) in `50.7 ms` |
-| **3. System 1 Section Triage ↑**<br>*(27 Specs / 1170 Chunks, `174.9k` tok)* | **XBoost `/xlaya` Top-5 Shortlist**<br>Unfiltered Full-Corpus Pass-B Read | `████████████████████` **`99.35% Saved (153.8×)`**<br>`░░░░░░░░░░░░░░░░░░░░` `0.0% Saved (1.0×)` | **`1,137` tok in Median `180.0 ms`** (`6.5k` chunks/s) ✨<br>`174,870` tok (Full 27-File Read) |
-| **4. Dual-Trigger Budget Guard ↑**<br>*(`Use when` + `Do NOT use` across `N=115`)* | **XBoost `v3.5.0` Suite (`N = 15`)**<br>All Installed Host Skills (`N = 115`)<br>Official Cloud/Vendor Skills (`N = 31`) | `████████████████████` **`100.0% (15/15)`**<br>`██████████████████░░` `91.3%`<br>`█████████████████░░░` `87.1%` | **`374.47 ± 9.95` chars (`0%` Truncation)** ✨<br>`324.78 ± 51.73` chars (`99.1%` `≤500` pass)<br>`331.1 ± 63.41` chars (`96.8%` `≤500` pass) |
-| **5. Verification Depth / Turn ↑**<br>*(`N = 810` Real IDE Prompt Turns)* | **Chained Multi-Skill `/x*` Turn (`N=245`)**<br>Single `/x*` Skill Turn (`N = 89`)<br>Standard Turn Without `/x*` (`N = 476`) | `████████████████████` **`90.6 Steps (3.94×)`**<br>`███░░░░░░░░░░░░░░░░░` `12.6 Steps`<br>`█████░░░░░░░░░░░░░░░` `23.0 Steps (1.0×)` | **`4.88M` tok/turn (`93.4k` new in, `24.4k` out)** ✨<br>`0.78M` tok/turn (`9.9k` new in, `2.9k` out)<br>`1.26M` tok/turn (`13.6k` new in, `5.6k` out) |
+| **1. Red-Team Defect Catch Rate ↑**<br>*(25 Seeded Defects across 5 Pillars)* | **Level 3: Full 5-Stage + 10 CLI Gates**<br>Level 2: `/xbrief` + `/xdeep-research` + `/xboost`<br>Level 1: `/xboost` Standalone (2 Gates)<br>Level 0: Prompt-Only Baseline (0 Gates) | `████████████████████` **`100.0% (25/25)`**<br>`████████████████░░░░` `80.0% (20/25)`<br>`████████░░░░░░░░░░░░` `40.0% (10/25)`<br>`░░░░░░░░░░░░░░░░░░░░` `0.0% (0.0%)` | **`0` False Positives in Median `7.96 ms`** ✨<br>`4` Active CLI Verification Gates<br>`2` Active CLI Verification Gates<br>No Deterministic Pre-LLM Enforcement |
+| **2. Context Noise Compression ↑**<br>*(884 Repo + Vault Files, `1.72M` tok)* | **`/xbrief` (`Cap 8`) Repo-Only**<br>**`/xbrief` (`Cap 8`) + `/xobsidian` (`2-Hop`)**<br>Unbounded Repo + Vault Crawl | `████████████████████` **`97.14% Removed (35.0×)`**<br>`████████████████████` **`96.87% Removed (32.0×)`**<br>`░░░░░░░░░░░░░░░░░░░░` `0.0% Removed (1.0×)` | **`49,201` tok in Median `1.14 ms`** ✨<br>**`53,806` tok (`12` files) in `1.13 ms`** ✨<br>`1,720,841` tok (`884` files) in `53.16 ms` |
+| **3. System 1 Section Triage ↑**<br>*(24 Specs / 990 Chunks, `148.7k` tok)* | **XBoost `/xlaya` Top-5 Shortlist**<br>Unfiltered Full-Corpus Pass-B Read | `████████████████████` **`99.33% Saved (149.2×)`**<br>`░░░░░░░░░░░░░░░░░░░░` `0.0% Saved (1.0×)` | **`997` tok in Median `141.84 ms`** (`7.0k` chunks/s) ✨<br>`148,719` tok (Full 24-File Read) |
+| **4. Dual-Trigger Budget Guard ↑**<br>*(`Use when` + `Do NOT use` across `N=117`)* | **XBoost `v3.5.0` Suite (`N = 15`)**<br>All Installed Host Skills (`N = 117`)<br>Official Cloud/Vendor Skills (`N = 31`) | `████████████████████` **`100.0% (15/15)`**<br>`██████████████████░░` `90.6%`<br>`█████████████████░░░` `87.1%` | **`369.93 ± 24.14` chars (`0%` Truncation)** ✨<br>`324.38 ± 51.33` chars (`99.1%` `≤500` pass)<br>`331.1 ± 63.41` chars (`96.8%` `≤500` pass) |
+| **5. Verification Depth / Turn ↑**<br>*(`N = 985` Real IDE Prompt Turns)* | **Chained Multi-Skill `/x*` Turn (`N=278`)**<br>Single `/x*` Skill Turn (`N = 108`)<br>Standard Turn Without `/x*` (`N = 599`) | `████████████████████` **`87.3 Steps (3.24×)`**<br>`███░░░░░░░░░░░░░░░░░` `13.5 Steps`<br>`█████░░░░░░░░░░░░░░░` `26.9 Steps (1.0×)` | **`4.48M` tok/turn (`94.9k` new in, `24.0k` out)** ✨<br>`0.77M` tok/turn (`10.2k` new in, `3.1k` out)<br>`1.39M` tok/turn (`15.8k` new in, `5.9k` out) |
 | **6. Compound Learning OSS Speedups ↑**<br>*(`22` Upstream Contributions, `Batch 0 + A + B + C`)* | **`/xlearn` 3-Tier Playbooks (`PAT-*` + `GOV-*` + `FALS-*`)**<br>Unvectorized Upstream Baseline (`HEAD`) | `████████████████████` **`4.0× – 1,735.6× Faster`**<br>`░░░░░░░░░░░░░░░░░░░░` `1.0× Baseline` | **`100%` `assert_allclose` Parity (`5 MERGED`, `9 OPEN PRs`)** ✨<br>Python `np.vectorize`, `O(N²)` scans & OGR disk-seek loops |
 
 ---
 
 ## Executive Findings: High Intelligence via High Compute
 
-1. **System-Prompt Budget Discipline (`100%` Compliance & Dual-Trigger Guards)**: Across all `15` XBoost `/x*` skills, YAML discovery descriptions average **`374.47 ± 9.95 chars`** (Median `374.0` chars, **`100.0%` within the `≤ 500` char `audit_engine.py` budget gate**) with **`100.0%` dual positive + negative (`Use when` / `Do NOT use for`) routing guards**, compared to `87.1%` dual-trigger coverage across `31` official cloud/enterprise skills.
-2. **Context Noise Compression (`-96.78%` Scan Reduction)**: When briefing across multi-project repositories and the `602`-node Obsidian Second Brain (`1,639,692` tokens total), `/xbrief` (`Cap 8` Two-Pass) + `/xobsidian` (`2-Hop = 4` vault files) loads only **`52,789` tokens** (**`96.78%` noise reduction** / **`31.1×` compression**) in a median disk read time of **`1.22 ms`** (vs `50.7 ms` unbounded).
-3. **System 1 `/xlaya` Triage (`180.0 ms` Median)**: Chunking and ranking `1170` fence-safe (`≤ 1,200`-char) heading sections across `27` specs completes in **`180.0 ms`** (`Mean 181.03 ± 5.15 ms`, `6,500.0 chunks/sec`), cutting Pass-B reading tokens by **`99.35%`**.
-4. **Deterministic Red-Team Defect Catch Rate (`100.0%` vs `0.0%`)**: Across `25` seeded security, Qt6/QGIS 4, research citation, doc-sync, and skill-packaging defects, the 10 CLI gates (`10,382` LOC) achieve **`25 / 25` (`100.0%` recall)** and **`100.0%` precision** (`0` false positives) in **`8.72 ms`**.
-5. **Transparent Token Economics (Why XBoost Recommends `5×`–`20×` Subscriptions)**: While XBoost slashes *garbage file noise* by `96.78%`, it deliberately invests that freed context capacity into **deep multi-gate verification**. Across `810` real prompt turns, a chained multi-skill XBoost turn executes **`90.58 steps`** (`3.94×` deeper than standard `22.97`-step turns), consuming **`93,386` uncached input tokens (`6.88×`)**, **`24,399` output tokens (`4.35×`)**, and **`4,757,425` KV-cache read tokens** per turn (`~39.71M` total tokens across a full `711`-step marathon session).
+1. **System-Prompt Budget Discipline (`100%` Compliance & Dual-Trigger Guards)**: Across all `15` XBoost `/x*` skills, YAML discovery descriptions average **`369.93 ± 24.14 chars`** (Median `374.0` chars, **`100.0%` within the `≤ 500` char `audit_engine.py` budget gate**) with **`100.0%` dual positive + negative (`Use when` / `Do NOT use for`) routing guards**, compared to `87.1%` dual-trigger coverage across `31` official cloud/enterprise skills.
+2. **Context Noise Compression (`-96.87%` Scan Reduction)**: When briefing across multi-project repositories and the `605`-node Obsidian Second Brain (`1,720,841` tokens total), `/xbrief` (`Cap 8` Two-Pass) + `/xobsidian` (`2-Hop = 4` vault files) loads only **`53,806` tokens** (**`96.87%` noise reduction** / **`32.0×` compression**) in a median disk read time of **`1.13 ms`** (vs `53.16 ms` unbounded).
+3. **System 1 `/xlaya` Triage (`141.84 ms` Median)**: Chunking and ranking `990` fence-safe (`≤ 1,200`-char) heading sections across `24` specs completes in **`141.84 ms`** (`Mean 142.24 ± 5.94 ms`, `6,979.7 chunks/sec`), cutting Pass-B reading tokens by **`99.33%`**.
+4. **Deterministic Red-Team Defect Catch Rate (`100.0%` vs `0.0%`)**: Across `25` seeded security, Qt6/QGIS 4, research citation, doc-sync, and skill-packaging defects, the 10 CLI gates (`18,890` LOC) achieve **`25 / 25` (`100.0%` recall)** and **`100.0%` precision** (`0` false positives) in **`7.96 ms`**.
+5. **Transparent Token Economics (Why XBoost Recommends `5×`–`20×` Subscriptions)**: While XBoost slashes *garbage file noise* by `96.87%`, it deliberately invests that freed context capacity into **deep multi-gate verification**. Across `985` real prompt turns, a chained multi-skill XBoost turn executes **`87.32 steps`** (`3.24×` deeper than standard `26.92`-step turns), consuming **`94,873` uncached input tokens (`6.0×`)**, **`24,019` output tokens (`4.09×`)**, and **`4,356,999` KV-cache read tokens** per turn (`~39.05M` total tokens across a full `740`-step marathon session).
 6. **3-Tier Compound Learning Playbooks (`4.0×` – `1,735.6×` Real-World Upstream Speedups)**: By distilling verified bug and bottleneck signatures via [`/xlearn`](../skills/xlearn/SKILL.md) into [`docs/COMPOUND_LEARNING_PLAYBOOK.md`](../docs/COMPOUND_LEARNING_PLAYBOOK.md) (`19 PAT-*`, `7 GOV-*`, `11 FALS-*` + 3 specialized domain playbooks), XBoost achieved **`4.0×` to `1,735.6×` measured wall-clock speedups** with **`100%` numerical equivalence** across **22 upstream open-source contributions** (`5 MERGED`, `9 OPEN PRs`, `4 OPEN Issues`, `4 Staged`).
 
 ---
 
-## Experiment 1: Skill Discovery & Context Budget Audit (`N = 115` Installed Skills)
+## Experiment 1: Skill Discovery & Context Budget Audit (`N = 117` Installed Skills)
 
 | Skill Cohort | Count | YAML Desc Chars (`Mean ± SD` / `Median`) | `≤ 500` Char Gate Pass | Dual Trigger Guard (`Use when` + `Do NOT use`) | Full `SKILL.md` Tokens (`Mean ± SD` / `Median`) | Bundled CLI Scripts (`LOC`) |
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|
-| **XBoost `v3.5.0` Suite (`/x*` Skills)** | `15` | **`374.47 ± 9.95`** (`374.0`) | **`100.0%`** | **`100.0%`** | `4,551 ± 2,119` (`3,867`) | **`10` (`10,382` LOC)** |
-| **Official Cloud & Enterprise Vendor Skills** | `31` | `331.1 ± 63.41` (`324.0`) | `96.8%` | `87.1%` | `2,518 ± 1,692` (`2,468`) | `5` (`2,880` LOC) |
-| **All Installed Host Skills Pool** | `115` | `324.78 ± 51.73` (`319.0`) | `99.1%` | `91.3%` | `2,168 ± 1,938` (`1,511`) | `59` (`28,199` LOC) |
+| **XBoost `v3.5.0` Suite (`/x*` Skills)** | `15` | **`369.93 ± 24.14`** (`374.0`) | **`100.0%`** | **`100.0%`** | `4,697 ± 2,121` (`3,867`) | **`10` (`18,890` LOC)** |
+| **Official Cloud & Enterprise Vendor Skills** | `31` | `331.1 ± 63.41` (`324.0`) | `96.8%` | `87.1%` | `2,523 ± 1,689` (`2,468`) | `5` (`2,880` LOC) |
+| **All Installed Host Skills Pool** | `117` | `324.38 ± 51.33` (`319.0`) | `99.1%` | `90.6%` | `2,208 ± 1,950` (`1,569`) | `60` (`37,712` LOC) |
 
 ---
 
@@ -44,9 +44,9 @@
 
 | Briefing Regime | Files Read | Lines Read | Context Tokens Loaded | Noise Reduction (`%` / Factor) | Disk Read Latency (`Median` / `Mean ± SD` / `P95`) |
 |:---|:---:|:---:|:---:|:---:|:---:|
-| **1. Unbounded Repo + Vault Crawl** | `834` | `71,970` | `1,639,692` tok | Baseline (`1.0×`) | `50.7 ms` (`50.84 ± 3.07 ms` / `P95: 55.11 ms`) |
-| **2. `/xbrief` Repo-Only (`Cap 8` Two-Pass)** | **`8`** | **`1,010`** | **`48,249` tok** | **`-97.06%` (`34.0×`)** | **`1.2 ms`** (`1.3 ± 0.45 ms` / `P95: 1.63 ms`) |
-| **3. `/xbrief /xobsidian` (`Cap 8` + `2-Hop` Vault)** | **`12`** (`8` Repo + `4` Vault) | **`1,179`** | **`52,789` tok** | **`-96.78%` (`31.1×`)** | **`1.22 ms`** (`1.33 ± 0.3 ms` / `P95: 1.96 ms`) |
+| **1. Unbounded Repo + Vault Crawl** | `884` | `74,835` | `1,720,841` tok | Baseline (`1.0×`) | `53.16 ms` (`52.96 ± 3.15 ms` / `P95: 57.97 ms`) |
+| **2. `/xbrief` Repo-Only (`Cap 8` Two-Pass)** | **`8`** | **`1,031`** | **`49,201` tok** | **`-97.14%` (`35.0×`)** | **`1.14 ms`** (`1.25 ± 0.38 ms` / `P95: 1.97 ms`) |
+| **3. `/xbrief /xobsidian` (`Cap 8` + `2-Hop` Vault)** | **`12`** (`8` Repo + `4` Vault) | **`1,200`** | **`53,806` tok** | **`-96.87%` (`32.0×`)** | **`1.13 ms`** (`1.16 ± 0.16 ms` / `P95: 1.45 ms`) |
 
 ---
 
@@ -54,11 +54,11 @@
 
 | Metric | Measured Value |
 |:---|:---|
-| **Markdown Specifications Chunked** | `27` files (`1170` fence-safe heading chunks `≤ 1,200` chars) |
-| **Full Unchunked Corpus Size** | `174,870` tokens |
-| **Top-5 Shortlisted Pass-B Size** | **`1,137` tokens (`-99.35%` token reduction)** |
-| **Single-Pass Triage Latency (`N = 30`)** | **Median `180.0 ms`** (`Mean 181.03 ± 5.15 ms` • `IQR 7.03 ms` • `P95 189.61 ms`) |
-| **Chunk Evaluation Throughput** | **`6,500.0` chunks / sec** (`deterministic-lexical-stdlib`) |
+| **Markdown Specifications Chunked** | `24` files (`990` fence-safe heading chunks `≤ 1,200` chars) |
+| **Full Unchunked Corpus Size** | `148,719` tokens |
+| **Top-5 Shortlisted Pass-B Size** | **`997` tokens (`-99.33%` token reduction)** |
+| **Single-Pass Triage Latency (`N = 30`)** | **Median `141.84 ms`** (`Mean 142.24 ± 5.94 ms` • `IQR 8.79 ms` • `P95 153.05 ms`) |
+| **Chunk Evaluation Throughput** | **`6,979.7` chunks / sec** (`deterministic-lexical-stdlib`) |
 
 ---
 
@@ -71,7 +71,7 @@
 | **3. Deep-Research Evidence & Schema** (`[TBD]`, `example.com`, bare root URL, quota, year bounds) | `0 / 5` | `xdeep-research/scripts/verify_evidence.py` | **`5 / 5` (`100%`)** |
 | **4. Doc Sync, Links, Zero-LaTeX & Mirrors** (2 broken links, inline LaTeX, deprecated term, SHA-256 drift) | `0 / 5` | `xsync/scripts/audit_workspace_docs.py` | **`5 / 5` (`100%`)** |
 | **5. Skill Budget & Hygiene** (`>500` char YAML, naming, broken link, `__pycache__`, `.pyc` binary) | `0 / 5` | `audit_engine.py --platform skill` | **`5 / 5` (`100%`)** |
-| **Total Recall / Precision / Latency (`N = 20`)** | **`0 / 25` (`0.0%`)** | **All 10 XBoost CLI Gates (`10,382` LOC)** | **`25 / 25` (`100.0%` Recall • `100.0%` Precision • Median `8.72 ms`)** |
+| **Total Recall / Precision / Latency (`N = 20`)** | **`0 / 25` (`0.0%`)** | **All 10 XBoost CLI Gates (`18,890` LOC)** | **`25 / 25` (`100.0%` Recall • `100.0%` Precision • Median `7.96 ms`)** |
 
 ---
 
@@ -79,30 +79,30 @@
 
 | Workflow Level | Command Chain | Briefing Scan Tokens | Vault Nodes Routed | Active CLI Gates | Seeded Defect Catch Rate | Avg Steps / Turn | Recommended Subscription Tier |
 |:---|:---|:---:|:---:|:---:|:---:|:---:|:---|
-| **Baseline 0: Unstructured Prompting (No Skills)** | `<raw prompt>` | `1,639,692` | `0` | `0` | **`0.0%`** | `23.0` | **Free / 1× Base Tier** |
-| **Level 1: Single Core Solver** | `/xboost` | `48,249` | `0` | `2` | **`40.0%`** | `12.6` | **1× Pro / 5× Max Tier** |
-| **Level 2: Repo-Briefed + Primary Probe + 2-Hop Vault** | `/xbrief /xdeep-research /xboost /xobsidian` | `52,789` | `602` | `4` | **`80.0%`** | `90.6` | **5× Max Tier (Claude Max 5× / Gemini 5×)** |
-| **Level 3: Full 5-Stage Lifecycle + System 1 + 10 CLI Gates + /xlearn** | `/xbrief /xdeep-research /xboost /xultra /xlearn /xsync /xlaya + /xpublish` | `52,789` | `602` | `10` | **`100.0%`** | `711.2` | **20× Ultra Tier (Gemini Ultra 20× / Claude Max 20×)** |
+| **Baseline 0: Unstructured Prompting (No Skills)** | `<raw prompt>` | `1,720,841` | `0` | `0` | **`0.0%`** | `26.9` | **Free / 1× Base Tier** |
+| **Level 1: Single Core Solver** | `/xboost` | `49,201` | `0` | `2` | **`40.0%`** | `13.5` | **1× Pro / 5× Max Tier** |
+| **Level 2: Repo-Briefed + Primary Probe + 2-Hop Vault** | `/xbrief /xdeep-research /xboost /xobsidian` | `53,806` | `605` | `4` | **`80.0%`** | `87.3` | **5× Max Tier (Claude Max 5× / Gemini 5×)** |
+| **Level 3: Full 5-Stage Lifecycle + System 1 + 10 CLI Gates + /xlearn** | `/xbrief /xdeep-research /xboost /xultra /xlearn /xsync /xlaya + /xpublish` | `53,806` | `605` | `10` | **`100.0%`** | `739.7` | **20× Ultra Tier (Gemini Ultra 20× / Claude Max 20×)** |
 
 ---
 
-## Experiment 6: Real Session Token Economics (`N = 442` Sessions / `810` Prompt Turns)
+## Experiment 6: Real Session Token Economics (`N = 469` Sessions / `985` Prompt Turns)
 
 ### A. Per-Prompt Turn Token Telemetry (`Mean ± StdDev` & `Median [P25–P75]`)
 
 | Execution Mode | Sample Size | Trajectory Depth (`Steps / Turn`) | Uncached New Input (`NewIn`) | KV-Cache Replay (`Cached Input`) | Internal `Thinking` | Model `Output` | **Total Processed / Turn** |
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **1. Standard Turn (No `/x*` Skill)** | `476` turns | `23.0` *(Med `5`)* | `13,574` *(Med `1,139`)* | `1,241,903` *(Med `227,284`)* | `1,445` *(Med `538`)* | `5,613` *(Med `1,362`)* | **`1,262,534`** *(Med `232,304`)* |
-| **2. Single `/x*` Skill Turn** | `89` turns | `12.6` *(Med `7`)* | `9,887` *(Med `3,790`)* | `767,673` *(Med `492,485`)* | `696` *(Med `357`)* | `2,903` *(Med `1,784`)* | **`781,158`** *(Med `494,960`)* |
-| **3. Chained Multi-Skill `/x*` Turn** | `245` turns | **`90.6`** *(Med `53` • `3.94×`)* | **`93,386`** *(Med `66,209` • `6.88×`)* | **`4,757,425`** *(Med `2,853,368`)* | **`5,126`** *(Med `2,973`)* | **`24,399`** *(Med `12,937` • `4.35×`)* | **`4,880,336`** *(Med `2,945,503`)* |
+| **1. Standard Turn (No `/x*` Skill)** | `599` turns | `26.9` *(Med `6`)* | `15,799` *(Med `1,151`)* | `1,363,992` *(Med `231,397`)* | `1,715` *(Med `528`)* | `5,867` *(Med `1,431`)* | **`1,387,374`** *(Med `236,570`)* |
+| **2. Single `/x*` Skill Turn** | `108` turns | `13.5` *(Med `7`)* | `10,186` *(Med `4,143`)* | `757,897` *(Med `455,516`)* | `755` *(Med `409`)* | `3,059` *(Med `1,798`)* | **`771,898`** *(Med `468,718`)* |
+| **3. Chained Multi-Skill `/x*` Turn** | `278` turns | **`87.3`** *(Med `47` • `3.24×`)* | **`94,873`** *(Med `65,122` • `6.0×`)* | **`4,356,999`** *(Med `2,119,506`)* | **`4,850`** *(Med `2,371`)* | **`24,019`** *(Med `11,682` • `4.09×`)* | **`4,480,741`** *(Med `2,178,317`)* |
 
-### B. Full Multi-Turn Session Telemetry (`N = 442` Complete Sessions)
+### B. Full Multi-Turn Session Telemetry (`N = 469` Complete Sessions)
 
 | Session Class | Sample Size | Steps / Session (`Mean` / `Median` / `P90`) | Uncached Input (`Mean` / `Median`) | KV-Cache Read (`Mean` / `Median`) | Thinking (`Mean` / `Median`) | Output (`Mean` / `Median`) | **Total Session Throughput (`Mean` / `Median` / `P90`)** |
 |:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **Standard Session (No `/x*`)** | `395` | `49.9` / `34` / `101` | `70,403` / `54,048` | `1.46M` / `0.75M` | `3,463` / `1,507` | `11,519` / `6,648` | **`1.55M`** / `0.83M` / `3.46M` |
-| **Single-Skill XBoost Session** | `3` | `110.0` / `15` / `252` | `110,549` / `31,413` | `5.47M` / `0.23M` | `5,573` / `669` | `20,421` / `2,839` | **`5.61M`** / `0.27M` / `13.25M` |
-| **Chained Multi-Skill XBoost Session** | `44` | **`711.2`** / `698` / `1393` | **`645,384`** / `601,446` | **`38.84M`** / `40.17M` | **`41,565`** / `33,578` | **`190,359`** / `187,560` | **`39.71M` (`25.7×`)** / `41.03M` / `68.35M` |
+| **Standard Session (No `/x*`)** | `412` | `55.7` / `36` / `119` | `71,599` / `50,614` | `1.68M` / `0.75M` | `3,726` / `1,508` | `11,552` / `5,346` | **`1.77M`** / `0.83M` / `3.95M` |
+| **Single-Skill XBoost Session** | `6` | `69.0` / `26` / `171` | `65,766` / `27,154` | `2.97M` / `0.45M` | `3,396` / `886` | `11,772` / `3,060` | **`3.05M`** / `0.47M` / `8.53M` |
+| **Chained Multi-Skill XBoost Session** | `51` | **`739.7`** / `683` / `1406` | **`683,354`** / `610,607` | **`38.13M`** / `34.16M` | **`44,296`** / `31,309` | **`193,401`** / `150,084` | **`39.05M` (`22.08×`)** / `35.04M` / `78.71M` |
 
 ### C. Recommended Subscription Tier Sizing Guide
 

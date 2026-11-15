@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
-"""High-speed, zero-corruption PDF, CAD Drawing & Image OCR engine for /xocr (v2.2.0).
+"""High-speed, zero-corruption PDF, CAD Drawing & Image OCR engine for /xocr (v2.3.0).
 
 Features:
 1. 5-Profile Hardware Architecture (`--profile auto|nano|edge|workstation|max`)
    with strict zero-PyTorch lazy imports under `nano` and `edge`.
 2. Zero-Hang Stage 0 Image Probe (`page.get_images(full=False)`) + 4-Regime
-   8D Simplex + Platt + Split-Conformal Page Classifier (`xocr_genomes.json`):
-   distinguishes `DIGITAL_TEXT_TABLE`, `VECTOR_CAD_DRAWING`,
-   `RASTER_DRAWING_OR_MAP`, and `HYBRID_COMPOSITE_DRAWING`.
-3. Single-pass C++ PyMuPDF (`fitz`) coordinate-sorted text (`sort=True`),
+   8D Simplex + Platt + Split-Conformal Page Classifier (`xocr_genomes.json`)
+   with exploded `.SHX` stroke-CAD detection (`short_stroke_ratio`).
+3. Single-pass C++ PyMuPDF (`fitz`) coordinate-sorted text (`sort=True`) with
+   surgical faux-bold de-ghosting, orientation-aware callout assembly (`0/90/270/angle`),
    Two-Stage Grid + LaTeX `booktabs` table surgery, and Borderless
    Coordinate-Aligned Table Recovery (`_extract_aligned_block_tables`).
-4. Canonical `A1..D4` Spatial CAD Callout Index (`extract_spatial_cad_index`)
-   and Multi-Scale Drawing View Renderer (`render_drawing_view`) with
-   Single-Composite Tile Cache for multi-layer rasters and `<= 4.5 MiB` guard.
+4. Canonical `A1..D4` Spatial CAD Callout Index (`extract_spatial_cad_index`),
+   `< 10 ms` ROI Sniper (`rank_spatial_rois`), unexplained-canvas adaptive tiling
+   (`compute_unexplained_canvas_bbox` + `tile_and_stitch_canvas`), and
+   Multi-Scale Drawing View Renderer (`render_drawing_view`) with `<= 4.5 MiB` guard.
 5. Deterministic Thai/English glyph normalization (`U+F700..U+F71A` PUA,
-   decomposed Sara Am, zero-width stripping) and 4-Tier VLM/CPU OCR ladder
-   (`SGLang`, `Typhoon-OCR v1.5`, `Unlimited-OCR-2`, `RapidOCR`/`EasyOCR`/`pytesseract`).
+   decomposed Sara Am, zero-width stripping), Thai CPU script guard, and
+   4-Tier VLM/CPU OCR ladder (`SGLang`, `Typhoon-OCR v1.5`, `Unlimited-OCR-2`,
+   `RapidOCR`/`EasyOCR`/`pytesseract`).
 """
 
 import argparse
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 import contextlib
 import copy
 import csv
@@ -31,6 +33,7 @@ import io
 import json
 import math
 import os
+from pathlib import Path
 import re
 import shutil
 import subprocess
@@ -41,7 +44,7 @@ import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 
 sys.dont_write_bytecode = True
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -68,23 +71,55 @@ XOCR_FEATURE_NAMES = (
 )
 XOCR_NEG_INDICES = frozenset({7})
 
+SEAM_A_SYMBOLS = (
+    "__version__",
+    "XOCR_PROFILES",
+    "XOCR_REGIMES",
+    "XOCR_FEATURE_NAMES",
+    "DEFAULT_XOCR_GENOMES",
+    "normalize_text",
+    "normalize_thai_text",
+    "resolve_hardware_profile",
+    "evaluate_page_quality",
+    "load_xocr_genomes",
+    "classify_page_regime",
+    "extract_spatial_cad_index",
+    "render_drawing_view",
+    "extract_tables_from_page",
+    "extract_html_tables_from_text",
+    "ocr_image_local",
+    "run_vlm_engine",
+    "extract_pdf",
+    "extract_standalone_image",
+    "run_self_test",
+    "_fast_page_image_metrics",
+    "_fast_drawing_metrics",
+    "_extract_aligned_block_tables",
+    "_get_or_build_composite",
+    "compute_unexplained_canvas_bbox",
+    "tile_and_stitch_canvas",
+    "rank_spatial_rois",
+    "_extract_text_and_dict_fast",
+    "_extract_clean_text_atoms",
+)
+
 DEFAULT_XOCR_GENOMES = {
-    "version": "2.2.0",
+    "version": "2.3.0",
     "feature_names": list(XOCR_FEATURE_NAMES),
     "regimes": list(XOCR_REGIMES),
     "alpha": 0.10,
-    "conformal_q_hat": 0.4877,
+    "conformal_q_hat": 0.2046,
     "weights": {
-        "DIGITAL_TEXT_TABLE": [-0.0287, 0.0602, -0.1796, -0.1495, 0.1525, 0.07, 0.057, -0.3025],
-        "VECTOR_CAD_DRAWING": [-0.1256, 0.0232, -0.2496, 0.0982, 0.1577, 0.2276, -0.1011, -0.017],
-        "RASTER_DRAWING_OR_MAP": [0.1052, 0.0324, 0.2789, 0.1259, 0.178, -0.1892, 0.008, -0.0824],
-        "HYBRID_COMPOSITE_DRAWING": [-0.0357, -0.1263, 0.2446, 0.1343, 0.13, -0.0273, -0.0111, -0.2907],
+        "DIGITAL_TEXT_TABLE": [0.0013, -0.0141, -0.0861, -0.2436, -0.0903, 0.1815, 0.0086, -0.3745],
+        "VECTOR_CAD_DRAWING": [-0.0154, -0.0195, -0.3885, 0.3138, 0.0753, 0.1807, -0.0015, -0.0053],
+        "RASTER_DRAWING_OR_MAP": [0.0687, -0.0341, 0.2492, -0.0663, 0.1797, -0.2847, -0.038, -0.0793],
+        "HYBRID_COMPOSITE_DRAWING": [-0.0385, -0.2027, 0.0435, 0.3146, 0.0814, -0.0659, -0.0193, -0.2341],
     },
     "platt": {
-        "DIGITAL_TEXT_TABLE": {"T": 22.5, "b": 0.075},
-        "VECTOR_CAD_DRAWING": {"T": 18.75, "b": -5.55},
-        "RASTER_DRAWING_OR_MAP": {"T": 15.0, "b": -4.8},
-        "HYBRID_COMPOSITE_DRAWING": {"T": 22.5, "b": -2.925},
+        "DIGITAL_TEXT_TABLE": {"T": 19.4, "b": 4.0},
+        "VECTOR_CAD_DRAWING": {"T": 18.125, "b": -8.0},
+        "RASTER_DRAWING_OR_MAP": {"T": 25.8, "b": -7.85},
+        "HYBRID_COMPOSITE_DRAWING": {"T": 32.0, "b": -6.4},
     },
 }
 
@@ -182,6 +217,16 @@ def _detect_gpu_vram_gb():
         return 0, 0.0, 0.0
 
 
+def _has_module_available(mod_name):
+    """Safely check module presence including mocked sys.modules entries without __spec__."""
+    if mod_name in sys.modules:
+        return sys.modules[mod_name] is not None
+    try:
+        return importlib.util.find_spec(mod_name) is not None
+    except (ValueError, ImportError):
+        return False
+
+
 def resolve_hardware_profile(profile="auto"):
     """Resolve hardware execution profile without importing PyTorch under nano/edge."""
     raw = (profile or "auto").strip().lower()
@@ -196,9 +241,9 @@ def resolve_hardware_profile(profile="auto"):
             f"Unsupported profile {profile!r}; expected one of {list(XOCR_PROFILES)}."
         )
 
-    has_rapidocr = importlib.util.find_spec("rapidocr_onnxruntime") is not None
+    has_rapidocr = _has_module_available("rapidocr_onnxruntime")
     has_tesseract = bool(
-        importlib.util.find_spec("pytesseract") is not None
+        _has_module_available("pytesseract")
         and shutil.which("tesseract")
     )
 
@@ -455,8 +500,220 @@ def load_xocr_genomes(genomes_file=None):
     return fallback
 
 
+def _normalize_span_key(text):
+    """Return whitespace-collapsed normalized text for faux-bold span matching."""
+    return re.sub(r"\s+", " ", normalize_text(text or "")).strip()
+
+
+def _detect_and_strip_faux_bold(pdict):
+    """Remove micro-shifted duplicate faux-bold spans from a PyMuPDF text dict.
+
+    Returns ``(clean_pdict, faux_bold_detected)``. When no duplicate spans are
+    found (99%+ normal pages), returns ``(pdict, False)`` completely untouched.
+    """
+    if not isinstance(pdict, dict):
+        return pdict, False
+    blocks = pdict.get("blocks") or []
+    by_text = {}
+    span_count = 0
+    for bi, blk in enumerate(blocks):
+        if blk.get("type", 0) != 0:
+            continue
+        for li, ln in enumerate(blk.get("lines") or []):
+            for si, sp in enumerate(ln.get("spans") or []):
+                norm_k = _normalize_span_key(sp.get("text") or "")
+                if not norm_k:
+                    continue
+                sb = sp.get("bbox") or ln.get("bbox")
+                if not sb or len(sb) != 4:
+                    continue
+                span_count += 1
+                by_text.setdefault(norm_k, []).append(
+                    (
+                        bi,
+                        li,
+                        si,
+                        float(sb[0]),
+                        float(sb[1]),
+                        float(sb[2]),
+                        float(sb[3]),
+                        float(sp.get("size") or 10.0),
+                    )
+                )
+
+    if span_count < 2:
+        return pdict, False
+
+    ghost_coords = set()
+    for norm_k, entries in by_text.items():
+        if len(entries) < 2:
+            continue
+        entries.sort(key=lambda e: (round(e[4], 2), round(e[3], 2), e[0], e[1], e[2]))
+        is_short_1 = len(norm_k) == 1
+        kept = []
+        for ent in entries:
+            bi, li, si, x0, y0, x1, y1, fsz = ent
+            is_ghost = False
+            for _, _, _, kx0, ky0, kx1, ky1, kfsz in kept:
+                size_ratio = max(fsz, kfsz) / max(0.5, min(fsz, kfsz))
+                if size_ratio > 1.35:
+                    continue
+                dx = abs(x0 - kx0)
+                dy = abs(y0 - ky0)
+                if dx <= 2.0 and dy <= 2.0:
+                    if is_short_1:
+                        x_ov = min(x1, kx1) > max(x0, kx0)
+                        if (dx <= 0.8 and dy <= 0.8) or x_ov:
+                            is_ghost = True
+                            break
+                    else:
+                        is_ghost = True
+                        break
+            if is_ghost:
+                ghost_coords.add((bi, li, si))
+            else:
+                kept.append(ent)
+
+    if not ghost_coords:
+        return pdict, False
+
+    clean_blocks = []
+    for bi, blk in enumerate(blocks):
+        if blk.get("type", 0) != 0:
+            clean_blocks.append(blk)
+            continue
+        new_lines = []
+        for li, ln in enumerate(blk.get("lines") or []):
+            orig_spans = ln.get("spans") or []
+            kept_spans = [
+                sp
+                for si, sp in enumerate(orig_spans)
+                if (bi, li, si) not in ghost_coords
+            ]
+            if kept_spans:
+                new_ln = dict(ln)
+                new_ln["spans"] = kept_spans
+                new_lines.append(new_ln)
+        if new_lines:
+            new_blk = dict(blk)
+            new_blk["lines"] = new_lines
+            clean_blocks.append(new_blk)
+
+    clean_pdict = dict(pdict)
+    clean_pdict["blocks"] = clean_blocks
+    return clean_pdict, True
+
+
+def _rebuild_clean_text_from_dict(pdict):
+    """Rebuild sorted reading-order text from a de-ghosted PyMuPDF text dict."""
+    horiz_lines = []
+    other_lines = []
+    for blk in (pdict or {}).get("blocks") or []:
+        if blk.get("type", 0) != 0:
+            continue
+        for ln in blk.get("lines") or []:
+            dir_vec = ln.get("dir") or (1.0, 0.0)
+            dx = float(dir_vec[0])
+            spans = []
+            for sp in ln.get("spans") or []:
+                stxt = sp.get("text") or ""
+                if not stxt:
+                    continue
+                if not stxt.strip():
+                    if spans and not spans[-1][4].endswith((" ", "\t")):
+                        spans[-1] = (
+                            spans[-1][0],
+                            spans[-1][1],
+                            spans[-1][2],
+                            spans[-1][3],
+                            spans[-1][4] + " ",
+                            spans[-1][5],
+                        )
+                    continue
+                sb = sp.get("bbox") or ln.get("bbox")
+                if not sb or len(sb) != 4:
+                    continue
+                spans.append(
+                    (
+                        float(sb[0]),
+                        float(sb[1]),
+                        float(sb[2]),
+                        float(sb[3]),
+                        stxt,
+                        float(sp.get("size") or 10.0),
+                    )
+                )
+            if not spans:
+                continue
+            if dx >= 0.92:
+                spans.sort(key=lambda s: (s[0], s[1]))
+                horiz_lines.append(
+                    [
+                        min(s[0] for s in spans),
+                        min(s[1] for s in spans),
+                        max(s[2] for s in spans),
+                        max(s[3] for s in spans),
+                        max(6.0, sum(s[5] for s in spans) / len(spans)),
+                        spans,
+                    ]
+                )
+            else:
+                txt_joined = "".join(s[4] for s in spans).strip()
+                lb = ln.get("bbox") or (spans[0][0], spans[0][1], spans[0][2], spans[0][3])
+                if txt_joined:
+                    other_lines.append(
+                        (float(lb[1]), float(lb[0]), normalize_text(txt_joined))
+                    )
+
+    horiz_lines.sort(key=lambda item: (item[1], item[0]))
+    baseline_groups = []
+    for item in horiz_lines:
+        iyc = 0.5 * (item[1] + item[3])
+        if baseline_groups:
+            grp = baseline_groups[-1]
+            gyc = 0.5 * (grp[1] + grp[3])
+            fref = max(6.0, grp[4], item[4])
+            if abs(item[1] - grp[1]) <= 0.45 * fref or abs(iyc - gyc) <= 0.45 * fref:
+                grp[0] = min(grp[0], item[0])
+                grp[1] = min(grp[1], item[1])
+                grp[2] = max(grp[2], item[2])
+                grp[3] = max(grp[3], item[3])
+                grp[4] = max(grp[4], item[4])
+                grp[5].extend(item[5])
+                continue
+        baseline_groups.append(
+            [item[0], item[1], item[2], item[3], item[4], list(item[5])]
+        )
+
+    out_lines = []
+    for grp in baseline_groups:
+        spans = sorted(grp[5], key=lambda s: (s[0], s[1]))
+        parts = [spans[0][4]]
+        prev_x1 = spans[0][2]
+        prev_txt = spans[0][4]
+        for sp in spans[1:]:
+            gap = sp[0] - prev_x1
+            cur_txt = sp[4]
+            if (
+                gap > 1.5
+                and not prev_txt.endswith((" ", "\t"))
+                and not cur_txt.startswith((" ", "\t"))
+            ):
+                parts.append(" ")
+            parts.append(cur_txt)
+            prev_x1 = max(prev_x1, sp[2])
+            prev_txt = cur_txt
+        line_str = normalize_text("".join(parts)).strip()
+        if line_str:
+            out_lines.append((grp[1], grp[0], line_str))
+
+    out_lines.extend(other_lines)
+    out_lines.sort(key=lambda row: (round(row[0], 2), round(row[1], 2)))
+    return "\n".join(row[2] for row in out_lines)
+
+
 def _extract_text_and_dict_fast(page):
-    """Extract sorted text and text-only dict in one TextPage pass when possible."""
+    """Extract sorted text and text-only dict in one TextPage pass with faux-bold de-ghosting."""
     if page is None:
         return "", None
     if hasattr(page, "get_textpage"):
@@ -467,7 +724,11 @@ def _extract_text_and_dict_fast(page):
             tp = page.get_textpage(flags=txt_flags)
             raw_txt = page.get_text("text", textpage=tp, sort=True) or ""
             pdict = page.get_text("dict", textpage=tp) or {}
-            return raw_txt, pdict
+            clean_pdict, faux_bold = _detect_and_strip_faux_bold(pdict)
+            if not faux_bold:
+                return raw_txt, pdict
+            clean_txt = _rebuild_clean_text_from_dict(clean_pdict)
+            return (clean_txt if clean_txt else raw_txt), clean_pdict
         except Exception:  # nosec B110
             pass
     try:
@@ -479,8 +740,197 @@ def _extract_text_and_dict_fast(page):
         return "", None
 
 
+def _quantize_dir_bucket(dir_vec):
+    """Quantize line direction unit vector into stable orientation buckets."""
+    if not dir_vec or len(dir_vec) < 2:
+        return "H", 1.0, 0.0
+    dx, dy = float(dir_vec[0]), float(dir_vec[1])
+    norm = math.hypot(dx, dy)
+    if norm <= 1e-6:
+        return "H", 1.0, 0.0
+    ux, uy = dx / norm, dy / norm
+    if ux >= 0.92:
+        return "H", 1.0, 0.0
+    if uy <= -0.92:
+        return "V90", 0.0, -1.0
+    if uy >= 0.92:
+        return "V270", 0.0, 1.0
+    ang = int(round(math.degrees(math.atan2(uy, ux)) / 15.0) * 15) % 360
+    rad = math.radians(ang)
+    return f"A{ang}", math.cos(rad), math.sin(rad)
+
+
+def _assemble_horizontal_block(blk, atoms, seen):
+    """Assemble horizontal lines inside a single PyMuPDF dict block into atoms."""
+    line_items = []
+    for line in blk.get("lines") or []:
+        bkey, _, _ = _quantize_dir_bucket(line.get("dir"))
+        if bkey != "H":
+            continue
+        spans = []
+        for sp in line.get("spans") or []:
+            txt = sp.get("text") or ""
+            if not txt.strip():
+                continue
+            sb = sp.get("bbox") or line.get("bbox")
+            if not sb or len(sb) != 4:
+                continue
+            spans.append(
+                [
+                    float(sb[0]),
+                    float(sb[1]),
+                    float(sb[2]),
+                    float(sb[3]),
+                    txt,
+                    float(sp.get("size") or 10.0),
+                ]
+            )
+        if not spans:
+            continue
+        spans.sort(key=lambda s: (s[0], s[1]))
+        merged = [spans[0]]
+        for sp in spans[1:]:
+            prev = merged[-1]
+            fsize = max(6.0, 0.5 * (prev[5] + sp[5]))
+            gap = sp[0] - prev[2]
+            y_diff = abs(0.5 * (sp[1] + sp[3]) - 0.5 * (prev[1] + prev[3]))
+            if y_diff <= 0.45 * fsize and gap <= max(8.0, 0.65 * fsize):
+                sep = "" if gap <= 1.5 else " "
+                prev[0] = min(prev[0], sp[0])
+                prev[1] = min(prev[1], sp[1])
+                prev[2] = max(prev[2], sp[2])
+                prev[3] = max(prev[3], sp[3])
+                prev[4] = prev[4] + sep + sp[4]
+            else:
+                merged.append(sp)
+        for item in merged:
+            line_items.append(item)
+
+    if not line_items:
+        return
+
+    line_items.sort(key=lambda s: (round(s[1], 1), s[0]))
+    baseline_merged = [line_items[0]]
+    for item in line_items[1:]:
+        prev = baseline_merged[-1]
+        h = max(6.0, min(prev[3] - prev[1], item[3] - item[1]))
+        yc_diff = abs(0.5 * (item[1] + item[3]) - 0.5 * (prev[1] + prev[3]))
+        gap = item[0] - prev[2]
+        if yc_diff <= 0.35 * h and -h <= gap <= max(8.0, 0.65 * item[5]):
+            sep = "" if gap <= 1.5 else " "
+            prev[0] = min(prev[0], item[0])
+            prev[1] = min(prev[1], item[1])
+            prev[2] = max(prev[2], item[2])
+            prev[3] = max(prev[3], item[3])
+            prev[4] = prev[4] + sep + item[4]
+        else:
+            baseline_merged.append(item)
+
+    col_groups = []
+    for item in baseline_merged:
+        norm_line = re.sub(r"\s+", " ", normalize_text(item[4])).strip()
+        if not norm_line:
+            continue
+        placed = False
+        for grp in col_groups:
+            x_ov = min(grp[2], item[2]) - max(grp[0], item[0])
+            min_w = max(1.0, min(grp[2] - grp[0], item[2] - item[0]))
+            y_gap = item[1] - grp[3]
+            h_ref = max(6.0, item[3] - item[1])
+            if (
+                (abs(item[0] - grp[0]) <= 18.0 or x_ov / min_w >= 0.45)
+                and -0.4 * h_ref <= y_gap <= 0.75 * h_ref
+            ):
+                grp[0] = min(grp[0], item[0])
+                grp[1] = min(grp[1], item[1])
+                grp[2] = max(grp[2], item[2])
+                grp[3] = max(grp[3], item[3])
+                grp[4] = grp[4] + " " + norm_line
+                placed = True
+                break
+        if not placed:
+            col_groups.append(
+                [item[0], item[1], item[2], item[3], norm_line, item[5]]
+            )
+
+    for grp in col_groups:
+        _append_dedup_atom(
+            atoms,
+            seen,
+            grp[0],
+            grp[1],
+            grp[2],
+            grp[3],
+            grp[4],
+            grp[5],
+        )
+
+
+def _assemble_rotated_bucket_spans(bucket_items, bdx, bdy, atoms, seen):
+    """Assemble rotated spans sharing one orientation bucket along (n_band, t)."""
+    if not bucket_items:
+        return
+    # Group into parallel normal-axis bands without cross-band merging
+    bands = []
+    for sp in sorted(bucket_items, key=lambda s: (s["n_c"], s["t_start"])):
+        placed = False
+        for band in reversed(bands):
+            ref_n = band["n_sum"] / float(len(band["items"]))
+            ref_f = max(sp["size"], band["max_size"])
+            if abs(sp["n_c"] - ref_n) <= 0.55 * ref_f:
+                band["items"].append(sp)
+                band["n_sum"] += sp["n_c"]
+                band["max_size"] = ref_f
+                placed = True
+                break
+        if not placed:
+            bands.append(
+                {"n_sum": sp["n_c"], "max_size": sp["size"], "items": [sp]}
+            )
+
+    for band in bands:
+        items = sorted(band["items"], key=lambda s: (s["t_start"], s["t_c"]))
+        merged = [dict(items[0])]
+        for cur in items[1:]:
+            prev = merged[-1]
+            fsize = max(6.0, prev["size"], cur["size"])
+            n_diff = abs(cur["n_c"] - prev["n_c"])
+            t_gap = cur["t_start"] - prev["t_end"]
+            if (
+                n_diff <= 0.55 * fsize
+                and -0.35 * fsize <= t_gap <= max(10.0, 1.2 * fsize)
+            ):
+                had_space = prev.get("trail_space") or cur.get("lead_space")
+                sep = " " if (t_gap > 1.5 or had_space) else ""
+                prev["x0"] = min(prev["x0"], cur["x0"])
+                prev["y0"] = min(prev["y0"], cur["y0"])
+                prev["x1"] = max(prev["x1"], cur["x1"])
+                prev["y1"] = max(prev["y1"], cur["y1"])
+                prev["t_end"] = max(prev["t_end"], cur["t_end"])
+                prev["n_c"] = 0.5 * (prev["n_c"] + cur["n_c"])
+                prev["size"] = max(prev["size"], cur["size"])
+                prev["trail_space"] = bool(cur.get("trail_space", False))
+                prev["text"] = f"{prev['text']}{sep}{cur['text']}"
+            else:
+                merged.append(dict(cur))
+        for item in merged:
+            clean_txt = re.sub(r"\s+", " ", normalize_text(item["text"])).strip()
+            if clean_txt:
+                _append_dedup_atom(
+                    atoms,
+                    seen,
+                    item["x0"],
+                    item["y0"],
+                    item["x1"],
+                    item["y1"],
+                    clean_txt,
+                    item["size"],
+                    dir_vec=item["dir"],
+                )
+
+
 def _extract_clean_text_atoms(page, blocks=None, text_dict=None):
-    """Extract normalized, deduplicated text cell/line atoms with exact bboxes."""
+    """Extract normalized, orientation-aware deduplicated text atoms with bboxes."""
     atoms = []
     seen = set()
 
@@ -495,116 +945,96 @@ def _extract_clean_text_atoms(page, blocks=None, text_dict=None):
 
                 txt_flags = getattr(fitz, "TEXTFLAGS_TEXT", 0)
                 pdict = page.get_text("dict", flags=txt_flags) or {}
-            for blk in pdict.get("blocks") or []:
-                if blk.get("type", 0) != 0:
-                    continue
-                line_items = []
+
+            dict_blocks = [
+                blk
+                for blk in (pdict.get("blocks") or [])
+                if blk.get("type", 0) == 0
+            ]
+            has_rotated = False
+            for blk in dict_blocks:
                 for line in blk.get("lines") or []:
-                    spans = []
-                    for sp in line.get("spans") or []:
-                        txt = sp.get("text") or ""
-                        if not txt.strip():
+                    if not any((sp.get("text") or "").strip() for sp in (line.get("spans") or [])):
+                        continue
+                    bkey, _, _ = _quantize_dir_bucket(line.get("dir"))
+                    if bkey != "H":
+                        has_rotated = True
+                        break
+                if has_rotated:
+                    break
+
+            for blk in dict_blocks:
+                _assemble_horizontal_block(blk, atoms, seen)
+
+            if has_rotated:
+                rot_buckets = {}
+                for blk in dict_blocks:
+                    for line in blk.get("lines") or []:
+                        raw_dir = line.get("dir") or (1.0, 0.0)
+                        bkey, bdx, bdy = _quantize_dir_bucket(raw_dir)
+                        if bkey == "H":
                             continue
-                        sb = sp.get("bbox") or line.get("bbox")
-                        if not sb or len(sb) != 4:
-                            continue
-                        spans.append(
-                            [
+                        norm_raw = math.hypot(float(raw_dir[0]), float(raw_dir[1])) or 1.0
+                        dir_out = [
+                            round(float(raw_dir[0]) / norm_raw, 3),
+                            round(float(raw_dir[1]) / norm_raw, 3),
+                        ]
+                        pending_lead_space = False
+                        bucket_list = rot_buckets.setdefault((bkey, bdx, bdy), [])
+                        for sp in line.get("spans") or []:
+                            txt = sp.get("text") or ""
+                            if not txt:
+                                continue
+                            if not txt.strip():
+                                if bucket_list and bucket_list[-1].get("dir") == dir_out:
+                                    bucket_list[-1]["trail_space"] = True
+                                pending_lead_space = True
+                                continue
+                            sb = sp.get("bbox") or line.get("bbox")
+                            if not sb or len(sb) != 4:
+                                pending_lead_space = False
+                                continue
+                            x0, y0, x1, y1 = (
                                 float(sb[0]),
                                 float(sb[1]),
                                 float(sb[2]),
                                 float(sb[3]),
-                                txt,
-                                float(sp.get("size") or 10.0),
-                            ]
-                        )
-                    if not spans:
-                        continue
-                    spans.sort(key=lambda s: (s[0], s[1]))
-                    merged = [spans[0]]
-                    for sp in spans[1:]:
-                        prev = merged[-1]
-                        fsize = max(6.0, 0.5 * (prev[5] + sp[5]))
-                        gap = sp[0] - prev[2]
-                        y_diff = abs(
-                            0.5 * (sp[1] + sp[3]) - 0.5 * (prev[1] + prev[3])
-                        )
-                        if y_diff <= 0.45 * fsize and gap <= max(8.0, 0.65 * fsize):
-                            sep = "" if gap <= 1.5 else " "
-                            prev[0] = min(prev[0], sp[0])
-                            prev[1] = min(prev[1], sp[1])
-                            prev[2] = max(prev[2], sp[2])
-                            prev[3] = max(prev[3], sp[3])
-                            prev[4] = prev[4] + sep + sp[4]
-                        else:
-                            merged.append(sp)
-                    for item in merged:
-                        line_items.append(item)
+                            )
+                            fsize = float(sp.get("size") or 10.0)
+                            cx = 0.5 * (x0 + x1)
+                            cy = 0.5 * (y0 + y1)
+                            w = max(0.5, x1 - x0)
+                            h = max(0.5, y1 - y0)
+                            t_c = cx * bdx + cy * bdy
+                            n_c = -cx * bdy + cy * bdx
+                            half_t = max(
+                                0.5 * fsize,
+                                0.5 * (w * abs(bdx) + h * abs(bdy))
+                                - abs(bdx * bdy) * 1.3 * fsize,
+                            )
+                            bucket_list.append(
+                                {
+                                    "x0": x0,
+                                    "y0": y0,
+                                    "x1": x1,
+                                    "y1": y1,
+                                    "text": txt.strip(),
+                                    "lead_space": bool(
+                                        pending_lead_space or txt.startswith((" ", "\t"))
+                                    ),
+                                    "trail_space": bool(txt.endswith((" ", "\t"))),
+                                    "size": fsize,
+                                    "t_c": t_c,
+                                    "t_start": t_c - half_t,
+                                    "t_end": t_c + half_t,
+                                    "n_c": n_c,
+                                    "dir": dir_out,
+                                }
+                            )
+                            pending_lead_space = False
+                for (bkey, bdx, bdy), items in rot_buckets.items():
+                    _assemble_rotated_bucket_spans(items, bdx, bdy, atoms, seen)
 
-                if not line_items:
-                    continue
-
-                # Merge same-baseline segments across PyMuPDF lines (e.g. PUA split spans)
-                line_items.sort(key=lambda s: (round(s[1], 1), s[0]))
-                baseline_merged = [line_items[0]]
-                for item in line_items[1:]:
-                    prev = baseline_merged[-1]
-                    h = max(6.0, min(prev[3] - prev[1], item[3] - item[1]))
-                    yc_diff = abs(
-                        0.5 * (item[1] + item[3]) - 0.5 * (prev[1] + prev[3])
-                    )
-                    gap = item[0] - prev[2]
-                    if yc_diff <= 0.35 * h and -h <= gap <= max(8.0, 0.65 * item[5]):
-                        sep = "" if gap <= 1.5 else " "
-                        prev[0] = min(prev[0], item[0])
-                        prev[1] = min(prev[1], item[1])
-                        prev[2] = max(prev[2], item[2])
-                        prev[3] = max(prev[3], item[3])
-                        prev[4] = prev[4] + sep + item[4]
-                    else:
-                        baseline_merged.append(item)
-
-                # Group lines inside a single block that share an X column band
-                col_groups = []
-                for item in baseline_merged:
-                    norm_line = re.sub(
-                        r"\s+", " ", normalize_text(item[4])
-                    ).strip()
-                    if not norm_line:
-                        continue
-                    placed = False
-                    for grp in col_groups:
-                        x_ov = min(grp[2], item[2]) - max(grp[0], item[0])
-                        min_w = max(1.0, min(grp[2] - grp[0], item[2] - item[0]))
-                        y_gap = item[1] - grp[3]
-                        h_ref = max(6.0, item[3] - item[1])
-                        if (
-                            (abs(item[0] - grp[0]) <= 18.0 or x_ov / min_w >= 0.45)
-                            and -0.4 * h_ref <= y_gap <= 0.75 * h_ref
-                        ):
-                            grp[0] = min(grp[0], item[0])
-                            grp[1] = min(grp[1], item[1])
-                            grp[2] = max(grp[2], item[2])
-                            grp[3] = max(grp[3], item[3])
-                            grp[4] = grp[4] + " " + norm_line
-                            placed = True
-                            break
-                    if not placed:
-                        col_groups.append(
-                            [item[0], item[1], item[2], item[3], norm_line, item[5]]
-                        )
-
-                for grp in col_groups:
-                    _append_dedup_atom(
-                        atoms,
-                        seen,
-                        grp[0],
-                        grp[1],
-                        grp[2],
-                        grp[3],
-                        grp[4],
-                        grp[5],
-                    )
             if atoms:
                 return atoms
         except Exception:  # nosec B110
@@ -637,7 +1067,7 @@ def _extract_clean_text_atoms(page, blocks=None, text_dict=None):
     return atoms
 
 
-def _append_dedup_atom(atoms, seen, x0, y0, x1, y1, text_val, size_val):
+def _append_dedup_atom(atoms, seen, x0, y0, x1, y1, text_val, size_val, dir_vec=None):
     """Append atom while suppressing faux-bold slightly-offset duplicate prints."""
     fx0, fy0, fx1, fy1 = float(x0), float(y0), float(x1), float(y1)
     key = (round(fx0, 1), round(fy0, 1), text_val)
@@ -665,16 +1095,17 @@ def _append_dedup_atom(atoms, seen, x0, y0, x1, y1, text_val, size_val):
             if (inter / min_a) >= 0.70 and compact == p_compact:
                 return
     seen.add(key)
-    atoms.append(
-        {
-            "x0": fx0,
-            "y0": fy0,
-            "x1": fx1,
-            "y1": fy1,
-            "text": text_val,
-            "size": float(size_val),
-        }
-    )
+    entry = {
+        "x0": fx0,
+        "y0": fy0,
+        "x1": fx1,
+        "y1": fy1,
+        "text": text_val,
+        "size": float(size_val),
+    }
+    if dir_vec is not None:
+        entry["dir"] = [round(float(dir_vec[0]), 3), round(float(dir_vec[1]), 3)]
+    atoms.append(entry)
 
 
 def _compute_canvas_occupancy(page, atoms):
@@ -746,6 +1177,75 @@ def _probe_drawings_fast(page, img_metrics):
     return drawings, False
 
 
+def _fast_drawing_metrics(page, drawings=None, img_metrics=None):
+    """Compute vector drawing counts, table rules, and short-stroke ratio in one pass."""
+    if img_metrics is None:
+        img_metrics = _fast_page_image_metrics(page)
+    if drawings is None:
+        drawings, drawings_skipped = _probe_drawings_fast(page, img_metrics)
+    else:
+        drawings_skipped = False
+
+    vector_drawing_count = len(drawings)
+    h_rules = 0
+    g_rects = 0
+    short_strokes = 0
+    finite_rects = 0
+    for drw in drawings:
+        rect = drw.get("rect")
+        if not rect:
+            continue
+        x0 = float(rect.x0)
+        y0 = float(rect.y0)
+        x1 = float(rect.x1)
+        y1 = float(rect.y1)
+        if not (
+            math.isfinite(x0)
+            and math.isfinite(y0)
+            and math.isfinite(x1)
+            and math.isfinite(y1)
+        ):
+            continue
+        finite_rects += 1
+        w = abs(x1 - x0)
+        h = abs(y1 - y0)
+        max_dim = max(w, h)
+        if 0.2 < max_dim <= 28.0:
+            short_strokes += 1
+        if w >= 120.0 and h <= 5.0:
+            h_rules += 1
+        elif w >= 25.0 and h >= 10.0 and drw.get("type") != "f":
+            g_rects += 1
+
+    short_stroke_ratio = (short_strokes / float(finite_rects)) if finite_rects > 0 else 0.0
+    short_item_strokes = 0
+    total_item_strokes = 0
+    if (not drawings_skipped) and 0 < vector_drawing_count < 400:
+        for drw in drawings:
+            for item in drw.get("items") or ():
+                if total_item_strokes >= 3000:
+                    break
+                if item and item[0] == "l" and len(item) >= 3:
+                    p1, p2 = item[1], item[2]
+                    seg_len = math.hypot(float(p2.x) - float(p1.x), float(p2.y) - float(p1.y))
+                    total_item_strokes += 1
+                    if 0.2 < seg_len <= 28.0:
+                        short_item_strokes += 1
+            if total_item_strokes >= 3000:
+                break
+        if total_item_strokes >= 400:
+            short_stroke_ratio = short_item_strokes / float(total_item_strokes)
+
+    return {
+        "drawings": drawings,
+        "drawings_skipped": drawings_skipped,
+        "vector_drawing_count": max(vector_drawing_count, short_item_strokes if total_item_strokes >= 400 else 0),
+        "h_rules": h_rules,
+        "g_rects": g_rects,
+        "short_stroke_ratio": round(short_stroke_ratio, 4),
+    }
+
+
 def classify_page_regime(
     page, raw_text=None, qual=None, genomes=None, profile="auto", text_dict=None
 ):
@@ -764,21 +1264,13 @@ def classify_page_regime(
 
     img_metrics = qual.get("image_metrics") or _fast_page_image_metrics(page)
     atoms = _extract_clean_text_atoms(page, text_dict=text_dict)
-    drawings, drawings_skipped = _probe_drawings_fast(page, img_metrics)
-
-    vector_drawing_count = len(drawings)
-    h_rules = 0
-    g_rects = 0
-    for drw in drawings:
-        rect = drw.get("rect")
-        if not rect:
-            continue
-        w = rect.x1 - rect.x0
-        h = rect.y1 - rect.y0
-        if w >= 120 and h <= 5.0:
-            h_rules += 1
-        elif w >= 25 and h >= 10 and drw.get("type") != "f":
-            g_rects += 1
+    drw_metrics = _fast_drawing_metrics(page, img_metrics=img_metrics)
+    drawings = drw_metrics["drawings"]
+    drawings_skipped = drw_metrics["drawings_skipped"]
+    vector_drawing_count = drw_metrics["vector_drawing_count"]
+    h_rules = drw_metrics["h_rules"]
+    g_rects = drw_metrics["g_rects"]
+    short_stroke_ratio = drw_metrics["short_stroke_ratio"]
 
     unexplained_ratio, callout_entropy = _compute_canvas_occupancy(page, atoms)
 
@@ -862,12 +1354,31 @@ def classify_page_regime(
             confidence = norm_probs[best_regime]
             conformal_abstain = True
 
+    exploded_glyphs_suspected = bool(
+        (not drawings_skipped)
+        and clean_chars < 35
+        and vector_drawing_count >= 400
+        and short_stroke_ratio >= 0.45
+        and img_area_ratio < 0.35
+        and h_rules == 0
+        and g_rects <= 4
+    )
+    if exploded_glyphs_suspected and best_regime not in (
+        "HYBRID_COMPOSITE_DRAWING",
+        "RASTER_DRAWING_OR_MAP",
+    ):
+        best_regime = "VECTOR_CAD_DRAWING"
+        confidence = norm_probs[best_regime]
+        conformal_abstain = bool((1.0 - confidence) > q_hat)
+
     needs_ocr = bool(
         qual["needs_ocr"]
+        or exploded_glyphs_suspected
         or best_regime in ("RASTER_DRAWING_OR_MAP", "HYBRID_COMPOSITE_DRAWING")
     )
     needs_vision = bool(
-        best_regime
+        exploded_glyphs_suspected
+        or best_regime
         in (
             "VECTOR_CAD_DRAWING",
             "RASTER_DRAWING_OR_MAP",
@@ -887,6 +1398,8 @@ def classify_page_regime(
         "feature_vector": feat_vec,
         "unexplained_canvas_ratio": unexplained_ratio,
         "vector_drawing_count": vector_drawing_count,
+        "short_stroke_ratio": short_stroke_ratio,
+        "exploded_glyphs_suspected": exploded_glyphs_suspected,
         "drawings_probe_skipped": drawings_skipped,
         "image_metrics": img_metrics,
         "needs_ocr": needs_ocr,
@@ -901,6 +1414,11 @@ def _extract_aligned_block_tables(page, blocks=None, atoms=None):
     """Recover borderless multi-column tables by X/Y coordinate alignment."""
     if atoms is None or blocks is not None:
         atoms = _extract_clean_text_atoms(page, blocks=blocks)
+    atoms = [
+        a
+        for a in (atoms or [])
+        if not ("dir" in a and abs(float(a["dir"][0])) < 0.90)
+    ]
     if len(atoms) < 4:
         return []
 
@@ -1179,6 +1697,8 @@ def extract_spatial_cad_index(
             "pt_bbox": [round(a["x0"], 2), round(a["y0"], 2), round(a["x1"], 2), round(a["y1"], 2)],
             "tile_id": tid,
         }
+        if "dir" in a:
+            entry["dir"] = a["dir"]
         localized_blocks.append(entry)
 
         t_rec = tiles[tid]
@@ -1263,6 +1783,656 @@ def extract_spatial_cad_index(
         "blocks": localized_blocks,
         "tables": out_tables,
     }
+
+
+def _resolve_page_rect_bounds(page_rect):
+    """Normalize fitz.Rect, (x0, y0, x1, y1), or (w, h) into (rx0, ry0, pw, ph)."""
+    if hasattr(page_rect, "x0") and hasattr(page_rect, "width"):
+        return (
+            float(page_rect.x0),
+            float(page_rect.y0),
+            max(1.0, abs(float(page_rect.width))),
+            max(1.0, abs(float(page_rect.height))),
+        )
+    if isinstance(page_rect, (tuple, list)):
+        if len(page_rect) == 4:
+            rx0, ry0, x1, y1 = [float(v) for v in page_rect]
+            return rx0, ry0, max(1.0, abs(x1 - rx0)), max(1.0, abs(y1 - ry0))
+        if len(page_rect) == 2:
+            return 0.0, 0.0, max(1.0, float(page_rect[0])), max(1.0, float(page_rect[1]))
+    return 0.0, 0.0, 1.0, 1.0
+
+
+def compute_unexplained_canvas_bbox(page_rect, atoms, tables=None, drawing_stats=None):
+    """Compute normalized canvas ROI excluding dense sidebar legends or titleblocks."""
+    del drawing_stats
+    rx0, ry0, pw, ph = _resolve_page_rect_bounds(page_rect)
+
+    norm_atoms = []
+    for a in atoms or []:
+        if not isinstance(a, dict):
+            continue
+        txt = str(a.get("text") or "").strip()
+        if not txt:
+            continue
+        nx0 = max(0.0, min(1.0, (float(a["x0"]) - rx0) / pw))
+        ny0 = max(0.0, min(1.0, (float(a["y0"]) - ry0) / ph))
+        nx1 = max(0.0, min(1.0, (float(a["x1"]) - rx0) / pw))
+        ny1 = max(0.0, min(1.0, (float(a["y1"]) - ry0) / ph))
+        norm_atoms.append(
+            (nx0, ny0, nx1, ny1, 0.5 * (nx0 + nx1), 0.5 * (ny0 + ny1), len(txt))
+        )
+
+    if not norm_atoms and tables:
+        for tab in tables:
+            if not isinstance(tab, dict):
+                continue
+            nb = tab.get("norm_bbox")
+            if not nb or len(nb) != 4:
+                continue
+            rows_data = tab.get("rows") or []
+            flat_len = sum(len(str(c or "").strip()) for r in rows_data for c in r)
+            if flat_len > 0:
+                nx0, ny0, nx1, ny1 = [max(0.0, min(1.0, float(v))) for v in nb]
+                norm_atoms.append(
+                    (nx0, ny0, nx1, ny1, 0.5 * (nx0 + nx1), 0.5 * (ny0 + ny1), flat_len)
+                )
+
+    total_chars = sum(item[6] for item in norm_atoms)
+    if total_chars < 80:
+        return (0.0, 0.0, 1.0, 1.0)
+
+    right_atoms = [it for it in norm_atoms if it[4] >= 0.68]
+    right_chars = sum(it[6] for it in right_atoms)
+    if (right_chars / float(total_chars)) >= 0.70:
+        right_min_nx0 = min(it[0] for it in right_atoms)
+        return (0.0, 0.0, round(max(0.50, min(0.88, right_min_nx0 + 0.015)), 3), 1.0)
+
+    left_atoms = [it for it in norm_atoms if it[4] <= 0.32]
+    left_chars = sum(it[6] for it in left_atoms)
+    if (left_chars / float(total_chars)) >= 0.70:
+        left_max_nx1 = max(it[2] for it in left_atoms)
+        return (round(min(0.45, max(0.15, left_max_nx1 - 0.015)), 3), 0.0, 1.0, 1.0)
+
+    bottom_atoms = [it for it in norm_atoms if it[5] >= 0.75]
+    bottom_chars = sum(it[6] for it in bottom_atoms)
+    if (bottom_chars / float(total_chars)) >= 0.70:
+        bottom_min_ny0 = min(it[1] for it in bottom_atoms)
+        return (0.0, 0.0, 1.0, round(max(0.55, min(0.88, bottom_min_ny0 + 0.015)), 3))
+
+    return (0.0, 0.0, 1.0, 1.0)
+
+
+def _tile_cell_range_a1_d4(nx0, ny0, nx1, ny1):
+    """Map normalized bbox onto canonical 4x4 A1..D4 cell range string."""
+    cx0 = min(3, max(0, int(nx0 * 4.0 + 1e-6)))
+    cy0 = min(3, max(0, int(ny0 * 4.0 + 1e-6)))
+    cx1 = min(3, max(cx0, int(math.ceil(nx1 * 4.0 - 1e-6)) - 1))
+    cy1 = min(3, max(cy0, int(math.ceil(ny1 * 4.0 - 1e-6)) - 1))
+    start_cell = f"{_col_index_to_letters(cx0)}{cy0 + 1}"
+    end_cell = f"{_col_index_to_letters(cx1)}{cy1 + 1}"
+    return start_cell if start_cell == end_cell else f"{start_cell}..{end_cell}"
+
+
+def _seam_line_tokens(norm_line):
+    """Return lowercase alphanumeric and Thai tokens for seam Jaccard deduplication."""
+    return set(re.findall(r"[a-z0-9\u0e00-\u0e7f]+", norm_line))
+
+
+def stitch_tile_results(tile_entries):
+    """Deduplicate seam overlaps across adjacent tiles and stitch Markdown + tables."""
+    kept_by_rc = {}
+    sections = []
+    spatial_blocks = []
+    all_tables = []
+    seen_table_sigs = set()
+    engines = []
+    ocr_warnings = []
+
+    ordered = sorted(tile_entries, key=lambda t: (int(t["row"]), int(t["col"])))
+    for item in ordered:
+        r = int(item["row"])
+        c = int(item["col"])
+        nb = item["norm_bbox"]
+        nx0, ny0, nx1, ny1 = float(nb[0]), float(nb[1]), float(nb[2]), float(nb[3])
+        raw_text = normalize_text(str(item.get("text") or "")).strip()
+
+        eng = item.get("engine")
+        if eng and eng not in engines:
+            engines.append(eng)
+        warn = item.get("ocr_warning")
+        if warn and warn not in ocr_warnings:
+            ocr_warnings.append(warn)
+
+        if raw_text:
+            for rows in extract_html_tables_from_text(raw_text):
+                sig = tuple(tuple(cell for cell in row) for row in rows)
+                if sig not in seen_table_sigs:
+                    seen_table_sigs.add(sig)
+                    all_tables.append(rows)
+
+        raw_lines = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
+        n_cur = len(raw_lines)
+        cur_lead_limit = n_cur if n_cur <= 2 else max(1, int(math.ceil(0.45 * n_cur)))
+
+        neighbor_lines = []
+        for prev_rc in ((r, c - 1), (r - 1, c)):
+            if prev_rc[0] < 0 or prev_rc[1] < 0:
+                continue
+            prev_entries = kept_by_rc.get(prev_rc, [])
+            if len(prev_entries) <= 2:
+                neighbor_lines.extend(prev_entries)
+            else:
+                seam_tail = max(1, int(0.35 * len(prev_entries)))
+                neighbor_lines.extend(prev_entries[-seam_tail:])
+
+        kept_lines = []
+        kept_entries = []
+        for ln_idx, stripped in enumerate(raw_lines):
+            norm_ln = re.sub(r"\s+", " ", stripped).strip().lower()
+            toks_ln = _seam_line_tokens(norm_ln)
+            is_dup = False
+            if ln_idx < cur_lead_limit and neighbor_lines:
+                for n_norm, n_toks in neighbor_lines:
+                    if len(norm_ln) >= 4 and norm_ln == n_norm:
+                        is_dup = True
+                        break
+                    if toks_ln and n_toks and (len(norm_ln) >= 4 or len(toks_ln) >= 2):
+                        union_sz = len(toks_ln | n_toks)
+                        if union_sz > 0 and (len(toks_ln & n_toks) / float(union_sz)) >= 0.80:
+                            is_dup = True
+                            break
+            if not is_dup:
+                kept_lines.append(stripped)
+                kept_entries.append((norm_ln, toks_ln))
+
+        kept_by_rc[(r, c)] = kept_entries
+        item["dedup_text"] = "\n".join(kept_lines)
+        if kept_lines:
+            cell_range = item["cell_range"]
+            header = (
+                f"#### [Tile {r},{c} | {cell_range} | "
+                f"{nx0:.2f}..{nx1:.2f}, {ny0:.2f}..{ny1:.2f}]"
+            )
+            sections.append(f"{header}\n" + "\n".join(kept_lines))
+            primary_tid = _tile_id_from_norm_point(
+                0.5 * (nx0 + nx1), 0.5 * (ny0 + ny1), cols=4, rows=4
+            )
+            spatial_blocks.append(
+                {
+                    "text": " ".join(kept_lines)[:240],
+                    "norm_bbox": [round(nx0, 4), round(ny0, 4), round(nx1, 4), round(ny1, 4)],
+                    "tile_id": primary_tid,
+                    "cell_range": cell_range,
+                    "source": "tile_ocr",
+                }
+            )
+
+    return {
+        "stitched_text": "\n\n".join(sections),
+        "tables": all_tables,
+        "spatial_blocks": spatial_blocks,
+        "engines": engines,
+        "ocr_warnings": ocr_warnings,
+    }
+
+
+def tile_and_stitch_canvas(
+    doc,
+    page_idx,
+    canvas_bbox,
+    profile,
+    ocr_tile_fn,
+    cache_dir=None,
+    overlap=0.10,
+    max_tiles=6,
+    target_dpi=None,
+):
+    """Render composite once, crop adaptive overlapping tiles, run OCR, and stitch."""
+    import fitz
+
+    prof = resolve_hardware_profile(profile)
+    owns_doc = not isinstance(doc, fitz.Document)
+    doc_obj = fitz.open(str(doc)) if owns_doc else doc
+    try:
+        if page_idx < 0 or page_idx >= len(doc_obj):
+            raise ValueError(f"page_idx {page_idx} out of range (0..{len(doc_obj) - 1}).")
+        page = doc_obj[page_idx]
+        page_num = page_idx + 1
+
+        raw_doc_path = (
+            os.path.abspath(str(doc))
+            if owns_doc
+            else (os.path.abspath(doc_obj.name) if getattr(doc_obj, "name", "") else "")
+        )
+        if raw_doc_path and os.path.isfile(raw_doc_path):
+            st_doc = os.stat(raw_doc_path)
+            doc_key = f"{raw_doc_path}:{st_doc.st_size}:{st_doc.st_mtime_ns}"
+        elif raw_doc_path:
+            doc_key = raw_doc_path
+        else:
+            stream_tok = getattr(doc_obj, "_xocr_stream_id", None)
+            if not stream_tok:
+                import uuid as _uuid
+
+                stream_tok = f"stream:{_uuid.uuid4().hex}"
+                try:
+                    setattr(doc_obj, "_xocr_stream_id", stream_tok)
+                except Exception:  # nosec B110
+                    pass
+            doc_key = str(stream_tok)
+
+        if canvas_bbox and len(canvas_bbox) == 4:
+            cb_x0 = max(0.0, min(1.0, float(canvas_bbox[0])))
+            cb_y0 = max(0.0, min(1.0, float(canvas_bbox[1])))
+            cb_x1 = max(0.0, min(1.0, float(canvas_bbox[2])))
+            cb_y1 = max(0.0, min(1.0, float(canvas_bbox[3])))
+            if cb_x1 <= cb_x0 or cb_y1 <= cb_y0:
+                cb_x0, cb_y0, cb_x1, cb_y1 = 0.0, 0.0, 1.0, 1.0
+        else:
+            cb_x0, cb_y0, cb_x1, cb_y1 = 0.0, 0.0, 1.0, 1.0
+
+        pw = max(1.0, float(abs(page.rect.width)))
+        ph = max(1.0, float(abs(page.rect.height)))
+        cw_pt = pw * (cb_x1 - cb_x0)
+        ch_pt = ph * (cb_y1 - cb_y0)
+
+        m_tiles = max(1, int(max_tiles))
+        if m_tiles == 1:
+            cols, rows = 1, 1
+        elif m_tiles == 2:
+            cols, rows = (2, 1) if cw_pt >= ch_pt else (1, 2)
+        elif m_tiles == 3:
+            cols, rows = (3, 1) if cw_pt >= ch_pt else (1, 3)
+        elif (cw_pt / max(1.0, ch_pt)) >= 1.25 and m_tiles >= 6:
+            cols, rows = 3, 2
+        else:
+            cols, rows = 2, 2
+
+        eff_dpi = int(target_dpi if target_dpi is not None else 220)
+        max_comp_px = max(4200, int(prof.get("max_composite_px", 5400)))
+        composite_img, composite_dpi, composite_used_cache = _get_or_build_composite(
+            page,
+            doc_key,
+            page_num,
+            eff_dpi,
+            max_comp_px,
+            cache_dir=cache_dir,
+        )
+        comp_w, comp_h = composite_img.size
+
+        tile_dir = (
+            os.path.join(cache_dir, "tiles")
+            if cache_dir
+            else tempfile.mkdtemp(prefix="xocr_tiles_")
+        )
+        os.makedirs(tile_dir, exist_ok=True)
+
+        cb_w = cb_x1 - cb_x0
+        cb_h = cb_y1 - cb_y0
+        step_x = cb_w / float(cols)
+        step_y = cb_h / float(rows)
+        ov = max(0.0, min(0.35, float(overlap)))
+
+        tiles_out = []
+        for r in range(rows):
+            for c in range(cols):
+                core_nx0 = cb_x0 + c * step_x
+                core_ny0 = cb_y0 + r * step_y
+                core_nx1 = cb_x0 + (c + 1) * step_x
+                core_ny1 = cb_y0 + (r + 1) * step_y
+
+                nx0 = max(cb_x0, core_nx0 - (0.5 * ov * step_x if c > 0 else 0.0))
+                ny0 = max(cb_y0, core_ny0 - (0.5 * ov * step_y if r > 0 else 0.0))
+                nx1 = min(cb_x1, core_nx1 + (0.5 * ov * step_x if c < cols - 1 else 0.0))
+                ny1 = min(cb_y1, core_ny1 + (0.5 * ov * step_y if r < rows - 1 else 0.0))
+
+                px0 = max(0, min(comp_w - 1, int(round(nx0 * comp_w))))
+                py0 = max(0, min(comp_h - 1, int(round(ny0 * comp_h))))
+                px1 = max(px0 + 1, min(comp_w, int(round(nx1 * comp_w))))
+                py1 = max(py0 + 1, min(comp_h, int(round(ny1 * comp_h))))
+
+                tile_img = composite_img.crop((px0, py0, px1, py1))
+                tile_img = _resize_image_if_needed(tile_img, max_size=1800)
+
+                png_path = os.path.join(tile_dir, f"tile_p{page_num}_r{r}_c{c}.png")
+                tile_img.save(png_path, format="PNG", compress_level=2)
+
+                cell_range = _tile_cell_range_a1_d4(core_nx0, core_ny0, core_nx1, core_ny1)
+                tile_meta = {
+                    "page": page_num,
+                    "row": r,
+                    "col": c,
+                    "rows": rows,
+                    "cols": cols,
+                    "tile_label": f"r{r}c{c}",
+                    "cell_range": cell_range,
+                    "norm_bbox": [round(nx0, 4), round(ny0, 4), round(nx1, 4), round(ny1, 4)],
+                    "width_px": tile_img.width,
+                    "height_px": tile_img.height,
+                    "png_path": png_path,
+                    "text": "",
+                    "engine": None,
+                    "ocr_warning": None,
+                }
+                if ocr_tile_fn is not None:
+                    res = ocr_tile_fn(png_path, tile_meta)
+                    if isinstance(res, dict):
+                        tile_meta["text"] = str(res.get("text") or "")
+                        tile_meta["engine"] = res.get("engine")
+                        tile_meta["ocr_warning"] = res.get("ocr_warning")
+                    else:
+                        tile_meta["text"] = str(res or "")
+                        tile_meta["engine"] = "tile_ocr"
+                tiles_out.append(tile_meta)
+
+        stitched = (
+            stitch_tile_results(tiles_out)
+            if ocr_tile_fn is not None
+            else {
+                "stitched_text": "",
+                "tables": [],
+                "spatial_blocks": [],
+                "engines": [],
+                "ocr_warnings": [],
+            }
+        )
+        return {
+            "page": page_num,
+            "canvas_bbox": [round(cb_x0, 4), round(cb_y0, 4), round(cb_x1, 4), round(cb_y1, 4)],
+            "grid": f"{cols}x{rows}",
+            "cols": cols,
+            "rows": rows,
+            "composite_cached": composite_used_cache,
+            "composite_dpi": composite_dpi,
+            "tile_dir": tile_dir,
+            "tiles": tiles_out,
+            "stitched_text": stitched["stitched_text"],
+            "tables": stitched["tables"],
+            "spatial_blocks": stitched["spatial_blocks"],
+            "engines": stitched["engines"],
+            "ocr_warnings": stitched["ocr_warnings"],
+        }
+    finally:
+        if owns_doc:
+            doc_obj.close()
+
+
+def _merge_tile_blocks_into_spatial_page(spatial_page, tile_blocks):
+    """Append OCR tile spatial_blocks into a spatial_index page and matching A1..D4 cells."""
+    if not isinstance(spatial_page, dict) or not tile_blocks:
+        return
+    blocks = spatial_page.setdefault("blocks", [])
+    tiles = spatial_page.setdefault("tiles", {})
+    pw = max(1.0, float(spatial_page.get("page_width_pt", 1000.0)))
+    ph = max(1.0, float(spatial_page.get("page_height_pt", 1000.0)))
+    next_id = max((int(b.get("id", 0)) for b in blocks), default=0) + 1
+
+    for tb in tile_blocks:
+        nb = tb.get("norm_bbox") or [0.0, 0.0, 1.0, 1.0]
+        nx0, ny0, nx1, ny1 = [float(v) for v in nb]
+        txt = str(tb.get("text") or "").strip()
+        if not txt:
+            continue
+        tid = tb.get("tile_id") or _tile_id_from_norm_point(
+            0.5 * (nx0 + nx1), 0.5 * (ny0 + ny1), cols=4, rows=4
+        )
+        entry = {
+            "id": next_id,
+            "text": txt,
+            "norm_bbox": [round(nx0, 4), round(ny0, 4), round(nx1, 4), round(ny1, 4)],
+            "pt_bbox": [
+                round(nx0 * pw, 2),
+                round(ny0 * ph, 2),
+                round(nx1 * pw, 2),
+                round(ny1 * ph, 2),
+            ],
+            "tile_id": tid,
+            "source": tb.get("source", "tile_ocr"),
+        }
+        if "cell_range" in tb:
+            entry["cell_range"] = tb["cell_range"]
+        blocks.append(entry)
+        next_id += 1
+
+        matched_cells = []
+        for cell_id, t_rec in tiles.items():
+            cb = t_rec.get("norm_bbox") or [0.0, 0.0, 0.0, 0.0]
+            iw = max(0.0, min(nx1, float(cb[2])) - max(nx0, float(cb[0])))
+            ih = max(0.0, min(ny1, float(cb[3])) - max(ny0, float(cb[1])))
+            c_area = max(1e-6, (float(cb[2]) - float(cb[0])) * (float(cb[3]) - float(cb[1])))
+            if (iw * ih) / c_area >= 0.20:
+                matched_cells.append(cell_id)
+        if tid in tiles and tid not in matched_cells:
+            matched_cells.append(tid)
+        for cell_id in matched_cells:
+            t_rec = tiles[cell_id]
+            t_rec["block_count"] = int(t_rec.get("block_count", 0)) + 1
+            samples = t_rec.setdefault("sample_labels", [])
+            if len(samples) < 12:
+                samples.append(txt[:100])
+
+
+_XLAYA_BRIDGE_CACHE = {"checked": False, "fn": None}
+
+
+def _load_xlaya_lexical_fn():
+    """Dynamically locate xlaya's compute_lexical_scores without hardcoding user paths."""
+    if _XLAYA_BRIDGE_CACHE["checked"]:
+        return _XLAYA_BRIDGE_CACHE["fn"]
+    _XLAYA_BRIDGE_CACHE["checked"] = True
+    try:
+        laya_path = (
+            Path.home()
+            / ".gemini"
+            / "config"
+            / "skills"
+            / "xlaya"
+            / "scripts"
+            / "laya_triage.py"
+        )
+        if laya_path.is_file():
+            spec = importlib.util.spec_from_file_location("_xocr_xlaya_bridge", str(laya_path))
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                fn = getattr(mod, "compute_lexical_scores", None)
+                if callable(fn):
+                    _XLAYA_BRIDGE_CACHE["fn"] = fn
+    except Exception:  # nosec B110
+        _XLAYA_BRIDGE_CACHE["fn"] = None
+    return _XLAYA_BRIDGE_CACHE["fn"]
+
+
+def _tokenize_sniper_text(text):
+    """Tokenize query or tile text into lowercase words, sheet IDs, numbers, and Thai 3-grams."""
+    norm = normalize_text(text or "").strip()
+    low = norm.lower()
+    tokens = []
+
+    for tok in re.findall(r"[a-z0-9]+(?:[-/:.][a-z0-9]+)*", low):
+        tokens.append(tok)
+        if "-" in tok or "/" in tok or ":" in tok:
+            for part in re.split(r"[-/:]", tok):
+                if len(part) >= 2:
+                    tokens.append(part)
+
+    for sid in SHEET_ID_RE.findall(norm.upper()):
+        tokens.append(sid.lower())
+
+    for run in re.findall(r"[\u0e00-\u0e7f]+", norm):
+        if len(run) >= 3:
+            for i in range(len(run) - 2):
+                tokens.append(run[i : i + 3])
+        elif len(run) == 2:
+            tokens.append(run)
+
+    return tokens
+
+
+def rank_spatial_rois(spatial_index, query, top_k=5, xlaya_bridge=False):
+    """Rank A1..D4 spatial ROIs in <10 ms via BM25 + sheet/scale/substring/Thai boosts."""
+    if not query or not str(query).strip():
+        return []
+
+    if isinstance(spatial_index, (str, os.PathLike)):
+        with open(str(spatial_index), "r", encoding="utf-8") as fh:
+            idx_data = json.load(fh)
+    elif isinstance(spatial_index, dict):
+        idx_data = spatial_index
+    else:
+        return []
+
+    pages = idx_data.get("pages") or []
+    if not pages:
+        return []
+
+    q_raw = normalize_text(str(query)).strip()
+    q_low = re.sub(r"\s+", " ", q_raw).lower()
+    q_tokens = _tokenize_sniper_text(q_raw)
+    q_unique = list(dict.fromkeys(q_tokens))
+    q_sheet_ids = {s.lower() for s in SHEET_ID_RE.findall(q_raw.upper())}
+    # Capture grid/sheet identifiers like A-01, AX-1, GRID A-01, S-102
+    for gid in re.findall(r"\b[A-Z]{1,3}-\d{1,4}(?:\.\d+)?\b", q_raw.upper()):
+        q_sheet_ids.add(gid.lower())
+    q_num_scales = set(re.findall(r"\b\d+(?::\d+|\.\d+)?%?\b", q_low))
+
+    tile_docs = []
+    for pg in pages:
+        page_num = int(pg.get("page", 1))
+        regime = str(pg.get("regime", "DIGITAL_TEXT_TABLE"))
+        reg_info = pg.get("regime_info") or {}
+        vec_density = float(
+            (reg_info.get("features") or {}).get("vector_drawing_density", 0.0)
+        )
+        if vec_density <= 0.0 and reg_info.get("vector_drawing_count"):
+            vec_density = min(
+                1.0,
+                math.log1p(float(reg_info["vector_drawing_count"])) / math.log1p(1000.0),
+            )
+
+        blocks_by_tid = {}
+        for blk in pg.get("blocks") or []:
+            tid = blk.get("tile_id")
+            if tid and blk.get("text"):
+                blocks_by_tid.setdefault(tid, []).append(str(blk["text"]))
+
+        tables_by_tid = {}
+        for tab in pg.get("tables") or []:
+            tid = tab.get("tile_id")
+            if tid and tab.get("markdown"):
+                tables_by_tid.setdefault(tid, []).append(str(tab["markdown"]))
+
+        tiles_map = pg.get("tiles") or {}
+        for tid, t_rec in tiles_map.items():
+            parts = list(t_rec.get("sample_labels") or [])
+            parts.extend(blocks_by_tid.get(tid, ()))
+            parts.extend(tables_by_tid.get(tid, ()))
+            raw_doc = normalize_text(" ".join(parts)).strip()
+            if not raw_doc:
+                continue
+            toks = _tokenize_sniper_text(raw_doc)
+            tile_docs.append(
+                {
+                    "page": page_num,
+                    "tile_id": tid,
+                    "norm_bbox": list(t_rec.get("norm_bbox") or [0.0, 0.0, 1.0, 1.0]),
+                    "regime": regime,
+                    "vector_density": vec_density,
+                    "raw_low": re.sub(r"\s+", " ", raw_doc).lower(),
+                    "tokens": toks,
+                    "counts": Counter(toks),
+                    "dl": max(1, len(toks)),
+                }
+            )
+
+    if not tile_docs:
+        return []
+
+    n_docs = len(tile_docs)
+    avgdl = sum(d["dl"] for d in tile_docs) / float(n_docs)
+    k1 = 1.5
+    b = 0.75
+
+    df = Counter()
+    for d in tile_docs:
+        cnt = d["counts"]
+        for qt in q_unique:
+            if qt in cnt:
+                df[qt] += 1
+
+    idfs = {
+        qt: math.log(1.0 + (n_docs - df[qt] + 0.5) / (df[qt] + 0.5))
+        for qt in q_unique
+    }
+
+    xlaya_scores = None
+    if xlaya_bridge:
+        laya_fn = _load_xlaya_lexical_fn()
+        if laya_fn is not None:
+            try:
+                xlaya_scores = laya_fn([{"text": d["raw_low"]} for d in tile_docs], q_raw)
+            except Exception:  # nosec B110
+                xlaya_scores = None
+
+    scored = []
+    for idx, d in enumerate(tile_docs):
+        cnt = d["counts"]
+        raw_low = d["raw_low"]
+        matched = []
+        bm25 = 0.0
+        for qt in q_unique:
+            tf = cnt.get(qt, 0)
+            if tf > 0:
+                matched.append(qt)
+                denom = tf + k1 * (1.0 - b + b * (d["dl"] / avgdl))
+                bm25 += idfs[qt] * ((tf * (k1 + 1.0)) / denom)
+
+        sheet_boost = 0.0
+        for sid in q_sheet_ids:
+            if re.search(rf"(?<![a-z0-9]){re.escape(sid)}(?![a-z0-9])", raw_low):
+                sheet_boost += 3.0
+                if sid not in matched:
+                    matched.append(sid)
+
+        num_boost = 0.0
+        for ntok in q_num_scales:
+            if re.search(rf"(?<![0-9.:]){re.escape(ntok)}(?![0-9.:])", raw_low):
+                num_boost += 2.0
+                if ntok not in matched:
+                    matched.append(ntok)
+
+        sub_boost = 0.0
+        if len(q_low) >= 3 and q_low in raw_low:
+            sub_boost = 1.5
+            if not matched:
+                matched.append(q_low)
+
+        if bm25 <= 0.0 and sheet_boost <= 0.0 and num_boost <= 0.0 and sub_boost <= 0.0:
+            continue
+
+        total_score = bm25 + sheet_boost + num_boost + sub_boost + 0.25 * d["vector_density"]
+        if xlaya_scores is not None and idx < len(xlaya_scores):
+            total_score += float(xlaya_scores[idx])
+
+        scored.append(
+            {
+                "page": d["page"],
+                "tile_id": d["tile_id"],
+                "norm_bbox": d["norm_bbox"],
+                "score": round(total_score, 4),
+                "regime": d["regime"],
+                "matched_terms": matched,
+                "recommended_pdf_render": {
+                    "page": d["page"],
+                    "crop": d["norm_bbox"],
+                    "dpi": 300,
+                },
+            }
+        )
+
+    scored.sort(key=lambda r: (-r["score"], r["page"], r["tile_id"]))
+    return scored[: max(1, int(top_k))]
 
 
 def _encode_png_under_limit(pil_img, max_bytes=4_500_000):
@@ -2253,6 +3423,7 @@ def _run_typhoon_transformers_vlm(
     max_image_dim=1800,
 ):
     """Run SCB 10X Typhoon-OCR v1.5 (Qwen3-VL-2B or Qwen2.5-VL-3B-QAT) locally on GPU/MPS."""
+    import importlib.util
     import torch
     from PIL import Image
     from transformers import AutoModelForImageTextToText, AutoProcessor
@@ -2260,10 +3431,12 @@ def _run_typhoon_transformers_vlm(
     unload_vlm_models()
     device = _get_torch_device()
     use_4bit = bool(load_in_4bit and torch.cuda.is_available())
+    has_accelerate = importlib.util.find_spec("accelerate") is not None
     load_kwargs = {
-        "device_map": "auto" if device == "cuda" else device,
         "attn_implementation": "sdpa",
     }
+    if use_4bit or (device == "cuda" and has_accelerate):
+        load_kwargs["device_map"] = "auto"
     if use_4bit:
         from transformers import BitsAndBytesConfig
 
@@ -2277,7 +3450,10 @@ def _run_typhoon_transformers_vlm(
 
     model = AutoModelForImageTextToText.from_pretrained(
         model_id, **load_kwargs
-    ).eval()
+    )
+    if "device_map" not in load_kwargs:
+        model = model.to(device)
+    model = model.eval()
     processor = AutoProcessor.from_pretrained(model_id)
 
     vlm_texts = {}
@@ -2350,8 +3526,8 @@ def _render_page_batch(batch_args):
         doc.close()
 
 
-def ocr_image_local(image_path, langs=None, profile="auto"):
-    """Run local offline OCR respecting profile (nano=none, edge=RapidOCR/Tesseract)."""
+def ocr_image_local(image_path, langs=None, profile="auto", has_thai_hint=False):
+    """Run local offline OCR respecting profile (nano=none, edge=RapidOCR/Tesseract) + Thai guard."""
     prof = resolve_hardware_profile(profile)
     if prof["profile"] == "nano" or not prof["allow_local_cpu_ocr"]:
         return {"engine": "none", "text": ""}
@@ -2359,6 +3535,59 @@ def ocr_image_local(image_path, langs=None, profile="auto"):
     if langs is None:
         langs = ["th", "en"]
     lang_key = tuple(langs)
+
+    # Thai Script Guard: RapidOCR ONNX defaults to Latin/CJK PP-OCR models and garbles Thai.
+    if has_thai_hint:
+        if prof["has_tesseract"] or (
+            "pytesseract" in sys.modules and bool(shutil.which("tesseract"))
+        ):
+            try:
+                import pytesseract
+                from PIL import Image
+
+                avail_langs = []
+                if hasattr(pytesseract, "get_languages"):
+                    try:
+                        avail_langs = [
+                            str(lg).lower()
+                            for lg in pytesseract.get_languages(config="")
+                        ]
+                    except Exception:  # nosec B110
+                        avail_langs = []
+                if "tha" in avail_langs:
+                    img = Image.open(image_path)
+                    text = normalize_text(
+                        pytesseract.image_to_string(img, lang="tha+eng").strip()
+                    )
+                    if text:
+                        return {"engine": "pytesseract", "text": text}
+            except Exception:  # nosec B110
+                pass
+
+        if prof["allow_easyocr"]:
+            try:
+                with contextlib.redirect_stdout(sys.stderr):
+                    import easyocr
+
+                    reader = _EASYOCR_READERS.get(lang_key)
+                    if reader is None:
+                        use_gpu = _has_gpu_accel()
+                        reader = easyocr.Reader(
+                            list(langs), gpu=use_gpu, verbose=False
+                        )
+                        _EASYOCR_READERS[lang_key] = reader
+                    lines = reader.readtext(image_path, detail=0, paragraph=True)
+                text = normalize_text("\n".join(lines).strip())
+                if text:
+                    return {"engine": "easyocr", "text": text}
+            except Exception:  # nosec B110
+                pass
+
+        return {
+            "engine": "skipped_thai_guard",
+            "text": "",
+            "ocr_warning": "rapidocr_latin_only_skipped_for_thai",
+        }
 
     # Under edge (and when RapidOCR ONNX is installed), try pure-CPU ONNX first (0 torch)
     if prof["profile"] == "edge" or prof["has_rapidocr"]:
@@ -2706,6 +3935,55 @@ def _dedup_merge_page_tables(vector_tables, aligned_tables):
     return merged
 
 
+def _save_page_tables(output_dir, page_num, rec, raw_tables, seen_md=None):
+    """Persist deduplicated tables to CSV and append Markdown representations to rec."""
+    added = 0
+    seen = seen_md if seen_md is not None else set(rec.get("md_tables") or [])
+    for rows in raw_tables or ():
+        if not rows:
+            continue
+        md_tab = rows_to_markdown(rows)
+        if md_tab in seen:
+            continue
+        seen.add(md_tab)
+        rec["table_count"] += 1
+        added += 1
+        t_idx = rec["table_count"]
+        csv_name = f"table_p{page_num}_{t_idx}.csv"
+        csv_path = os.path.join(output_dir, csv_name)
+        with open(csv_path, "w", encoding="utf-8-sig", newline="") as f_csv:
+            writer = csv.writer(f_csv)
+            writer.writerows(rows)
+        rec["md_tables"].append(md_tab)
+    return added
+
+
+def _apply_stitched_tile_result(output_dir, page_num, rec, stitched, spatial_page=None):
+    """Apply tile_and_stitch_canvas output into page record, tables, and spatial_index."""
+    stitched_text = stitched.get("stitched_text") or ""
+    engines = stitched.get("engines") or []
+    tile_eng = engines[0] if engines else "tile_ocr"
+    warnings = stitched.get("ocr_warnings") or []
+    if warnings:
+        rec["ocr_warning"] = warnings[0]
+
+    if stitched_text:
+        if rec["char_count"] >= 60:
+            rec["text"] = f"{rec['text']}\n\n### Visual / Tiled Canvas OCR\n{stitched_text}"
+            rec["engine"] = f"pymupdf_vector+{tile_eng}"
+        else:
+            rec["text"] = stitched_text
+            rec["engine"] = tile_eng
+        rec["char_count"] = non_ws_count(rec["text"])
+    elif warnings and rec["char_count"] < 60:
+        rec["engine"] = "skipped_thai_guard"
+
+    added = _save_page_tables(output_dir, page_num, rec, stitched.get("tables") or [])
+    if spatial_page is not None and stitched.get("spatial_blocks"):
+        _merge_tile_blocks_into_spatial_page(spatial_page, stitched["spatial_blocks"])
+    return added
+
+
 def extract_pdf(
     pdf_path,
     output_dir,
@@ -2724,6 +4002,8 @@ def extract_pdf(
     tile=None,
     tile_grid="4x4",
     grid_overlay=True,
+    sniper_query=None,
+    xlaya_bridge=False,
 ):
     """Single-pass C++ PyMuPDF text/table/spatial extractor with profile-gated OCR."""
     t_start = time.time()
@@ -2744,119 +4024,196 @@ def extract_pdf(
         fitz.no_recommend_layout()
 
     doc = fitz.open(pdf_path)
-    total_doc_pages = len(doc)
-    selected_indices = parse_page_selection(pages_arg, total_doc_pages)
+    doc_closed = False
+    try:
+        total_doc_pages = len(doc)
+        selected_indices = parse_page_selection(pages_arg, total_doc_pages)
 
-    page_records = {}
-    pages_needing_ocr = []
-    tables_extracted = 0
-    has_fitz_tables = hasattr(fitz.Page, "find_tables")
-    spatial_pages = []
-    rendered_views_all = []
+        page_records = {}
+        stage0_ctx = {}
+        pages_needing_ocr = []
+        tables_extracted = 0
+        has_fitz_tables = hasattr(fitz.Page, "find_tables")
+        spatial_pages = []
+        spatial_page_map = {}
+        rendered_views_all = []
 
-    for page_idx in selected_indices:
-        t_p0 = time.perf_counter()
-        page = doc[page_idx]
-        page_num = page_idx + 1
-        raw_text, text_dict = _extract_text_and_dict_fast(page)
-        qual = evaluate_page_quality(raw_text, page)
-        regime_info = classify_page_regime(
-            page,
-            raw_text=raw_text,
-            qual=qual,
-            genomes=genomes,
-            profile=prof["profile"],
-            text_dict=text_dict,
-        )
-        stage0_ms = round((time.perf_counter() - t_p0) * 1000.0, 2)
-
-        page_md_tables = []
-        page_table_count = 0
-
-        vector_tables = []
-        if has_fitz_tables:
-            vector_tables = extract_tables_from_page(
+        for page_idx in selected_indices:
+            t_p0 = time.perf_counter()
+            page = doc[page_idx]
+            page_num = page_idx + 1
+            raw_text, text_dict = _extract_text_and_dict_fast(page)
+            qual = evaluate_page_quality(raw_text, page)
+            regime_info = classify_page_regime(
                 page,
-                fitz,
                 raw_text=raw_text,
-                drawings=regime_info.get("_drawings"),
-            )
-        aligned_tables = _extract_aligned_block_tables(
-            page, atoms=regime_info.get("_atoms")
-        )
-        page_tables = _dedup_merge_page_tables(vector_tables, aligned_tables)
-
-        for rows in page_tables:
-            page_table_count += 1
-            tables_extracted += 1
-            csv_name = f"table_p{page_num}_{page_table_count}.csv"
-            csv_path = os.path.join(output_dir, csv_name)
-            with open(
-                csv_path, "w", encoding="utf-8-sig", newline=""
-            ) as f_csv:
-                writer = csv.writer(f_csv)
-                writer.writerows(rows)
-            page_md_tables.append(rows_to_markdown(rows))
-
-        page_needs_ocr = bool(qual["needs_ocr"] or regime_info["needs_ocr"])
-        if mode == "vlm" or (mode == "auto" and page_needs_ocr):
-            pages_needing_ocr.append(page_idx)
-
-        if drawing_index:
-            aligned_sigs = {tuple(tuple(r) for r in at["rows"][:4]) for at in aligned_tables}
-            merged_spatial_tables = list(aligned_tables)
-            for vt in vector_tables:
-                if tuple(tuple(r) for r in vt[:4]) not in aligned_sigs:
-                    merged_spatial_tables.append({"rows": vt, "source": "vector_grid"})
-            s_idx = extract_spatial_cad_index(
-                page,
-                tile_grid=tile_grid,
-                tables=merged_spatial_tables,
-                regime_info=regime_info,
-            )
-            spatial_pages.append(s_idx)
-
-        if render_mode:
-            r_res = render_drawing_view(
-                doc,
-                page_num=page_num,
-                render_mode=render_mode,
-                bbox=bbox,
-                query=query,
-                tile=tile,
-                tile_grid=tile_grid,
-                dpi=dpi,
-                grid_overlay=grid_overlay,
-                max_bytes=prof["max_bytes"],
+                qual=qual,
+                genomes=genomes,
                 profile=prof["profile"],
-                out_path=output_dir,
-                cache_dir=os.path.join(output_dir, "_composite_cache"),
+                text_dict=text_dict,
             )
-            for v in r_res["views"]:
-                rendered_views_all.append(
-                    {k: val for k, val in v.items() if k != "png_bytes"}
+            stage0_ms = round((time.perf_counter() - t_p0) * 1000.0, 2)
+
+            vector_tables = []
+            if has_fitz_tables:
+                vector_tables = extract_tables_from_page(
+                    page,
+                    fitz,
+                    raw_text=raw_text,
+                    drawings=regime_info.get("_drawings"),
                 )
+            aligned_tables = _extract_aligned_block_tables(
+                page, atoms=regime_info.get("_atoms")
+            )
+            page_tables = _dedup_merge_page_tables(vector_tables, aligned_tables)
 
-        page_records[page_idx] = {
-            "page": page_num,
-            "text": qual["clean_text"],
-            "char_count": qual["char_count"],
-            "garble_ratio": qual["garble_ratio"],
-            "needs_ocr": page_needs_ocr,
-            "needs_vision": regime_info["needs_vision"],
-            "regime": regime_info["regime"],
-            "regime_confidence": regime_info["confidence"],
-            "conformal_abstain": regime_info["conformal_abstain"],
-            "image_count": qual["image_count"],
-            "image_area_ratio": qual["image_area_ratio"],
-            "unexplained_canvas_ratio": regime_info["unexplained_canvas_ratio"],
-            "stage0_ms": stage0_ms,
-            "table_count": page_table_count,
-            "md_tables": page_md_tables,
-            "engine": "pymupdf_vector",
-        }
+            page_needs_ocr = bool(qual["needs_ocr"] or regime_info["needs_ocr"])
+            if mode == "vlm" or (mode == "auto" and page_needs_ocr):
+                pages_needing_ocr.append(page_idx)
 
-    doc.close()
+            if drawing_index or sniper_query:
+                aligned_sigs = {
+                    tuple(tuple(r) for r in at["rows"][:4]) for at in aligned_tables
+                }
+                merged_spatial_tables = list(aligned_tables)
+                for vt in vector_tables:
+                    if tuple(tuple(r) for r in vt[:4]) not in aligned_sigs:
+                        merged_spatial_tables.append({"rows": vt, "source": "vector_grid"})
+                s_idx = extract_spatial_cad_index(
+                    page,
+                    tile_grid=tile_grid,
+                    tables=merged_spatial_tables,
+                    regime_info=regime_info,
+                )
+                spatial_pages.append(s_idx)
+                spatial_page_map[page_idx] = s_idx
+
+            if render_mode:
+                r_res = render_drawing_view(
+                    doc,
+                    page_num=page_num,
+                    render_mode=render_mode,
+                    bbox=bbox,
+                    query=query,
+                    tile=tile,
+                    tile_grid=tile_grid,
+                    dpi=dpi,
+                    grid_overlay=grid_overlay,
+                    max_bytes=prof["max_bytes"],
+                    profile=prof["profile"],
+                    out_path=output_dir,
+                    cache_dir=os.path.join(output_dir, "_composite_cache"),
+                )
+                for v in r_res["views"]:
+                    rendered_views_all.append(
+                        {k: val for k, val in v.items() if k != "png_bytes"}
+                    )
+
+            rec = {
+                "page": page_num,
+                "text": qual["clean_text"],
+                "char_count": qual["char_count"],
+                "garble_ratio": qual["garble_ratio"],
+                "needs_ocr": page_needs_ocr,
+                "needs_vision": regime_info["needs_vision"],
+                "regime": regime_info["regime"],
+                "regime_confidence": regime_info["confidence"],
+                "conformal_abstain": regime_info["conformal_abstain"],
+                "image_count": qual["image_count"],
+                "image_area_ratio": qual["image_area_ratio"],
+                "unexplained_canvas_ratio": regime_info["unexplained_canvas_ratio"],
+                "exploded_glyphs_suspected": bool(
+                    regime_info.get("exploded_glyphs_suspected", False)
+                ),
+                "short_stroke_ratio": float(
+                    regime_info.get("short_stroke_ratio", 0.0)
+                ),
+                "stage0_ms": stage0_ms,
+                "table_count": 0,
+                "md_tables": [],
+                "engine": "pymupdf_vector",
+            }
+            tables_extracted += _save_page_tables(output_dir, page_num, rec, page_tables)
+            page_records[page_idx] = rec
+            stage0_ctx[page_idx] = {
+                "page_rect": (
+                    float(page.rect.x0),
+                    float(page.rect.y0),
+                    float(page.rect.x1),
+                    float(page.rect.y1),
+                ),
+                "page_width_pt": round(float(abs(page.rect.width)), 2),
+                "page_height_pt": round(float(abs(page.rect.height)), 2),
+                "atoms": regime_info.get("_atoms") or [],
+                "tables": list(page_tables),
+                "drawing_stats": {
+                    "vector_drawing_count": regime_info.get("vector_drawing_count", 0)
+                },
+                "thai_chars": len(re.findall(r"[\u0e00-\u0e7f]", qual["clean_text"])),
+            }
+
+        doc_has_thai = any(
+            stage0_ctx[p_idx]["thai_chars"] >= 3 for p_idx in selected_indices
+        )
+
+        image_paths = []
+        vlm_info = None
+        can_run_ocr = prof["allow_vlm"] or (
+            prof["allow_local_cpu_ocr"] and prof["has_cpu_ocr"]
+        )
+        tiled_pages = []
+        whole_pages = []
+        tile_prep_map = {}
+
+        if pages_needing_ocr and mode in ("auto", "vlm") and can_run_ocr:
+            for p_idx in pages_needing_ocr:
+                rec = page_records[p_idx]
+                ctx = stage0_ctx[p_idx]
+                pw = ctx["page_width_pt"]
+                ph = ctx["page_height_pt"]
+                should_tile = (
+                    prof["profile"] != "nano"
+                    and rec["needs_ocr"]
+                    and (
+                        rec["regime"] == "HYBRID_COMPOSITE_DRAWING"
+                        or rec.get("exploded_glyphs_suspected")
+                        or (
+                            rec["regime"]
+                            in ("RASTER_DRAWING_OR_MAP", "VECTOR_CAD_DRAWING")
+                            and max(pw, ph) >= 1100
+                        )
+                    )
+                )
+                if should_tile:
+                    c_bbox = compute_unexplained_canvas_bbox(
+                        ctx["page_rect"],
+                        ctx["atoms"],
+                        tables=ctx["tables"],
+                        drawing_stats=ctx["drawing_stats"],
+                    )
+                    prep = tile_and_stitch_canvas(
+                        doc,
+                        p_idx,
+                        c_bbox,
+                        prof["profile"],
+                        ocr_tile_fn=None,
+                        cache_dir=os.path.join(output_dir, "_composite_cache"),
+                    )
+                    tile_prep_map[p_idx] = prep
+                    tiled_pages.append(p_idx)
+                    rec["tiled_canvas"] = {
+                        "grid": prep["grid"],
+                        "canvas_bbox": prep["canvas_bbox"],
+                        "tile_count": len(prep["tiles"]),
+                    }
+                else:
+                    whole_pages.append(p_idx)
+
+        doc.close()
+        doc_closed = True
+    finally:
+        if not doc_closed:
+            doc.close()
 
     if not has_fitz_tables:
         try:
@@ -2866,56 +4223,50 @@ def extract_pdf(
                 for page_idx in selected_indices:
                     page_num = page_idx + 1
                     raw_tabs = pdf.pages[page_idx].extract_tables() or []
-                    for raw_tab in raw_tabs:
-                        rows = clean_table_rows(raw_tab)
-                        if not rows:
-                            continue
-                        page_records[page_idx]["table_count"] += 1
-                        tables_extracted += 1
-                        t_idx = page_records[page_idx]["table_count"]
-                        csv_name = f"table_p{page_num}_{t_idx}.csv"
-                        csv_path = os.path.join(output_dir, csv_name)
-                        with open(
-                            csv_path, "w", encoding="utf-8-sig", newline=""
-                        ) as f_csv:
-                            writer = csv.writer(f_csv)
-                            writer.writerows(rows)
-                        page_records[page_idx]["md_tables"].append(
-                            rows_to_markdown(rows)
-                        )
+                    cleaned_tabs = [
+                        rows
+                        for rows in (clean_table_rows(rt) for rt in raw_tabs)
+                        if rows
+                    ]
+                    tables_extracted += _save_page_tables(
+                        output_dir, page_num, page_records[page_idx], cleaned_tabs
+                    )
         except ImportError:
             pass
 
-    image_paths = []
-    vlm_info = None
-    can_run_ocr = prof["allow_vlm"] or (
-        prof["allow_local_cpu_ocr"] and prof["has_cpu_ocr"]
-    )
     if pages_needing_ocr and mode in ("auto", "vlm") and can_run_ocr:
-        os.makedirs(pages_dir, exist_ok=True)
-        render_items = [
-            (
-                p_idx,
-                os.path.join(pages_dir, f"page_{p_idx + 1:03d}.png"),
-            )
-            for p_idx in pages_needing_ocr
+        whole_map = {}
+        if whole_pages:
+            os.makedirs(pages_dir, exist_ok=True)
+            render_items = [
+                (
+                    p_idx,
+                    os.path.join(pages_dir, f"page_{p_idx + 1:03d}.png"),
+                )
+                for p_idx in whole_pages
+            ]
+            max_w = max(1, min(int(workers), len(render_items)))
+            batches = [
+                (pdf_path, eff_ocr_dpi, render_items[i::max_w])
+                for i in range(max_w)
+                if render_items[i::max_w]
+            ]
+            if len(batches) > 1:
+                with ThreadPoolExecutor(max_workers=len(batches)) as pool:
+                    for batch_res in pool.map(_render_page_batch, batches):
+                        for p_idx, out_png in batch_res:
+                            whole_map[p_idx] = out_png
+            else:
+                for p_idx, out_png in _render_page_batch(batches[0]):
+                    whole_map[p_idx] = out_png
+
+        whole_image_paths = [whole_map[p_idx] for p_idx in whole_pages]
+        tile_image_paths = [
+            t["png_path"]
+            for p_idx in tiled_pages
+            for t in tile_prep_map[p_idx]["tiles"]
         ]
-        max_w = max(1, min(int(workers), len(render_items)))
-        batches = [
-            (pdf_path, eff_ocr_dpi, render_items[i::max_w])
-            for i in range(max_w)
-            if render_items[i::max_w]
-        ]
-        rendered_map = {}
-        if len(batches) > 1:
-            with ThreadPoolExecutor(max_workers=len(batches)) as pool:
-                for batch_res in pool.map(_render_page_batch, batches):
-                    for p_idx, out_png in batch_res:
-                        rendered_map[p_idx] = out_png
-        else:
-            for p_idx, out_png in _render_page_batch(batches[0]):
-                rendered_map[p_idx] = out_png
-        image_paths = [rendered_map[p_idx] for p_idx in pages_needing_ocr]
+        image_paths = whole_image_paths + tile_image_paths
 
         vlm_info = run_vlm_engine(
             pdf_path,
@@ -2927,11 +4278,15 @@ def extract_pdf(
         if vlm_info.get("vlm_executed"):
             vlm_map = vlm_info.get("vlm_texts") or {}
             vlm_eng = vlm_info.get("engine", "vlm")
-            for p_idx, img_path in zip(pages_needing_ocr, image_paths):
+            for p_idx in whole_pages:
+                img_path = whole_map[p_idx]
                 v_txt = vlm_map.get(img_path, "")
                 if v_txt:
                     rec = page_records[p_idx]
-                    if rec["regime"] == "HYBRID_COMPOSITE_DRAWING" and rec["char_count"] >= 100:
+                    if (
+                        rec["regime"] == "HYBRID_COMPOSITE_DRAWING"
+                        and rec["char_count"] >= 100
+                    ):
                         rec["text"] = f"{rec['text']}\n\n### Visual / Raster Zone OCR\n{v_txt}"
                         rec["engine"] = f"pymupdf_vector+{vlm_eng}"
                     else:
@@ -2940,41 +4295,88 @@ def extract_pdf(
                     rec["char_count"] = non_ws_count(rec["text"])
                     if rec["table_count"] == 0:
                         html_tabs = extract_html_tables_from_text(v_txt)
-                        page_num = p_idx + 1
-                        for rows in html_tabs:
-                            rec["table_count"] += 1
-                            tables_extracted += 1
-                            t_idx = rec["table_count"]
-                            csv_name = f"table_p{page_num}_{t_idx}.csv"
-                            csv_path = os.path.join(output_dir, csv_name)
-                            with open(
-                                csv_path, "w", encoding="utf-8-sig", newline=""
-                            ) as f_csv:
-                                writer = csv.writer(f_csv)
-                                writer.writerows(rows)
-                            rec["md_tables"].append(rows_to_markdown(rows))
-        else:
-            for p_idx, img_path in zip(pages_needing_ocr, image_paths):
-                ocr_res = ocr_image_local(
-                    img_path, langs=langs, profile=prof["profile"]
+                        tables_extracted += _save_page_tables(
+                            output_dir, p_idx + 1, rec, html_tabs
+                        )
+            for p_idx in tiled_pages:
+                prep = tile_prep_map[p_idx]
+                for t in prep["tiles"]:
+                    t["text"] = vlm_map.get(t["png_path"], "")
+                    t["engine"] = vlm_eng
+                stitched = stitch_tile_results(prep["tiles"])
+                tables_extracted += _apply_stitched_tile_result(
+                    output_dir,
+                    p_idx + 1,
+                    page_records[p_idx],
+                    stitched,
+                    spatial_page=spatial_page_map.get(p_idx),
                 )
-                ocr_nws = non_ws_count(ocr_res["text"])
+        else:
+            for p_idx in whole_pages:
+                page_has_thai = doc_has_thai or stage0_ctx[p_idx]["thai_chars"] >= 3
+                ocr_res = ocr_image_local(
+                    whole_map[p_idx],
+                    langs=langs,
+                    profile=prof["profile"],
+                    has_thai_hint=page_has_thai,
+                )
                 rec = page_records[p_idx]
+                if ocr_res.get("ocr_warning"):
+                    rec["ocr_warning"] = ocr_res["ocr_warning"]
+                ocr_nws = non_ws_count(ocr_res["text"])
                 if ocr_res["text"] and (
                     ocr_nws > rec["char_count"]
                     or rec["garble_ratio"] > 0.05
                     or rec["regime"] == "HYBRID_COMPOSITE_DRAWING"
                 ):
-                    if rec["regime"] == "HYBRID_COMPOSITE_DRAWING" and rec["char_count"] >= 100:
-                        rec["text"] = f"{rec['text']}\n\n### Visual / Raster Zone OCR\n{ocr_res['text']}"
+                    if (
+                        rec["regime"] == "HYBRID_COMPOSITE_DRAWING"
+                        and rec["char_count"] >= 100
+                    ):
+                        rec["text"] = (
+                            f"{rec['text']}\n\n### Visual / Raster Zone OCR\n{ocr_res['text']}"
+                        )
                         rec["engine"] = f"pymupdf_vector+{ocr_res['engine']}"
                     else:
                         rec["text"] = ocr_res["text"]
                         rec["engine"] = ocr_res["engine"]
                     rec["char_count"] = non_ws_count(rec["text"])
+                elif ocr_res.get("ocr_warning") and rec["char_count"] < 60:
+                    rec["engine"] = ocr_res["engine"]
+
+            for p_idx in tiled_pages:
+                page_has_thai = doc_has_thai or stage0_ctx[p_idx]["thai_chars"] >= 3
+                prep = tile_prep_map[p_idx]
+                for t in prep["tiles"]:
+                    ocr_res = ocr_image_local(
+                        t["png_path"],
+                        langs=langs,
+                        profile=prof["profile"],
+                        has_thai_hint=page_has_thai,
+                    )
+                    t["text"] = str(ocr_res.get("text") or "")
+                    t["engine"] = ocr_res.get("engine")
+                    t["ocr_warning"] = ocr_res.get("ocr_warning")
+                stitched = stitch_tile_results(prep["tiles"])
+                tables_extracted += _apply_stitched_tile_result(
+                    output_dir,
+                    p_idx + 1,
+                    page_records[p_idx],
+                    stitched,
+                    spatial_page=spatial_page_map.get(p_idx),
+                )
+
+    sniper_rois = []
+    if sniper_query and spatial_pages:
+        sniper_rois = rank_spatial_rois(
+            {"pages": spatial_pages},
+            sniper_query,
+            top_k=5,
+            xlaya_bridge=xlaya_bridge,
+        )
 
     if drawing_index:
-        with open(spatial_index_path, "w", encoding="utf-8") as f_idx:
+        with open(spatial_index_path, "w", encoding="utf-8", newline="\n") as f_idx:
             json.dump(
                 {
                     "version": __version__,
@@ -3006,29 +4408,34 @@ def extract_pdf(
                 md_sec.append(f"\n#### Table {p_num}.{t_i}\n\n{md_tab}")
         md_chunks.append("\n".join(md_sec))
 
-        manifest_pages.append(
-            {
-                "page": p_num,
-                "char_count": rec["char_count"],
-                "table_count": rec["table_count"],
-                "garble_ratio": rec["garble_ratio"],
-                "needs_ocr": rec["needs_ocr"],
-                "needs_vision": rec["needs_vision"],
-                "regime": rec["regime"],
-                "regime_confidence": rec["regime_confidence"],
-                "conformal_abstain": rec["conformal_abstain"],
-                "image_count": rec["image_count"],
-                "image_area_ratio": rec["image_area_ratio"],
-                "unexplained_canvas_ratio": rec["unexplained_canvas_ratio"],
-                "stage0_ms": rec["stage0_ms"],
-                "engine": rec["engine"],
-            }
-        )
+        mpage = {
+            "page": p_num,
+            "char_count": rec["char_count"],
+            "table_count": rec["table_count"],
+            "garble_ratio": rec["garble_ratio"],
+            "needs_ocr": rec["needs_ocr"],
+            "needs_vision": rec["needs_vision"],
+            "regime": rec["regime"],
+            "regime_confidence": rec["regime_confidence"],
+            "conformal_abstain": rec["conformal_abstain"],
+            "image_count": rec["image_count"],
+            "image_area_ratio": rec["image_area_ratio"],
+            "unexplained_canvas_ratio": rec["unexplained_canvas_ratio"],
+            "exploded_glyphs_suspected": rec["exploded_glyphs_suspected"],
+            "short_stroke_ratio": rec["short_stroke_ratio"],
+            "stage0_ms": rec["stage0_ms"],
+            "engine": rec["engine"],
+        }
+        if rec.get("ocr_warning"):
+            mpage["ocr_warning"] = rec["ocr_warning"]
+        if rec.get("tiled_canvas"):
+            mpage["tiled_canvas"] = rec["tiled_canvas"]
+        manifest_pages.append(mpage)
 
-    with open(text_out_path, "w", encoding="utf-8") as f_txt:
+    with open(text_out_path, "w", encoding="utf-8", newline="\n") as f_txt:
         f_txt.write("\n".join(txt_chunks))
 
-    with open(md_out_path, "w", encoding="utf-8") as f_md:
+    with open(md_out_path, "w", encoding="utf-8", newline="\n") as f_md:
         f_md.write("\n\n---\n\n".join(md_chunks) + "\n")
 
     elapsed_ms = round((time.time() - t_start) * 1000, 1)
@@ -3048,8 +4455,11 @@ def extract_pdf(
         manifest_data["spatial_index_path"] = spatial_index_path
     if rendered_views_all:
         manifest_data["rendered_views"] = rendered_views_all
+    if sniper_query:
+        manifest_data["sniper_query"] = sniper_query
+        manifest_data["sniper_rois"] = sniper_rois
 
-    with open(manifest_path, "w", encoding="utf-8") as f_man:
+    with open(manifest_path, "w", encoding="utf-8", newline="\n") as f_man:
         json.dump(manifest_data, f_man, indent=2, ensure_ascii=False)
 
     res = {
@@ -3069,6 +4479,9 @@ def extract_pdf(
         res["spatial_index_path"] = spatial_index_path
     if rendered_views_all:
         res["rendered_views"] = rendered_views_all
+    if sniper_query:
+        res["sniper_query"] = sniper_query
+        res["sniper_rois"] = sniper_rois
     if vlm_info:
         res["vlm"] = vlm_info
     return res
@@ -3099,7 +4512,15 @@ def extract_standalone_image(
         vlm_map = vlm_info.get("vlm_texts") or {}
         extracted_text = vlm_map.get(image_path, "")
     if not extracted_text:
-        ocr_res = ocr_image_local(image_path, langs=langs, profile=prof["profile"])
+        lang_thai = bool(
+            langs and any(str(lg).strip().lower().startswith("th") for lg in langs)
+        )
+        ocr_res = ocr_image_local(
+            image_path,
+            langs=langs,
+            profile=prof["profile"],
+            has_thai_hint=lang_thai,
+        )
         extracted_text = ocr_res["text"]
         engine_used = ocr_res["engine"]
 
@@ -3336,7 +4757,7 @@ def run_self_test(profile="nano", genomes_file=None):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="XOCR v2.2.0 — 5-Profile PDF, CAD Drawing & Table AI Engine"
+        description="XOCR v2.3.0 — 5-Profile PDF, CAD Drawing & Table AI Engine"
     )
     parser.add_argument(
         "input_path", nargs="?", help="Path to target PDF or image file"
@@ -3408,6 +4829,18 @@ def main():
         dest="no_grid_overlay",
         action="store_true",
         help="Disable translucent A1..D4 grid overlay on rendered views",
+    )
+    parser.add_argument(
+        "--sniper-query",
+        dest="sniper_query",
+        default=None,
+        help="Rank top-5 A1..D4 spatial ROIs for the given query in <10 ms",
+    )
+    parser.add_argument(
+        "--xlaya-bridge",
+        dest="xlaya_bridge",
+        action="store_true",
+        help="Enable optional xlaya BM25 lexical fusion in --sniper-query",
     )
     parser.add_argument(
         "--mode",
@@ -3521,6 +4954,8 @@ def main():
                 tile=args.tile,
                 tile_grid=args.tile_grid,
                 grid_overlay=not args.no_grid_overlay,
+                sniper_query=args.sniper_query,
+                xlaya_bridge=args.xlaya_bridge,
             )
             summary.update(pdf_res)
         else:
