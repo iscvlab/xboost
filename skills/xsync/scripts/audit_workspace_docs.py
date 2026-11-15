@@ -376,7 +376,7 @@ def audit_workspace(args) -> int:
                 clean_rel = unquote(target_url.split("#")[0].split("?")[0].strip())
                 if not clean_rel:
                     continue
-                resolved = (doc.parent / clean_rel).resolve()
+                resolved = (doc.resolve().parent / clean_rel).resolve()
                 if not resolved.exists():
                     broken_links += 1
                     errors.append(f"[{rel_doc}] Broken relative link: `[{label}]({target_url})`")

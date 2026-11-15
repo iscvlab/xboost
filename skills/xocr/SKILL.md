@@ -1,72 +1,60 @@
 ---
 name: xocr
 description: >
-  High-speed PyMuPDF vector/booktabs table extractor, Thai/English glyph normalizer, HTML-to-CSV parser, and 4-tier Typhoon-OCR v1.5, Unlimited-OCR-2 & EasyOCR engine (/xocr, /ocr, /unlimited-ocr).
-  Use when running /xocr, /ocr, or /unlimited-ocr, or extracting text and CSV tables from PDFs or images.
-  Do NOT use for editable text/CSV files or CAD DWG/DXF drawings.
+  High-speed PyMuPDF/booktabs & borderless table extractor, Thai/English glyph normalizer, 5-profile CAD/raster regime router, A1..D4 spatial index & multi-scale viewer, and 4-tier local OCR/VLM engine (/xocr). Use when extracting PDFs, tables, or architectural drawings. Do NOT use for editable text/CSV or native CAD DWG/DXF (/cad).
 ---
 
-# XOCR Document & Table Extraction Protocol (`/xocr` v2.1.0)
+# XOCR Document, Table & Spatial Drawing Engine (`/xocr` v2.2.0)
 
-High-throughput, zero-corruption PDF & image extraction engine (`/xocr`, aliases `/ocr`, `/unlimited-ocr`) engineered for **sub-second vector extraction**, **0%-error table & Thai glyph fidelity**, and **100% local offline VLM execution**.
+High-throughput, zero-corruption PDF, table & architectural drawing extraction engine (`/xocr`, aliases `/ocr`, `/unlimited-ocr`) engineered for **zero-hang Stage 0 probing**, **5-profile CPU-safe execution (`nano`/`edge`/`workstation`/`max`)**, **0%-error table & Thai glyph fidelity**, and **canonical `A1..D4` spatial drawing navigation**.
 
 ---
 
-## 1. Speed × Zero-Error Hybrid Architecture
+## 1. Speed × Regime-Aware Hybrid Architecture (`v2.2.0`)
 
 ```mermaid
 %%{init: {'theme': 'neutral'}}%%
 flowchart LR
     subgraph Canvas [" "]
-        In["Input: PDF or Image"] --> Router{"XOCR Smart Page Router"}
-        Router -->|"Digital Vector Page"| Fast["Tier 1: C++ PyMuPDF + Booktabs (19-97 ms/page)"]
-        Router -->|"Scanned or Image Page"| Hub{"Pluggable Language VLM Hub"}
+        In["Input: PDF / Image"] --> S0["Stage 0 Zero-Hang Probe (<50 ms, get_images full=False)"]
+        S0 --> Reg{"4-Regime Simplex + Platt + Split-Conformal"}
+        Reg -->|"DIGITAL_TEXT_TABLE"| Fast["C++ PyMuPDF + Booktabs + Aligned Tables"]
+        Reg -->|"VECTOR_CAD_DRAWING"| CAD["A1..D4 Spatial Index + Multi-Scale Views"]
+        Reg -->|"RASTER_DRAWING_OR_MAP"| VLM{"5-Profile Gated OCR / VLM"}
+        Reg -->|"HYBRID_COMPOSITE_DRAWING"| Hybrid["Aligned Sidebar Tables + Single-Composite Tile Views"]
 
-        subgraph Profiles ["Language Profiles & VLM Backends"]
-            TH["Thai (LIVE): SCB 10X Typhoon-OCR v1.5 + PUA/Sara-Am Fix"]
-            EN["English / Global (LIVE): Baidu Unlimited-OCR-2"]
-            JP["Japanese (coming soon)"]
-            ZH["Chinese / CJK (coming soon)"]
-            EU["European / Multilingual (coming soon)"]
+        subgraph Profiles ["5 Hardware Profiles (--profile)"]
+            P1["nano: Pure CPU PyMuPDF+Pillow (zero torch)"]
+            P2["edge: CPU + RapidOCR/Tesseract (zero torch)"]
+            P3["workstation / max: GPU VLMs (Typhoon v1.5 / Unlimited-OCR-2)"]
         end
 
-        Hub --> TH
-        Hub --> EN
-        Hub -.-> JP
-        Hub -.-> ZH
-        Hub -.-> EU
-
-        Fast --> Surgery["Table & Glyph Surgery (booktabs + HTML rowspan/colspan)"]
-        TH --> Surgery
-        EN --> Surgery
-        Surgery --> Out["Outputs: .md + .csv + .json"]
+        Fast --> Out["Outputs: .md + .csv + .json + spatial_index.json + view PNGs"]
+        CAD --> Out
+        Hybrid --> Out
+        VLM --> Out
     end
     classDef default fill:#ffffff,stroke:#475569,color:#0f172a,stroke-width:1px
     style Canvas fill:#ffffff,stroke:#cbd5e1,stroke-width:1.5px,color:#0f172a
     style Profiles fill:#f8fafc,stroke:#94a3b8,color:#0f172a
-    style JP fill:#ffffff,stroke:#94a3b8,stroke-dasharray: 5 5,color:#64748b
-    style ZH fill:#ffffff,stroke:#94a3b8,stroke-dasharray: 5 5,color:#64748b
-    style EU fill:#ffffff,stroke:#94a3b8,stroke-dasharray: 5 5,color:#64748b
 ```
 
 ### Core Engineering Guarantees
-1. **Single-Pass C++ Vector & Two-Stage `booktabs` Table Extraction (`PyMuPDF` `fitz`)**:
-   - Extracts reading-order text (`page.get_text("text", sort=True)`) and structured tables in a single C++ pass without reopening the PDF in slow pure-Python parsers.
-   - **Pre-Cached Two-Stage Grid + 3-Rule LaTeX `booktabs` Resolver**: Pre-caches `page.find_tables()` objects before any clipped re-query (preventing PyMuPDF C-buffer invalidation on multi-table pages), merges vertically adjacent `1-2` row rule strips (`< 15 pt` gap), and scans vector drawing paths (`page.get_drawings()`) for pure 3-rule `\toprule`/`\midrule`/`\bottomrule` tables (`width ≥ 200 pt`) to recover missing header bands and compact 3-row benchmark tables.
-   - **False-Positive Diagram & Chart Immunity**: Automatically filters out 1-cell callout boxes, figure legends, and sparse bar-chart gridlines (`≥ 2` rows, `≥ 2` populated columns, `≥ 60%` multi-column row density, and `≥ 52%` pruned cell fill ratio required).
-2. **Zero-Mojibake Thai/English Glyph Normalization**:
-   - Deterministically remaps legacy Windows/Adobe Thai Private Use Area codepoints (`U+F700..U+F71A` shifted tone marks and vowels in Angsana/Cordia/Sarabun PDFs) to canonical Unicode (`U+0E00..U+0E7F`).
-   - Normalizes both toneless and toned decomposed Sara Am (`\u0e4d([\u0e48-\u0e4b]?)\u0e32` → `\1\u0e33`, fixing `ก\u0e4d\u0e32ลัง` → `กำลัง` and `น\u0e4d\u0e49\u0e32` → `น้ำ`) and strips zero-width artifacts (`\u200b`, `\ufeff`).
-3. **Surgical Per-Page Garble & Image-Coverage Router**:
-   - Inspects each page for broken font CMaps (`(cid:123)` tokens), `\ufffd` replacement characters, and full-page raster scan coverage (`image_area_ratio ≥ 0.45` with sparse text `< 250` non-whitespace chars, catching scanned pages that carry a digital Bates stamp or running header).
-   - Clean vector pages bypass 300-DPI PNG rendering entirely; only pages with `needs_ocr=True` are rasterized across worker-batched threads (`--workers`, opening `fitz.Document` once per worker batch).
-4. **4-Tier Automatic OCR Backend Ladder + Scanned HTML `<table>` → CSV Surgery**:
-   - **Tier 1 (Live SGLang VLM Server)**: Queries `http://127.0.0.1:10000` via `infer.py` (`--image_dir` / `--pdf` / `--output_dir`, staging `.tif`/`.tiff` files as `.png` automatically).
-   - **Tier 2A (SCB 10X `Typhoon-OCR v1.5` Local CUDA VLMs - Apache-2.0 License)**: Runs `typhoon-ai/typhoon-ocr1.5-2b` (`Qwen3-VL-2B-Instruct`, `bfloat16`, `5.01 GB` Peak VRAM, `23.63 tok/s`) or `typhoon-ai/typhoon-ocr1.5-3b-qat` (`Qwen2.5-VL-3B-QAT` in `bfloat16` `8.36 GB` or `4-bit NF4` `3.65 GB` Peak VRAM) 100% locally offline with downscale-only `1800px` preprocessing, deterministic greedy decoding (`do_sample=False, repetition_penalty=1.1`), and automatic CUDA VRAM release (`unload_vlm_models()`).
-   - **Tier 2B (HuggingFace [`baidu/Unlimited-OCR-2`](https://github.com/baidu/Unlimited-OCR) & `baidu/Unlimited-OCR` CUDA VLM - MIT License)**: Runs `baidu/Unlimited-OCR-2` (`SR-SWA` Sparse Reference Sliding Window Attention + `Unlimited-Horizon Decoding`, with automatic fallback to v1 `baidu/Unlimited-OCR`), executing `model.infer` or `model.infer_multi` (`<PAGE>` delimiter aware) with `no_repeat_ngram_size=35`.
-   - **Scanned HTML `<table>` (`rowspan`/`colspan`) → RFC-4180 `.csv` Surgery**: Automatically parses HTML `<table>...</table>` blocks emitted by `Typhoon-OCR v1.5` or `Unlimited-OCR-2` on scanned PDFs and standalone images (`extract_html_tables_from_text()`), expands `rowspan`/`colspan` into a 2D grid, normalizes Thai PUA/Sara-Am glyphs, and writes `table_p{page}_{id}.csv` (`utf-8-sig`) + inline GFM Markdown tables.
-   - **Tier 3 (Local `EasyOCR`)**: Offline CPU/GPU neural recognition (`_EASYOCR_READERS` singleton cache per language tuple, default `['th', 'en']`).
-   - **Tier 4 (Local `pytesseract`)**: Offline Tesseract bridge fallback.
+1. **5 Hardware Profiles & Zero-PyTorch CPU Guarantees**:
+   - `--profile auto|nano|edge|workstation|max` resolves execution caps without loading PyTorch eagerly.
+   - Under `nano` and `edge`, `torch` is **never imported** (`"torch" not in sys.modules`): `nano` runs purely on PyMuPDF + Pillow + stdlib; `edge` permits local CPU OCR (`rapidocr_onnxruntime` / `tesseract`) if available. `workstation` and `max` enable CUDA VLMs (`Typhoon-OCR v1.5`, `Unlimited-OCR-2`) lazily only when OCR fallback triggers.
+2. **Stage 0 Zero-Hang Multi-Layer Probing (`_fast_page_image_metrics`)**:
+   - Probes image counts and pixel bounds exclusively via `page.get_images(full=False)` and single-pass `TextPage` (`TEXTFLAGS_TEXT`).
+   - Whenever `image_count > 10`, (`image_count > 4` and `max_img_px >= 4,000,000`), or `sum_img_px >= 40,000,000`, `page.get_image_info()` and `page.get_image_rects()` (and dense `get_drawings()` when `image_count > 20` covers the canvas) are skipped, eliminating ~190 s stalls on 100+ layer composite master plans.
+3. **4-Regime 8D Simplex + Platt + Split-Conformal Classifier**:
+   - Classifies each page into `DIGITAL_TEXT_TABLE`, `VECTOR_CAD_DRAWING`, `RASTER_DRAWING_OR_MAP`, or `HYBRID_COMPOSITE_DRAWING` using calibrated 8D L1-simplex weights (`w[7] <= 0` on `text_sufficiency_penalty`), per-regime Platt scaling `(T, b)`, and split-conformal threshold `conformal_q_hat` (`resources/xocr_genomes.json`, recalibrated via `benchmarks/run_xocr_evolution.py`).
+4. **Vector Grid, 3-Rule `booktabs` & Borderless Aligned Block Tables**:
+   - Combines `page.find_tables()` grid + 3-rule `\toprule`/`\midrule`/`\bottomrule` extraction with `_extract_aligned_block_tables()` (coordinate X/Y clustering across PUA/Sara-Am normalized text spans) and token-overlap deduplication (`_dedup_merge_page_tables`) to recover borderless master-plan schedules and sidebars with `0%` garble.
+5. **Canonical `A1..D4` Spatial Index & Multi-Scale `render_drawing_view`**:
+   - `--drawing-index` writes `spatial_index.json` mapping text/callout blocks onto a `4x4` grid (`A1` top-left → `D4` bottom-right), normalized bounding boxes `[nx0, ny0, nx1, ny1]`, detected tables, and titleblock/legend hints.
+   - `--render-mode overview|crop|around_text|tile|quadrants` renders overview grids (`--no-grid-overlay` disables labels), normalized crops (`--bbox`), keyword crops (`--query`), single tiles (`--tile B2`), or `quadrants`, using a single-composite raster cache on `>20`-image sheets and guaranteeing every saved PNG stays `<= 4.5 MiB`.
+6. **Zero-Mojibake Thai/English Normalization & 4-Tier VLM Fallback**:
+   - Remaps Windows/Adobe Thai Private Use Area codepoints (`U+F700..U+F71A`), repairs decomposed Sara Am (`\u0e4d([\u0e48-\u0e4b]?)\u0e32` → `\1\u0e33`), strips zero-width artifacts, and dispatches live SGLang / `Typhoon-OCR v1.5` (`2B` / `3B-QAT` / `4-bit`) / `Unlimited-OCR-2` / `EasyOCR` / `pytesseract` only when `needs_ocr=True` and permitted by `--profile`.
 
 ---
 
@@ -79,9 +67,9 @@ Run [`scripts/ocr_runner.py`](scripts/ocr_runner.py) relative to this skill's di
 python3 "<SKILL_DIR>/scripts/ocr_runner.py" "<path_to_pdf_or_image>" \
   --output "<output_dir>" \
   --mode auto \
-  --vlm-backend auto \
-  --pages "1-10" \
-  --workers 4
+  --profile nano \
+  --drawing-index \
+  --render-mode overview
 ```
 
 **Windows (PowerShell)**:
@@ -89,39 +77,36 @@ python3 "<SKILL_DIR>/scripts/ocr_runner.py" "<path_to_pdf_or_image>" \
 python "<SKILL_DIR>/scripts/ocr_runner.py" "<path_to_pdf_or_image>" `
   --output "<output_dir>" `
   --mode auto `
-  --vlm-backend auto `
+  --profile edge `
   --pages "1-10" `
-  --workers 4
+  --drawing-index
 ```
 
 ### CLI Options
 * `<input_path>` or `--input`, `-i <path>`: Target PDF (`.pdf`) or image (`.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, `.tif`, `.tiff`).
+* `--version`: Print `xocr 2.2.0` and exit `0`.
+* `--self-test`: Run deterministic synthetic validation (PUA/Sara-Am cleanup, regime invariants, spatial grid, PNG byte cap, and `"torch" not in sys.modules` under `nano`/`edge`) and exit `0`.
 * `--output`, `-o <dir>` (default: `./ocr_output`): Destination directory for all extracted artifacts.
-* `--mode auto|pdf|vlm` (default: `auto`):
-  - `auto`: Single-pass C++ vector text + table extraction on clean pages, with surgical OCR only on scanned/garbled pages (`needs_ocr=True`).
-  - `pdf`: Pure deterministic vector text + C++ table extraction without loading VLM/OCR weights.
-  - `vlm`: Forces 300-DPI page rasterization and VLM/OCR inference across all selected pages.
-* `--vlm-backend auto|typhoon-2b|typhoon-3b-qat|typhoon-3b-4bit|unlimited-ocr|sglang` (default: `auto`):
-  - `auto`: Tries live SGLang server (`:10000`), then local `typhoon-ai/typhoon-ocr1.5-2b`, then `baidu/Unlimited-OCR-2`, then local `EasyOCR`.
-  - `typhoon-2b`: Local `typhoon-ai/typhoon-ocr1.5-2b` (`Qwen3-VL-2B`, `bfloat16`, `~5.0 GB` VRAM).
-  - `typhoon-3b-qat`: Local `typhoon-ai/typhoon-ocr1.5-3b-qat` (`Qwen2.5-VL-3B-QAT`, `bfloat16`, `~8.4 GB` VRAM).
-  - `typhoon-3b-4bit`: Local `typhoon-ai/typhoon-ocr1.5-3b-qat` quantized in `4-bit NF4` (`~3.7 GB` VRAM for 4-8 GB GPUs).
-  - `unlimited-ocr`: Local `baidu/Unlimited-OCR-2` / `baidu/Unlimited-OCR`.
-  - `sglang`: Live SGLang server (`http://127.0.0.1:10000`).
-* `--pages "<range>"` (optional, e.g. `"1-5,8,12-15"`): Surgically extract only specific 1-based page numbers without scanning an entire multi-hundred-page volume.
-* `--workers <int>` (default: `min(8, cpu_count)`): Parallel worker threads for 300-DPI page rasterization.
-* `--dpi <int>` (default: `300`): Rasterization resolution for scanned pages.
-* `--langs "<codes>"` (default: `"th,en"`): Comma-separated language codes for local `EasyOCR` fallback.
+* `--profile auto|nano|edge|workstation|max` (default: `auto`): Hardware execution cap (`nano`/`edge` stay CPU-only with zero PyTorch imports).
+* `--genomes-file <path>`: Optional override path to calibrated `xocr_genomes.json`.
+* `--mode auto|pdf|vlm` (default: `auto`): `auto` extracts clean pages via C++ and routes `needs_ocr=True` pages per profile; `pdf` stays strictly vector/block-only; `vlm` forces rasterization when allowed by profile.
+* `--vlm-backend auto|typhoon-2b|typhoon-3b-qat|typhoon-3b-4bit|unlimited-ocr|sglang` (default: `auto`): Selects VLM backend when profile allows GPU/VLM.
+* `--drawing-index`: Emit `spatial_index.json` containing canonical `A1..D4` tile statistics, normalized callout coordinates, aligned tables, and titleblock/legend hints.
+* `--render-mode overview|crop|around_text|tile|quadrants`: Render multi-scale inspection PNGs (`<= 4.5 MiB` each) using `--bbox nx0,ny0,nx1,ny1`, `--query TEXT`, `--tile CELL`, `--tile-grid CxR` (default `4x4`), and `--no-grid-overlay`.
+* `--pages "<range>"`: Surgically extract only specific 1-based pages (e.g. `"1-5,8"`).
+* `--workers <int>` (default: `min(8, cpu_count)`), `--dpi <int>` (default: `300`), `--langs "<codes>"` (default: `"th,en"`).
 
 ---
 
 ## 3. Verifiable Output Artifacts
 
-Every run emits pure JSON telemetry on `stdout` and writes four deterministic artifacts to `--output`:
-* `extracted_document.md`: Reading-order Markdown containing `## Page N` sections and **inline GitHub Flavored Markdown tables** (`| Col A | Col B |`).
-* `extracted_text.txt`: Plain page-delimited text (`--- PAGE N ---`) for legacy regex/NLP pipelines.
-* `table_p{page}_{table_id}.csv`: UTF-8 with BOM (`utf-8-sig`) RFC-4180 CSV tables (from both vector PDFs and VLM HTML `<table>` outputs on scanned pages/images) ready for `pandas.read_csv()` or Excel.
-* `ocr_manifest.json`: Per-page audit telemetry (`page`, `char_count`, `table_count`, `garble_ratio`, `image_area_ratio`, `needs_ocr`, `engine`, and `elapsed_ms`).
+Every run emits pure JSON telemetry on `stdout` and writes deterministic artifacts to `--output`:
+* `extracted_document.md`: Reading-order Markdown (`## Page N`) with **inline GitHub Flavored Markdown tables**.
+* `extracted_text.txt`: Plain page-delimited text (`--- PAGE N ---`).
+* `table_p{page}_{table_id}.csv`: UTF-8 with BOM (`utf-8-sig`) RFC-4180 CSV tables (vector grids, 3-rule `booktabs`, borderless aligned schedules, and VLM HTML `<table>` expansions).
+* `ocr_manifest.json`: Per-page audit telemetry (`page`, `regime`, `regime_confidence`, `conformal_abstain`, `char_count`, `table_count`, `garble_ratio`, `image_area_ratio`, `stage0_ms`, `needs_ocr`, `needs_vision`, `engine`, `elapsed_ms`, `profile`).
+* `spatial_index.json` *(when `--drawing-index` is set)*: Canonical `A1..D4` spatial CAD index with `tiles`, localized callout `blocks`, `tables`, and `titleblock_hints`.
+* `view_p{page}_*.png` *(when `--render-mode` is set)*: Multi-scale PNG views guaranteed `<= 4.5 MiB` via adaptive resolution control and single-composite caching on heavy composite sheets.
 
 ---
 

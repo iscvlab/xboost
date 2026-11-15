@@ -13,7 +13,7 @@ import argparse
 import subprocess
 import configparser
 from pathlib import Path
-from typing import Dict, Set
+from typing import Dict, List, Set, Tuple
 from urllib.parse import unquote
 
 # Prevent bytecode debris in audited directories
@@ -348,16 +348,125 @@ def parse_unified_diff_added_lines(target: Path, diff_text: str) -> Dict[Path, S
     return added_by_file
 
 
+def _init_pr_body_from_template(target: Path, out_path: Path) -> bool:
+    """
+    Discover the upstream repository's PR template (`PULL_REQUEST_TEMPLATE.md` > `.github/PULL_REQUEST_TEMPLATE/*.md`)
+    and write a clean, comment-stripped starter markdown file to `out_path` (UTF-8, LF) ready to fill in.
+    Returns True if an upstream template was found, False if fallback skeleton was generated.
+    """
+    pr_templates, gov_files = _discover_pr_templates_and_governance(target)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if pr_templates:
+        # Prefer default single template or first file if directory has multiple
+        chosen = pr_templates[0]
+        raw = chosen.read_text(encoding="utf-8", errors="replace")
+        # Strip HTML comments while preserving markdown headings and checkboxes cleanly
+        cleaned = re.sub(r"<!--.*?-->", "", raw, flags=re.DOTALL)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip() + "\n"
+        out_path.write_bytes(cleaned.replace("\r\n", "\n").encode("utf-8"))
+        rel_tmpl = chosen.resolve().relative_to(target.resolve()).as_posix()
+        headings, total_cb, _ = _extract_template_structure(cleaned)
+        print(
+            f"📝 Initialized PR body starter `{out_path}` from upstream template `{rel_tmpl}` "
+            f"(Headings: {headings if headings else '(none)'}, Checkboxes: {total_cb})."
+        )
+        if len(pr_templates) > 1:
+            alts = [p.resolve().relative_to(target.resolve()).as_posix() for p in pr_templates]
+            print(f"  ℹ️  Multiple templates detected ({alts}); picked `{rel_tmpl}`.")
+        return True
+
+    fallback = (
+        "## Description\n\n"
+        "<!-- No .github/pull_request_template.md found; match recent merged PRs and CONTRIBUTING.md -->\n\n"
+        "## Related Issue(s)\n\n"
+        "Part of #\n"
+    )
+    out_path.write_bytes(fallback.encode("utf-8"))
+    rel_govs = [g.resolve().relative_to(target.resolve()).as_posix() for g in gov_files]
+    print(
+        f"📝 No upstream PR template found; wrote fallback starter `{out_path}`. "
+        f"Check recent merged PRs (`gh pr list --state merged -L 5`) and governance docs ({rel_govs})."
+    )
+    return False
+
+
+def _discover_pr_templates_and_governance(target: Path) -> Tuple[List[Path], List[Path]]:
+    """Discover upstream PR templates and governance files (case-insensitive) in a repository."""
+    pr_templates: List[Path] = []
+    gov_files: List[Path] = []
+    seen_tmpl: Set[Path] = set()
+    seen_gov: Set[Path] = set()
+
+    candidate_dirs = [target, target / ".github", target / "docs"]
+    for cdir in candidate_dirs:
+        if not cdir.exists() or not cdir.is_dir():
+            continue
+        try:
+            for item in sorted(cdir.iterdir()):
+                low = item.name.lower()
+                if item.is_file():
+                    if low in {"pull_request_template.md", "pull_request_template.txt"}:
+                        resolved = item.resolve()
+                        if resolved not in seen_tmpl:
+                            seen_tmpl.add(resolved)
+                            pr_templates.append(item)
+                    elif low in {
+                        "contributing.md",
+                        "contributing.rst",
+                        "ai_policy.md",
+                        ".pre-commit-config.yaml",
+                    }:
+                        resolved = item.resolve()
+                        if resolved not in seen_gov:
+                            seen_gov.add(resolved)
+                            gov_files.append(item)
+                elif item.is_dir() and low == "pull_request_template":
+                    for sub in sorted(item.glob("*.md")):
+                        resolved = sub.resolve()
+                        if resolved not in seen_tmpl:
+                            seen_tmpl.add(resolved)
+                            pr_templates.append(sub)
+        except OSError:
+            continue
+    return pr_templates, gov_files
+
+
+def _extract_template_structure(md_text: str) -> Tuple[List[str], int, int]:
+    """
+    Strip HTML comments (`<!-- ... -->`) and fenced code blocks (`BG-1`), then extract:
+    - Markdown headings (`^#{1,4}\\s+(.+)$`)
+    - Total task-list checkboxes (`- [ ]` or `- [x]`)
+    - Checked task-list checkboxes (`- [x]`)
+    """
+    no_comments = re.sub(r"<!--.*?-->", "", md_text, flags=re.DOTALL)
+    clean_text = re.sub(r"```.*?```", "", no_comments, flags=re.DOTALL)
+    headings: List[str] = []
+    for m in re.finditer(r"(?m)^#{1,4}\s+(.+?)\s*$", clean_text):
+        h = m.group(1).strip().rstrip(":").strip()
+        if h:
+            headings.append(h)
+    total_cb = len(re.findall(r"(?m)^\s*[-*+]\s*\[[ xX]\]", clean_text))
+    checked_cb = len(re.findall(r"(?m)^\s*[-*+]\s*\[[xX]\]", clean_text))
+    return headings, total_cb, checked_cb
+
+
 def audit_pr_diff_invariants(
-    target: Path, result: AuditResult, base_ref: str = "", skip_flake8: bool = False
+    target: Path,
+    result: AuditResult,
+    base_ref: str = "",
+    skip_flake8: bool = False,
+    pr_body_path: str = "",
 ):
     """
     Execute diff-scoped Upstream PR pre-flight audit (`--platform pr`):
     1. Verify git repository & clean untracked worktree (`git status --porcelain`).
-    2. Verify Git author identity is not an OS placeholder (`User`, `Admin`, `root`, `ubuntu`, `localhost`).
+    2. Verify Git author identity is not an OS placeholder (`User`, `Admin`, `root`, `ubuntu`, `localhost`),
+       check commit timestamp freshness (`AuthorDate` vs `CommitDate` skew `> 24h`, `BG-4`), and check
+       `author.name` consistency across the last 50 commits by the same email (`BG-5`).
     3. Resolve diff (`base_ref`, working tree changes, or `HEAD~1..HEAD`) and inspect added lines (`+`) only.
     4. Block accidental CRLF line-ending injection or `100644 -> 100755` executable mode flips.
     5. Run diff-scoped Secret, Machine-Path, Python AST Security, and Flake8 checks on touched lines/files.
+    6. Discover upstream PR templates (`.github/pull_request_template.md`, etc.) & verify `--pr-body` parity (`BG-1..BG-3`).
     """
     git_dir = target / ".git"
     if not git_dir.exists():
@@ -385,9 +494,9 @@ def audit_pr_diff_invariants(
                 str(target / untracked),
             )
 
-    # 2. Check Git author identity (latest commit or git config)
+    # 2. Check Git author identity, timestamp freshness (BG-4), and author.name consistency (BG-5)
     author_proc = subprocess.run(
-        ["git", "-C", str(target), "log", "-1", "--format=%an|%ae"],
+        ["git", "-C", str(target), "log", "-1", "--format=%an|%ae|%at|%ct"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -397,7 +506,12 @@ def audit_pr_diff_invariants(
     )
     author_out = (author_proc.stdout or "").strip()
     if "|" in author_out:
-        author_name, author_email = [p.strip() for p in author_out.split("|", 1)]
+        parts = [p.strip() for p in author_out.split("|")]
+        author_name = parts[0] if len(parts) > 0 else ""
+        author_email = parts[1] if len(parts) > 1 else ""
+        at_str = parts[2] if len(parts) > 2 else ""
+        ct_str = parts[3] if len(parts) > 3 else ""
+
         if author_name.lower() in PLACEHOLDER_GIT_AUTHORS:
             result.add_blocking(
                 f"Git commit author name `{author_name}` is an unconfigured OS placeholder. "
@@ -410,6 +524,42 @@ def audit_pr_diff_invariants(
                 "Set `git config user.email` to your GitHub-linked email before pushing.",
                 str(target),
             )
+
+        # BG-4: Advisory check for stale AuthorDate vs CommitDate (>24h skew after rebasing older local branch)
+        if at_str.isdigit() and ct_str.isdigit():
+            at_ts, ct_ts = int(at_str), int(ct_str)
+            if abs(ct_ts - at_ts) > 86400:
+                days_skew = abs(ct_ts - at_ts) / 86400.0
+                result.add_warning(
+                    f"Commit timestamp skew detected: AuthorDate and CommitDate differ by {days_skew:.1f} days "
+                    "(>24h, common after rebasing an older local commit). Unless preserving cherry-pick/co-author "
+                    "provenance, run `git commit --amend --reset-author --no-edit` before pushing.",
+                    str(target),
+                )
+
+        # BG-5: Bounded git log -n 50 check for author.name consistency under the same author.email
+        if author_email and "@" in author_email:
+            hist_proc = subprocess.run(
+                ["git", "-C", str(target), "log", "-n", "50", f"--author={author_email}", "--format=%an"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            prior_names = {
+                n.strip()
+                for n in (hist_proc.stdout or "").splitlines()
+                if n.strip() and n.strip() != author_name
+            }
+            if prior_names:
+                result.add_warning(
+                    f"Git commit author.name `{author_name}` differs from prior commit(s) under `{author_email}` "
+                    f"in this repository ({sorted(prior_names)}). Verify `git config user.name` matches your "
+                    "established contributor identity.",
+                    str(target),
+                )
 
     # 3. Determine diff base and capture unified diff (`-U0`)
     diff_cmd = ["git", "-C", str(target), "diff", "-U0"]
@@ -524,6 +674,102 @@ def audit_pr_diff_invariants(
         print("🔍 Checking Diff-Scoped Flake8 code quality on modified lines...")
         audit_flake8(target, result, scoped_lines_by_file=added_by_file)
 
+    # 6. Discover upstream PR templates & governance docs and verify --pr-body parity (BG-1..BG-3)
+    pr_templates, gov_files = _discover_pr_templates_and_governance(target)
+    if gov_files:
+        rel_govs = [g.resolve().relative_to(target.resolve()).as_posix() for g in gov_files]
+        print(f"📜 Upstream Governance Docs detected: {', '.join(rel_govs)}")
+
+    if pr_templates:
+        tmpl_meta = []
+        for tmpl_path in pr_templates:
+            try:
+                t_text = tmpl_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                t_text = ""
+            t_headings, t_total_cb, _ = _extract_template_structure(t_text)
+            rel_tmpl = tmpl_path.resolve().relative_to(target.resolve()).as_posix()
+            tmpl_meta.append((tmpl_path, rel_tmpl, t_headings, t_total_cb))
+            print(
+                f"📋 Upstream PR Template detected: `{rel_tmpl}` | "
+                f"Required Headings: {t_headings if t_headings else '(none)'} | "
+                f"Checkboxes: {t_total_cb}"
+            )
+
+        if pr_body_path:
+            pr_body_file = Path(pr_body_path).resolve()
+            if not pr_body_file.exists() or not pr_body_file.is_file():
+                result.add_blocking(
+                    f"Specified `--pr-body` file does not exist: `{pr_body_file}`", str(pr_body_file)
+                )
+            else:
+                try:
+                    body_text = pr_body_file.read_text(encoding="utf-8", errors="replace")
+                except OSError as exc:
+                    body_text = ""
+                    result.add_warning(f"Could not read `--pr-body` file: {exc}", str(pr_body_file))
+
+                body_headings, body_total_cb, body_checked_cb = _extract_template_structure(body_text)
+                body_headings_lower = {h.lower() for h in body_headings}
+
+                # BG-2: Match against the single template with highest heading overlap
+                best_match = max(
+                    tmpl_meta,
+                    key=lambda item: (
+                        sum(1 for h in item[2] if h.lower() in body_headings_lower) / max(len(item[2]), 1),
+                        -len(item[2]),
+                    ),
+                )
+                _, best_rel, best_headings, best_total_cb = best_match
+                missing_headings = [h for h in best_headings if h.lower() not in body_headings_lower]
+
+                if missing_headings:
+                    result.add_warning(
+                        f"PR body (`{pr_body_file.name}`) is missing upstream PR template heading(s) from "
+                        f"`{best_rel}`: {missing_headings}. Match owner PR template structure (`PULL_REQUEST_TEMPLATE` "
+                        "takes precedence over `CONTRIBUTING.md` prose).",
+                        str(pr_body_file),
+                    )
+
+                # BG-3: Non-mutually-exclusive checkbox parity
+                if best_total_cb > 0:
+                    if body_total_cb < best_total_cb:
+                        result.add_warning(
+                            f"PR body (`{pr_body_file.name}`) has fewer task-list checkboxes ({body_total_cb}) than "
+                            f"upstream template `{best_rel}` ({best_total_cb}). Preserve all owner checklist items.",
+                            str(pr_body_file),
+                        )
+                    if body_checked_cb == 0:
+                        result.add_warning(
+                            f"PR body (`{pr_body_file.name}`) has 0 checked boxes (`- [x]`) out of {best_total_cb} "
+                            f"checklist items required by `{best_rel}`.",
+                            str(pr_body_file),
+                        )
+
+                if not missing_headings and (
+                    best_total_cb == 0 or (body_total_cb >= best_total_cb and body_checked_cb > 0)
+                ):
+                    print(
+                        f"  ✓ Upstream PR Template Parity (`{best_rel}`): 100% COMPLIANT "
+                        f"({len(best_headings)} headings matched, {body_checked_cb}/{body_total_cb} checkboxes checked)"
+                    )
+        else:
+            print(
+                "  ℹ️  Tip: Pass `--pr-body <draft_pr_body.md>` to verify your PR description headings and "
+                "checkboxes against the upstream owner's PR template before opening/updating the PR."
+            )
+    elif pr_body_path:
+        pr_body_file = Path(pr_body_path).resolve()
+        if not pr_body_file.exists() or not pr_body_file.is_file():
+            result.add_blocking(
+                f"Specified `--pr-body` file does not exist: `{pr_body_file}`", str(pr_body_file)
+            )
+        else:
+            print(
+                "  ℹ️  No `.github/pull_request_template.md` found in repo; inspect recent merged PRs "
+                "(`gh pr list --state merged -L 5`) and `CONTRIBUTING.md` for owner format conventions."
+            )
+
 
 def audit_qgis_metadata(path: Path, result: AuditResult):
     """Audit QGIS metadata.txt for interpolation syntax, required fields, and versions."""
@@ -611,6 +857,7 @@ def run_audit(
     skip_flake8: bool = False,
     skip_qt6: bool = False,
     base_ref: str = "",
+    pr_body_path: str = "",
 ) -> AuditResult:
     target = Path(target_dir).resolve()
     result = AuditResult()
@@ -623,7 +870,13 @@ def run_audit(
     print(f"📦 Platform Profile: {platform.upper()}\n")
 
     if platform.lower() == "pr":
-        audit_pr_diff_invariants(target, result, base_ref=base_ref, skip_flake8=skip_flake8)
+        audit_pr_diff_invariants(
+            target,
+            result,
+            base_ref=base_ref,
+            skip_flake8=skip_flake8,
+            pr_body_path=pr_body_path,
+        )
         return result
 
     all_files = []
@@ -1049,9 +1302,29 @@ def main():
         default="",
         help="Explicit git base ref for --platform pr diff comparison (default: working tree or HEAD~1)",
     )
+    parser.add_argument(
+        "--pr-body",
+        default="",
+        help="Optional path to draft PR body markdown file to verify against upstream PR template (--platform pr)",
+    )
+    parser.add_argument(
+        "--init-pr-body",
+        "--extract-pr-template",
+        dest="init_pr_body",
+        default="",
+        help="Generate a clean starter PR body markdown file from upstream PR template (strips HTML comments) and exit",
+    )
     parser.add_argument("--skip-flake8", action="store_true", help="Skip Flake8 code quality audit")
     parser.add_argument("--skip-qt6", action="store_true", help="Skip Qt6 / QGIS 4 forward-compatibility AST scan")
     args = parser.parse_args()
+
+    if args.init_pr_body:
+        target_path = Path(args.target).resolve()
+        if not target_path.exists():
+            print(f"❌ Target directory does not exist: {target_path}")
+            sys.exit(1)
+        _init_pr_body_from_template(target_path, Path(args.init_pr_body).resolve())
+        sys.exit(0)
 
     res = run_audit(
         args.target,
@@ -1059,6 +1332,7 @@ def main():
         skip_flake8=args.skip_flake8,
         skip_qt6=args.skip_qt6,
         base_ref=args.base_ref,
+        pr_body_path=args.pr_body,
     )
 
     print("\n" + "=" * 70)

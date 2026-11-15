@@ -277,23 +277,31 @@ def launch_prefilled_github_pr(upstream_repo: str, org_fork: str, branch: str, t
         subprocess.run(["xdg-open", url], check=True)
 ```
 
-### D. Upstream PR Etiquette, Closing-Keyword Parity & Review-Bot Convergence (`--platform pr`)
+### D. Upstream PR Etiquette, Owner PR Template Precedence, Closing-Keyword Parity & Review-Bot Convergence (`--platform pr`)
 
-When contributing to external upstream repositories, enforce these four rules before and after opening a PR:
+When contributing to external upstream repositories, enforce these five rules before and after opening a PR:
 
 1. **Issue-Claim Etiquette, Live `HEAD` / Feature-Branch Repro & Maintainer Reply Package**:
-   - Before opening an upstream PR or posting a public comment, inspect `CONTRIBUTING.md`, `.github/PULL_REQUEST_TEMPLATE*`, `.github/workflows/*`, `.releaserc*`, `AI_POLICY.md`, issue assignees, and linked open PRs via GitHub API/CLI (`Law 1`).
+   - Before opening an upstream PR or posting a public comment, inspect `.github/pull_request_template.md` (and `.github/PULL_REQUEST_TEMPLATE/*.md`, `pull_request_template.md`, `docs/pull_request_template.md`), `CONTRIBUTING.md`, `.github/workflows/*`, `.releaserc*`, `AI_POLICY.md`, issue assignees, and linked open PRs via GitHub API/CLI (`Law 1`).
    - **Live `HEAD`, Active Feature-Branch & External Test-Data Pre-Gate**: Before writing code for an older open issue, verify on a fresh clone of the repository's actual default/integration branch (`gh api repos/<owner>/<repo> --jq .default_branch` or `CONTRIBUTING.md` target branch such as `develop` vs. `main`) **and** any active `feature/*` branch referenced in the issue thread (`git log --all -S "<symbol>"`) that the issue has **not** already been resolved. When a test references data files absent from the git tree, inspect `Makefile`, `conftest.py`, and `.github/workflows/*` for external test-data archives pinned by commit hash. Check whether the repo enforces **DCO sign-off (`git commit -s` / `Signed-off-by:`)**, **Conventional Commits** (`fix:` / `feat:` / `perf:`), or an **entry in `docs/changelog.rst` / `CHANGELOG.md`**.
    - **Direct-PR Repos**: If the issue is unassigned, reproducible at `HEAD`, has no competing open PR, and `CONTRIBUTING.md` does not mandate prior approval, implement the fix + regression test on a clean feature branch and open the PR directly.
    - **Discussion-First Repos & High-Signal Maintainer Reply Package (`I`/`my` Voice + Complete Scripts from Draft 1)**: If `CONTRIBUTING.md` or maintainer norms require discussing before opening a PR (or when replying to maintainer feedback on a benchmark/bug issue), prepare and verify the local branch first. Draft comments using first-person singular (**`I` / `my`**, never `"we"` / `"our"`) with **short, scannable top-level prose** (`Summary Table` → `Key Takeaway` → `Summary of Options for the PR` → `Unit Test`) followed immediately in **Draft 1** by collapsible `<details>` blocks containing **100% of proposed code diffs (`git diff`) and the complete self-contained benchmark/verification script reproducing every reported metric** (zero gatekeeping or making the user/maintainer ask for missing scripts later).
    - **Human-Consent Gate for Public Posts**: Always obtain explicit user approval before posting public comments or opening PRs under the user's GitHub identity.
-2. **Closing Keyword Parity (`Fixes #N` vs. `Part of #N` / `Addresses #N`)**:
+2. **Owner PR Format Precedence (`PULL_REQUEST_TEMPLATE.md` > Merged PR Exemplars > `CONTRIBUTING.md` Prose)**:
+   - Many repositories maintain both a prose `CONTRIBUTING.md` (which describes general guidelines such as "state the problem and solution") and a machine/reviewer-facing `.github/pull_request_template.md` (which defines the exact Markdown headings and task-list `[x]` checkboxes expected in every PR box, e.g., `## Description`, `## Related Issue(s)`, `## AI-Assisted Development`).
+   - **Strict Precedence Order**:
+     1. **`.github/pull_request_template.md` (or `.github/PULL_REQUEST_TEMPLATE/*.md`, `pull_request_template.md`, `docs/pull_request_template.md`)**: When present, **100% of its non-comment Markdown headings (`^#{1,4}\s+`) and task-list checkboxes (`- [x]` / `- [ ]`) must be preserved verbatim** as the top-level structure of the PR description. Any diagnostic tables (`≤ 4` columns) or collapsible `<details>` verification blocks are nested *inside* the owner's `## Description` (or equivalent) section—never replacing the owner's headings.
+     2. **Recent Merged PR Exemplars (`gh pr list --state merged -L 5`)**: When no PR template file exists, inspect the last 3–5 merged PRs by core maintainers to match their title prefix (`fix(scope):` vs. `[BUG]`) and body layout.
+     3. **`CONTRIBUTING.md` Prose Guidelines**: Satisfy all required content points within the template structure above.
+   - Run `audit_engine.py <repo> --init-pr-body <draft_pr_body.md>` to extract a comment-stripped starter directly from the upstream template, then pass `--pr-body <draft_pr_body.md>` to `audit_engine.py <repo> --platform pr` to deterministically verify heading and checkbox parity before opening or updating the PR.
+3. **Closing Keyword Parity (`Fixes #N` vs. `Part of #N` / `Addresses #N`)**:
    - Write auto-closing keywords (`Fixes #N`, `Closes #N`, `Resolves #N`) **only** when the PR satisfies `100%` of the issue's stated sub-requirements, acceptance checkboxes, and target platforms.
    - When a PR intentionally addresses a subset of a multi-part issue (or fixes one platform/module while leaving sibling items open), use non-closing references (`Part of #N` or `Addresses #N`) and explicitly state which items are covered vs. remaining so neither maintainers nor review bots flag a scope mismatch.
-3. **Diff-Scoped Hygiene (`audit_engine.py --platform pr`)**:
-   - Always run `audit_engine.py` (`skills/xpublish/scripts/audit_engine.py`) with `--platform pr` prior to `git push`.
-   - Format and lint (`ruff`, `flake8`, `black`, `prettier`) **strictly on touched lines/files** so the PR diff never includes unrelated style churn or fails on pre-existing upstream lint debt.
-4. **Automated Review-Bot & Outside-Diff Convergence (`@coderabbitai`, etc.)**:
+4. **Diff-Scoped Hygiene, Commit Timestamp Freshness & Author Identity Parity (`audit_engine.py --platform pr`)**:
+   - Always run `audit_engine.py` (`skills/xpublish/scripts/audit_engine.py`) with `--platform pr --pr-body <draft.md>` prior to `git push`.
+   - Format and lint (`ruff`, `flake8`, `black`, `prettier`, `docformatter`) **strictly on touched lines/files** so the PR diff never includes unrelated style churn or fails on pre-existing upstream lint debt.
+   - **Rebased Local Branch Timestamp Reset (`AuthorDate` vs. `CommitDate`)**: When rebasing an older local branch onto live `origin/main` before opening a PR, Git preserves the original `AuthorDate` (`%at`), which displays on GitHub as *"committed last week/month"* even if pushed today. Unless preserving cherry-pick or external co-author provenance, run `git commit --amend --reset-author --no-edit` so both `AuthorDate` and `CommitDate` reflect the live verification timestamp, and verify that `git config user.name` matches prior commits under the same `user.email` in that repository.
+5. **Automated Review-Bot & Outside-Diff Convergence (`@coderabbitai`, etc.)**:
    - After opening or pushing to a PR on repositories with automated review bots (`@coderabbitai[bot]`, `sourcery-ai`, `sonarcloud`), fetch **both**:
      1. Inline diff comments (`/repos/<owner>/<repo>/pulls/<id>/comments`)
      2. Top-level review bodies (`/repos/<owner>/<repo>/pulls/<id>/reviews`), specifically expanding `<details>` sections for **`Outside diff range comments`** and **`Nitpick comments`** (where assertive bots place findings about callers, sibling state-reset methods, or test assertions outside the modified diff hunk).
@@ -311,8 +319,9 @@ When propagating a repository's version badge or empirical metrics across an org
 
 ## 8. Pre-Publish Verification Checklist (Automated Gate)
 
-Before pushing any `README.md`, benchmark report, Release body, or Upstream PR to GitHub, run these 9 deterministic checks:
+Before pushing any `README.md`, benchmark report, Release body, or Upstream PR to GitHub, run these 10 deterministic checks:
 
+- [ ] **Owner PR Template & Identity Parity (`--platform pr --pr-body`)**: Does the draft PR description preserve 100% of `.github/pull_request_template.md` headings and task-list checkboxes (`PULL_REQUEST_TEMPLATE > CONTRIBUTING.md`), with fresh `AuthorDate`/`CommitDate` (`git commit --amend --reset-author --no-edit`) and consistent `user.name`?
 - [ ] **Iframe Budget (`≤ 2` Mermaid Blocks per Page)**: Does `README.md` contain at most `2` `flowchart` blocks and **`0` `xychart-beta` blocks**?
 - [ ] **White-Mode Canvas Wrapper**: Does every Mermaid block include `%%{init: {'theme': 'neutral'}}%%` and an outer `subgraph Canvas [" "]` with `style Canvas fill:#ffffff,...`?
 - [ ] **4-Guardrail Lexer Scan (`0` Hazards)**:
