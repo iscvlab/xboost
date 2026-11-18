@@ -1,16 +1,16 @@
 ---
 name: xocr
 description: >
-  Fast PyMuPDF/booktabs/aligned table extractor, faux-bold & Thai normalizer, rotated/SHX CAD router, adaptive tiled canvas OCR, A1..D4 sniper & 5-profile VLM engine (/xocr). Use when extracting PDFs, tables, or architectural drawings. Do NOT use for plain CSV/text or native DWG/DXF (/cad).
+  Fast PyMuPDF/booktabs/aligned table extractor, 6-gate table stitcher, CAD grid-bubble & callout graph parser, drawing diff, adaptive tiled OCR, A1..D4 sniper & 5-profile VLM engine (/xocr). Use when extracting PDFs, tables, or architectural drawings. Do NOT use for plain CSV/text or native DWG/DXF (/cad).
 ---
 
-# XOCR Document, Table & Spatial Drawing Engine (`/xocr` v2.3.0)
+# XOCR Document, Table & Spatial Drawing Engine (`/xocr` v2.4.0)
 
-High-throughput, zero-corruption PDF, table & architectural drawing extraction engine (`/xocr`, aliases `/ocr`, `/unlimited-ocr`) engineered for **zero-hang Stage 0 probing**, **5-profile CPU-safe execution (`nano`/`edge`/`workstation`/`max`)**, **faux-bold & Thai glyph fidelity**, **rotated/exploded `.SHX` CAD awareness**, and **canonical `A1..D4` tiled OCR + `<10 ms` ROI sniping**.
+High-throughput, zero-corruption PDF, table & architectural drawing extraction engine (`/xocr`, aliases `/ocr`, `/unlimited-ocr`) engineered for **zero-hang Stage 0 probing**, **5-profile CPU-safe execution (`nano`/`edge`/`workstation`/`max`)**, **faux-bold & Thai glyph fidelity**, **CAD grid-bubble & callout graphs (`v2.4.0`)**, **drawing revision diffs**, **6-gate multi-page table stitching**, and **canonical `A1..D4` tiled OCR + `<10 ms` ROI sniping**.
 
 ---
 
-## 1. Speed × Regime-Aware Hybrid Architecture (`v2.3.0`)
+## 1. Speed × Regime-Aware Hybrid Architecture (`v2.4.0`)
 
 ```mermaid
 %%{init: {'theme': 'neutral'}}%%
@@ -49,14 +49,14 @@ flowchart LR
 3. **4-Regime 8D Simplex + Platt + Split-Conformal Classifier + `.SHX` Detector**:
    - Classifies each page into `DIGITAL_TEXT_TABLE`, `VECTOR_CAD_DRAWING`, `RASTER_DRAWING_OR_MAP`, or `HYBRID_COMPOSITE_DRAWING` using calibrated 8D L1-simplex weights (`w[7] <= 0`), per-regime Platt `(T, b)` (`test accuracy = 100.0%`, `test ece = 0.0350`, `conformal_coverage = 95.0%`, `conformal_q_hat = 0.2046` across `54` external + `72` synthetic docs via `benchmarks/run_xocr_evolution.py`).
    - `_fast_drawing_metrics` detects exploded `.SHX` stroke-font CAD sheets (`vector_drawing_count >= 400`, `short_stroke_ratio >= 0.45`, `< 35` clean chars) and sets `exploded_glyphs_suspected=True`, `needs_ocr=True`, `needs_vision=True` while preserving `O(1)` bailout on heavy rasters.
-4. **Faux-Bold De-Ghosting, Orientation-Aware Callouts & Aligned Block Tables**:
+4. **Faux-Bold De-Ghosting, Orientation-Aware Callouts, Aligned & 6-Gate Stitched Multi-Page Tables**:
    - `_extract_text_and_dict_fast` strips micro-shifted/duplicate faux-bold spans (`0 <= |dx|, |dy| <= 2.0`, fixing `GG::ParkingParking` → `G : Parking`) while keeping normal non-ghost pages untouched.
    - `_extract_clean_text_atoms` quantizes `line["dir"]` vectors and projects span anchors onto tangential/normal axes `(t, n)` so `90°`/`270°`/`45°` callouts stay ordered without cross-merging parallel strings.
-   - Combines `page.find_tables()` grid + 3-rule `booktabs` (`\toprule`/`\midrule`/`\bottomrule`) with `_extract_aligned_block_tables()` and `_dedup_merge_page_tables`.
-5. **Adaptive Canvas Tiling, `A1..D4` Spatial Index & `<10 ms` ROI Sniper (`rank_spatial_rois`)**:
-   - `compute_unexplained_canvas_bbox` crops dense sidebars/legends (`>= 80` chars) and `tile_and_stitch_canvas` renders ONE cached composite, slices `3x2` (`aspect >= 1.25`) or `2x2` tiles (`overlap=0.10`, `<= 1800px`), deduplicates overlap seams (`Jaccard >= 0.80`), extracts HTML tables, and merges tile blocks into `spatial_index.json`.
-   - `--sniper-query "<text>"` (plus optional `--xlaya-bridge`) ranks top-5 `A1..D4` ROIs in `<10 ms` via BM25 + sheet/scale/Thai 3-gram boosts, returning `recommended_pdf_render` crops.
-   - `--render-mode overview|crop|around_text|tile|quadrants` renders PNG views capped `<= 4.5 MiB`.
+   - Combines `page.find_tables()` grid (`return_meta=True` pre-pruning bounds) + 3-rule `booktabs` (`\toprule`/`\midrule`/`\bottomrule`) with `_extract_aligned_block_tables()`, `_dedup_merge_page_tables`, and `stitch_multipage_tables()` (6-gate cascade with terminal-total & distinct-header `A_neg` shields, bridge carry-row stripping, blank-column recovery, X-IoU `>= 0.80` / center drift `<= 0.025`, 3+ page folding, and disk CSV reconciliation).
+5. **Deterministic CAD Grid-Bubble Axes, Cross-Sheet Callout Graph, Drawing Revision Diff & `<10 ms` ROI Sniper**:
+   - `extract_grid_axes` + `resolve_grid_ref` parse perimeter circular/octagonal bubbles (`A..Z`, `AA..BZ`, `1..99`, `2.1`, `3a`) with natural sort, top-down/bottom-up Y support, dual `secondary_axes`, keynote/bisector rejection, and bracketed grid lookup (`None` outside `[axis_min - 0.5*Δ_med, axis_max + 0.5*Δ_med]`).
+   - `extract_sheet_callouts` + `build_callout_graph` extract `primary_sheet_id`, detail/section/elevation/bisected-circle callouts, and revision clouds/deltas (`Δ1`, `REV 2`, `ADDENDUM`), while `diff_pdf_drawings` (`--diff-with <OLD_PDF>`) matches sheets by `primary_sheet_id`, diffs table cells (`numeric_delta`), tolerance-matches vector atoms (`<= 0.015` norm / `<= 2.0 pt` jitter = `0` diff), and runs `72 DPI` `4x4` tile `MAD > 0.012`.
+   - `compute_unexplained_canvas_bbox` + `tile_and_stitch_canvas` tile large composite sheets (`3x2` / `2x2`), `--sniper-query` (`rank_spatial_rois`, `+2.5` grid/callout boost) ranks top-5 `A1..D4` ROIs in `<10 ms`, and `--render-mode` emits PNG views `<= 4.5 MiB`.
 6. **Zero-Mojibake Thai/English Normalization, Thai Script Guard & 4-Tier VLM Fallback**:
    - Remaps Windows/Adobe Thai Private Use Area codepoints (`U+F700..U+F71A`), repairs decomposed Sara Am (`\u0e4d([\u0e48-\u0e4b]?)\u0e32` → `\1\u0e33`), guards CPU `edge` runs from RapidOCR Latin gibberish (`has_thai_hint=True` checks Tesseract `tha` first or returns `skipped_thai_guard`), and dispatches SGLang / `Typhoon-OCR v1.5` / `Unlimited-OCR-2` / `EasyOCR` per `--profile`.
 
@@ -88,14 +88,16 @@ python "<SKILL_DIR>/scripts/ocr_runner.py" "<path_to_pdf_or_image>" `
 
 ### CLI Options
 * `<input_path>` or `--input`, `-i <path>`: Target PDF (`.pdf`) or image (`.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, `.tif`, `.tiff`).
-* `--version`: Print `xocr 2.3.0` and exit `0`.
-* `--self-test`: Run deterministic synthetic validation (PUA/Sara-Am cleanup, regime invariants, spatial grid, PNG byte cap, and `"torch" not in sys.modules` under `nano`/`edge`) and exit `0`.
+* `--version`: Print `xocr 2.4.0` and exit `0`.
+* `--self-test`: Run deterministic synthetic validation (PUA/Sara-Am cleanup, regime invariants, spatial grid, v2.4 Seam A checks, PNG byte cap, and `"torch" not in sys.modules` under `nano`/`edge`) and exit `0`.
 * `--output`, `-o <dir>` (default: `./ocr_output`): Destination directory for all extracted artifacts.
 * `--profile auto|nano|edge|workstation|max` (default: `auto`): Hardware execution cap (`nano`/`edge` stay CPU-only with zero PyTorch imports).
 * `--genomes-file <path>`: Optional override path to calibrated `xocr_genomes.json`.
 * `--mode auto|pdf|vlm` (default: `auto`): `auto` extracts clean pages via C++ and routes `needs_ocr=True` pages per profile; `pdf` stays strictly vector/block-only; `vlm` forces rasterization when allowed by profile.
 * `--vlm-backend auto|typhoon-2b|typhoon-3b-qat|typhoon-3b-4bit|unlimited-ocr|sglang` (default: `auto`): Selects VLM backend when profile allows GPU/VLM.
-* `--drawing-index`: Emit `spatial_index.json` containing canonical `A1..D4` tile statistics, normalized callout coordinates, aligned tables, and titleblock/legend hints.
+* `--drawing-index`: Emit `spatial_index.json` containing canonical `A1..D4` tiles, `grid_axes`, `primary_sheet_id`, `callouts`, `revision_deltas`, `callout_graph`, and `grid_ref`-tagged blocks/tables.
+* `--diff-with <OLD_PDF>`: Compare input PDF revision against `<OLD_PDF>`, emit `drawing_diff.json`, and append a `## Drawing Revision Diff` summary to `extracted_document.md`.
+* `--no-stitch-tables`: Disable 6-gate cross-page continuation table stitching (keeps per-page fragment CSVs).
 * `--sniper-query "<text>"`: Rank top-5 `A1..D4` spatial ROIs in `<10 ms` (optionally combine with `--xlaya-bridge`) and emit `sniper_rois` in JSON output and `ocr_manifest.json`.
 * `--xlaya-bridge`: Fuse optional `xlaya` BM25 lexical scoring inside `--sniper-query` ranking.
 * `--render-mode overview|crop|around_text|tile|quadrants`: Render multi-scale inspection PNGs (`<= 4.5 MiB` each) using `--bbox nx0,ny0,nx1,ny1`, `--query TEXT`, `--tile CELL`, `--tile-grid CxR` (default `4x4`), and `--no-grid-overlay`.
@@ -107,11 +109,12 @@ python "<SKILL_DIR>/scripts/ocr_runner.py" "<path_to_pdf_or_image>" `
 ## 3. Verifiable Output Artifacts
 
 Every run emits pure JSON telemetry on `stdout` and writes deterministic artifacts to `--output`:
-* `extracted_document.md`: Reading-order Markdown (`## Page N`) with **inline GitHub Flavored Markdown tables**.
+* `extracted_document.md`: Reading-order Markdown (`## Page N`) with **inline GitHub Flavored Markdown tables** and optional `## Drawing Revision Diff`.
 * `extracted_text.txt`: Plain page-delimited text (`--- PAGE N ---`).
-* `table_p{page}_{table_id}.csv`: UTF-8 with BOM (`utf-8-sig`) RFC-4180 CSV tables (vector grids, 3-rule `booktabs`, borderless aligned schedules, and VLM HTML `<table>` expansions).
-* `ocr_manifest.json`: Per-page audit telemetry (`page`, `regime`, `regime_confidence`, `conformal_abstain`, `char_count`, `table_count`, `garble_ratio`, `image_area_ratio`, `exploded_glyphs_suspected`, `short_stroke_ratio`, `tiled_canvas`, `ocr_warning`, `stage0_ms`, `needs_ocr`, `needs_vision`, `engine`, `elapsed_ms`, `profile`, `sniper_rois`).
-* `spatial_index.json` *(when `--drawing-index` is set)*: Canonical `A1..D4` spatial CAD index with `tiles`, localized callout `blocks`, `tables`, and `titleblock_hints`.
+* `table_p{page}_{table_id}.csv`: UTF-8 with BOM (`utf-8-sig`) RFC-4180 CSV tables (stitched multi-page tables overwrite `table_p{start_page}_{id}.csv` and remove superseded continuation fragment CSVs unless `--no-stitch-tables` is passed).
+* `ocr_manifest.json`: Per-page audit telemetry (`page`, `regime`, `regime_confidence`, `conformal_abstain`, `char_count`, `table_count`, `table_merge_events`, `garble_ratio`, `image_area_ratio`, `exploded_glyphs_suspected`, `short_stroke_ratio`, `tiled_canvas`, `ocr_warning`, `stage0_ms`, `needs_ocr`, `needs_vision`, `engine`, `elapsed_ms`, `profile`, `sniper_rois`, `drawing_diff_summary`).
+* `spatial_index.json` *(when `--drawing-index` is set)*: Canonical `A1..D4` spatial CAD index with `grid_axes`, `primary_sheet_id`, `callouts`, `revision_deltas`, `callout_graph`, `tiles`, `grid_ref`-tagged `blocks`/`tables`, and `titleblock_hints`.
+* `drawing_diff.json` *(when `--diff-with` is set)*: Sheet-matched vector atom, callout/revision, schedule cell (`numeric_delta`), and `72 DPI` `4x4` tile MAD diff report.
 * `view_p{page}_*.png` *(when `--render-mode` is set)*: Multi-scale PNG views guaranteed `<= 4.5 MiB` via adaptive resolution control and single-composite caching on heavy composite sheets.
 
 ---

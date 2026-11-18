@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""High-speed, zero-corruption PDF, CAD Drawing & Image OCR engine for /xocr (v2.3.0).
+"""High-speed, zero-corruption PDF, CAD Drawing & Image OCR engine for /xocr (v2.4.0).
 
 Features:
 1. 5-Profile Hardware Architecture (`--profile auto|nano|edge|workstation|max`)
@@ -9,12 +9,14 @@ Features:
    with exploded `.SHX` stroke-CAD detection (`short_stroke_ratio`).
 3. Single-pass C++ PyMuPDF (`fitz`) coordinate-sorted text (`sort=True`) with
    surgical faux-bold de-ghosting, orientation-aware callout assembly (`0/90/270/angle`),
-   Two-Stage Grid + LaTeX `booktabs` table surgery, and Borderless
-   Coordinate-Aligned Table Recovery (`_extract_aligned_block_tables`).
-4. Canonical `A1..D4` Spatial CAD Callout Index (`extract_spatial_cad_index`),
-   `< 10 ms` ROI Sniper (`rank_spatial_rois`), unexplained-canvas adaptive tiling
-   (`compute_unexplained_canvas_bbox` + `tile_and_stitch_canvas`), and
-   Multi-Scale Drawing View Renderer (`render_drawing_view`) with `<= 4.5 MiB` guard.
+   Two-Stage Grid + LaTeX `booktabs` table surgery, Borderless Coordinate-Aligned
+   Table Recovery (`_extract_aligned_block_tables`), and 6-Gate Multi-Page Table
+   Continuation Stitching (`stitch_multipage_tables`).
+4. Deterministic Grid-Bubble Axis Parser (`extract_grid_axes` / `resolve_grid_ref`),
+   Cross-Sheet Callout Graph (`extract_sheet_callouts` / `build_callout_graph`),
+   Drawing Revision Diff (`diff_pdf_drawings`), Canonical `A1..D4` Spatial CAD Index
+   (`extract_spatial_cad_index`), `< 10 ms` ROI Sniper (`rank_spatial_rois`),
+   adaptive tiling (`tile_and_stitch_canvas`), and Multi-Scale View Renderer (`render_drawing_view`).
 5. Deterministic Thai/English glyph normalization (`U+F700..U+F71A` PUA,
    decomposed Sara Am, zero-width stripping), Thai CPU script guard, and
    4-Tier VLM/CPU OCR ladder (`SGLang`, `Typhoon-OCR v1.5`, `Unlimited-OCR-2`,
@@ -26,6 +28,7 @@ from collections import Counter, OrderedDict
 import contextlib
 import copy
 import csv
+import difflib
 import gc
 import html.parser
 import importlib.util
@@ -44,7 +47,7 @@ import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
 sys.dont_write_bytecode = True
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -101,6 +104,12 @@ SEAM_A_SYMBOLS = (
     "rank_spatial_rois",
     "_extract_text_and_dict_fast",
     "_extract_clean_text_atoms",
+    "extract_grid_axes",
+    "resolve_grid_ref",
+    "extract_sheet_callouts",
+    "build_callout_graph",
+    "stitch_multipage_tables",
+    "diff_pdf_drawings",
 )
 
 DEFAULT_XOCR_GENOMES = {
@@ -160,6 +169,47 @@ NUMERIC_CELL_RE = re.compile(r"^\s*[-+]?[\d,]+(?:\.\d+)?%?\s*$")
 SHEET_ID_RE = re.compile(r"\b([A-Z]{1,3}-\d{1,4}(?:\.\d+)?)\b")
 LEGEND_LINE_RE = re.compile(
     r"^(?:[A-Z0-9]{1,3}\s*[:\-]|LEGEND|KEY\b|NOTE|สัญลักษณ์|หมายเหตุ|คำอธิบาย)",
+    re.IGNORECASE,
+)
+GRID_LABEL_RE = re.compile(
+    r"^(?:[A-Z](?:[.'\u2032]?[0-9]{1,2}|[a-z'\u2032])?|[AB][A-Z]|"
+    r"[1-9][0-9]?(?:\.[0-9]{1,2}|[a-zA-Z'\u2032])?)$"
+)
+DETAIL_SLASH_CALLOUT_RE = re.compile(
+    r"(?:(DETAIL|DTL|SEC|SECT|SECTION|ELEV|EL)\.?\s*(?:NO\.?\s*)?)?"
+    r"\b([A-Z0-9]{1,4})\s*/\s*([A-Z]{1,3}-\d{1,4}(?:\.\d+)?)\b",
+    re.IGNORECASE,
+)
+DETAIL_ON_SHEET_RE = re.compile(
+    r"\b(DETAIL|DTL|SEC|SECT|SECTION|ELEV|EL)\.?\s+(?:ON\s+)?(?:SHT\.?|SHEET|DWG\.?)\s*"
+    r"([A-Z]{1,3}-\d{1,4}(?:\.\d+)?)\b",
+    re.IGNORECASE,
+)
+SEE_SHEET_CALLOUT_RE = re.compile(
+    r"\b(?:SEE|REF\.?|REFER\s+TO)\s+(?:(?:SHT\.?|SHEET|DWG\.?)\s*)?"
+    r"([A-Z]{1,3}-\d{1,4}(?:\.\d+)?)\b",
+    re.IGNORECASE,
+)
+REV_MARKER_RE = re.compile(
+    r"(?:[\u0394\u2206\u25b3\u25b2]\s*([A-Z0-9]{1,4})\b|"
+    r"\b(?:REV(?:ISION)?\.?\s*[#:\-]?\s*([A-Z0-9]{1,4})|"
+    r"ADDENDUM\s*[#:\-]?\s*([A-Z0-9]{1,4})|"
+    r"ASI[-\s]?(\d{1,4}))\b)",
+    re.IGNORECASE,
+)
+TERMINAL_TOTAL_RE = re.compile(
+    r"\b(?:grand\s+total|net\s+total|total\s+bid|final\s+total|overall\s+total)\b|"
+    r"รวมทั้งสิ้น|รวมเป็นเงินทั้งสิ้น|รวมสุทธิ",
+    re.IGNORECASE,
+)
+BRIDGE_CARRY_RE = re.compile(
+    r"\b(?:carried\s+forward|brought\s+forward|sub[\s\-]?total|page\s+total|c/f|b/f)\b|"
+    r"ยอดยกไป|ยอดยกมา|รวมย่อย",
+    re.IGNORECASE,
+)
+CONT_SIGNAL_RE = re.compile(
+    r"(?:\(\s*cont(?:inued)?\.?\s*\)|\bcont(?:inued)?\.?\b(?:\s+from|\s+on)?|"
+    r"\(\s*ต่อ\s*\)|(?:^|\s)ต่อ(?:\s*$|\s*\)))",
     re.IGNORECASE,
 )
 
@@ -1504,6 +1554,14 @@ def _extract_aligned_block_tables(page, blocks=None, atoms=None):
         if len(col_bins) < 2:
             continue
 
+        raw_col_bounds_norm = [
+            [
+                round(max(0.0, min(1.0, (cb["x0"] - rx0) / pw)), 4),
+                round(max(0.0, min(1.0, (cb["x1"] - rx0) / pw)), 4),
+            ]
+            for cb in col_bins
+        ]
+
         grid_rows = []
         for band in reg:
             row_cells = [""] * len(col_bins)
@@ -1524,9 +1582,14 @@ def _extract_aligned_block_tables(page, blocks=None, atoms=None):
                 )
             grid_rows.append(row_cells)
 
-        cleaned = clean_table_rows(grid_rows)
+        cleaned, keep_cols = _clean_table_rows_with_meta(grid_rows)
         if not cleaned:
             continue
+        col_bounds_norm = [
+            raw_col_bounds_norm[ci]
+            for ci in keep_cols
+            if ci < len(raw_col_bounds_norm)
+        ]
 
         ncols = len(cleaned[0])
         nrows = len(cleaned)
@@ -1569,6 +1632,9 @@ def _extract_aligned_block_tables(page, blocks=None, atoms=None):
                     round(max(0.0, min(1.0, (bx1 - rx0) / pw)), 4),
                     round(max(0.0, min(1.0, (by1 - ry0) / ph)), 4),
                 ],
+                "col_bounds_norm": col_bounds_norm,
+                "raw_col_bounds_norm": raw_col_bounds_norm,
+                "keep_cols": keep_cols,
                 "rows": cleaned,
                 "nrows": nrows,
                 "ncols": ncols,
@@ -1576,6 +1642,953 @@ def _extract_aligned_block_tables(page, blocks=None, atoms=None):
             }
         )
     return recovered
+
+
+def _grid_natural_key(label):
+    """Natural CAD grid-axis sort key: ('2.1') < ('10') and ('Z') < ('AA')."""
+    raw = str(label or "").strip()
+    m_num = re.match(r"^(\d+)(?:\.(\d+))?([A-Za-z'\u2032]*)$", raw)
+    if m_num:
+        major = int(m_num.group(1))
+        minor_s = m_num.group(2)
+        suf = (m_num.group(3) or "").lower()
+        sub_tier = 0 if (minor_s is None and not suf) else (1 if minor_s is not None else 2)
+        return (0, major, sub_tier, int(minor_s) if minor_s is not None else 0, suf)
+    m_alpha = re.match(r"^([A-Za-z]+)(?:[.'\u2032]?(\d+))?([A-Za-z'\u2032]*)$", raw)
+    if m_alpha:
+        letters = m_alpha.group(1).upper()
+        alpha_rank = 0
+        for ch in letters:
+            alpha_rank = alpha_rank * 26 + (ord(ch) - ord("A") + 1)
+        minor_s = m_alpha.group(2)
+        suf = (m_alpha.group(3) or "").lower()
+        sub_tier = 0 if (minor_s is None and not suf) else (1 if minor_s is not None else 2)
+        return (1, alpha_rank, sub_tier, int(minor_s) if minor_s is not None else 0, suf)
+    return (2, 0, 0, 0, raw.lower())
+
+
+def _pt_xy(pt):
+    """Normalize a PyMuPDF Point or 2-tuple into float (x, y)."""
+    if hasattr(pt, "x"):
+        return float(pt.x), float(pt.y)
+    return float(pt[0]), float(pt[1])
+
+
+def _safe_probe_drawings(page, drawings=None):
+    """Fetch page drawings with O(1) multi-layer raster bailout."""
+    if drawings is not None:
+        return drawings
+    if page is None:
+        return []
+    if hasattr(page, "get_images"):
+        img_metrics = _fast_page_image_metrics(page)
+        drws, _ = _probe_drawings_fast(page, img_metrics)
+        return drws
+    try:
+        return page.get_drawings() or []
+    except Exception:  # nosec B110
+        return []
+
+
+def _extract_vector_primitives(drawings):
+    """Split PyMuPDF drawings into bubble loops, line segments, delta triangles, and clouds."""
+    bubbles = []
+    segments = []
+    triangles = []
+    clouds = []
+    loose_curves = []
+
+    def _flush_sub(sub):
+        if not sub or not sub["pts"]:
+            return
+        xs = [p[0] for p in sub["pts"]]
+        ys = [p[1] for p in sub["pts"]]
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = min(ys), max(ys)
+        w = x1 - x0
+        h = y1 - y0
+        n_c = sub["n_c"]
+        n_l = sub["n_l"]
+        max_dim = max(w, h)
+        min_dim = min(w, h)
+        if 7.0 <= w <= 60.0 and 7.0 <= h <= 60.0 and max_dim > 0 and (min_dim / max_dim) >= 0.72:
+            if n_c >= 2 or n_l >= 6:
+                cx = 0.5 * (x0 + x1)
+                cy = 0.5 * (y0 + y1)
+                for prev in bubbles:
+                    if abs(prev["cx"] - cx) <= 4.0 and abs(prev["cy"] - cy) <= 4.0 and abs(prev["w"] - w) <= 6.0:
+                        return
+                bubbles.append(
+                    {
+                        "bbox": [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)],
+                        "cx": cx,
+                        "cy": cy,
+                        "w": w,
+                        "h": h,
+                    }
+                )
+                return
+        if n_c == 0 and 2 <= n_l <= 4 and 6.0 <= w <= 42.0 and 6.0 <= h <= 42.0:
+            uniq = []
+            for px, py in sub["verts"]:
+                if not any(math.hypot(px - ux, py - uy) <= 1.5 for ux, uy in uniq):
+                    uniq.append((px, py))
+            if len(uniq) == 3:
+                triangles.append({"bbox": [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)]})
+                return
+        if n_c >= 6 and max_dim >= 24.0:
+            clouds.append({"bbox": [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)]})
+
+    for drw in drawings or ():
+        items = drw.get("items") or ()
+        if not items:
+            rect = drw.get("rect")
+            if rect:
+                x0, y0, x1, y1 = float(rect.x0), float(rect.y0), float(rect.x1), float(rect.y1)
+                rw, rh = abs(x1 - x0), abs(y1 - y0)
+                if min(rw, rh) <= 2.5 and max(rw, rh) >= 12.0:
+                    if rw >= rh:
+                        yc = 0.5 * (y0 + y1)
+                        segments.append((min(x0, x1), yc, max(x0, x1), yc))
+                    else:
+                        xc = 0.5 * (x0 + x1)
+                        segments.append((xc, min(y0, y1), xc, max(y0, y1)))
+            continue
+
+        cur = None
+        for item in items:
+            if not item:
+                continue
+            op = item[0]
+            if op == "l" and len(item) >= 3:
+                p0 = _pt_xy(item[1])
+                p1 = _pt_xy(item[2])
+                segments.append((p0[0], p0[1], p1[0], p1[1]))
+                if cur is None or math.hypot(p0[0] - cur["end"][0], p0[1] - cur["end"][1]) > 1.5:
+                    _flush_sub(cur)
+                    cur = {"start": p0, "end": p1, "pts": [p0, p1], "verts": [p0, p1], "n_l": 1, "n_c": 0}
+                else:
+                    cur["pts"].append(p1)
+                    cur["verts"].append(p1)
+                    cur["end"] = p1
+                    cur["n_l"] += 1
+                    if math.hypot(p1[0] - cur["start"][0], p1[1] - cur["start"][1]) <= 1.5 and (cur["n_l"] + cur["n_c"]) >= 3:
+                        _flush_sub(cur)
+                        cur = None
+            elif op == "c" and len(item) >= 5:
+                p0 = _pt_xy(item[1])
+                p1 = _pt_xy(item[2])
+                p2 = _pt_xy(item[3])
+                p3 = _pt_xy(item[4])
+                if math.hypot(p3[0] - p0[0], p3[1] - p0[1]) <= 40.0:
+                    loose_curves.append((p0, p1, p2, p3))
+                if cur is None or math.hypot(p0[0] - cur["end"][0], p0[1] - cur["end"][1]) > 1.5:
+                    _flush_sub(cur)
+                    cur = {"start": p0, "end": p3, "pts": [p0, p1, p2, p3], "verts": [], "n_l": 0, "n_c": 1}
+                else:
+                    cur["pts"].extend([p1, p2, p3])
+                    cur["end"] = p3
+                    cur["n_c"] += 1
+                    if math.hypot(p3[0] - cur["start"][0], p3[1] - cur["start"][1]) <= 1.5 and (cur["n_l"] + cur["n_c"]) >= 2:
+                        _flush_sub(cur)
+                        cur = None
+            elif op == "re" and len(item) >= 2:
+                _flush_sub(cur)
+                cur = None
+                r = item[1]
+                rx0, ry0, rx1, ry1 = float(r.x0), float(r.y0), float(r.x1), float(r.y1)
+                rw, rh = abs(rx1 - rx0), abs(ry1 - ry0)
+                if min(rw, rh) <= 2.5 and max(rw, rh) >= 12.0:
+                    if rw >= rh:
+                        yc = 0.5 * (ry0 + ry1)
+                        segments.append((min(rx0, rx1), yc, max(rx0, rx1), yc))
+                    else:
+                        xc = 0.5 * (rx0 + rx1)
+                        segments.append((xc, min(ry0, ry1), xc, max(ry0, ry1)))
+            elif op == "qu":
+                _flush_sub(cur)
+                cur = None
+        _flush_sub(cur)
+
+    if not clouds and len(loose_curves) >= 6:
+        used = [False] * len(loose_curves)
+        for i in range(len(loose_curves)):
+            if used[i]:
+                continue
+            used[i] = True
+            cluster = [loose_curves[i]]
+            queue = [loose_curves[i]]
+            while queue:
+                c0 = queue.pop()
+                pts_a = (c0[0], c0[3])
+                for j in range(len(loose_curves)):
+                    if used[j]:
+                        continue
+                    c1 = loose_curves[j]
+                    if min(
+                        math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+                        for pa in pts_a
+                        for pb in (c1[0], c1[3])
+                    ) <= 6.5:
+                        used[j] = True
+                        cluster.append(c1)
+                        queue.append(c1)
+            if len(cluster) >= 6:
+                all_pts = [p for seg in cluster for p in seg]
+                xs = [p[0] for p in all_pts]
+                ys = [p[1] for p in all_pts]
+                x0, x1 = min(xs), max(xs)
+                y0, y1 = min(ys), max(ys)
+                if max(x1 - x0, y1 - y0) >= 24.0:
+                    clouds.append({"bbox": [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)]})
+
+    return {
+        "bubbles": bubbles,
+        "segments": segments,
+        "triangles": triangles,
+        "clouds": clouds,
+    }
+
+
+def _bubble_has_bisector(bubble, segments):
+    """Return True when a roughly horizontal divider line bisects a circle bubble."""
+    bx0, by0, bx1, by1 = bubble["bbox"]
+    w, h = bubble["w"], bubble["h"]
+    for sx0, sy0, sx1, sy1 in segments:
+        lo_x, hi_x = min(sx0, sx1), max(sx0, sx1)
+        lo_y, hi_y = min(sy0, sy1), max(sy0, sy1)
+        if hi_x < bx0 or lo_x > bx1 or hi_y < by0 or lo_y > by1:
+            continue
+        overlap_x = min(hi_x, bx1) - max(lo_x, bx0)
+        mid_y = 0.5 * (sy0 + sy1)
+        if (
+            abs(sy1 - sy0) <= max(3.0, 0.25 * h)
+            and overlap_x >= 0.50 * w
+            and (by0 + 0.15 * h) <= mid_y <= (by1 - 0.15 * h)
+        ):
+            return True
+    return False
+
+
+def _bubble_ray_flags(bubble, segments, pw, ph):
+    """Detect orthogonal vertical/horizontal grid lines extending inward from a bubble."""
+    bx0, by0, bx1, by1 = bubble["bbox"]
+    cx, cy, w, h = bubble["cx"], bubble["cy"], bubble["w"], bubble["h"]
+    tol_x = max(6.0, 0.55 * w)
+    tol_y = max(6.0, 0.55 * h)
+    min_single_v = min(45.0, 0.08 * ph)
+    min_single_h = min(45.0, 0.08 * pw)
+    min_dash_v = min(60.0, 0.12 * ph)
+    min_dash_h = min(60.0, 0.12 * pw)
+
+    v_top_sum = 0.0
+    v_top_near = False
+    v_bot_sum = 0.0
+    v_bot_near = False
+    h_left_sum = 0.0
+    h_left_near = False
+    h_right_sum = 0.0
+    h_right_near = False
+    has_v_single = False
+    has_h_single = False
+
+    for sx0, sy0, sx1, sy1 in segments:
+        dx = abs(sx1 - sx0)
+        dy = abs(sy1 - sy0)
+        if dx <= 3.0 and dy >= 4.0:
+            xm = 0.5 * (sx0 + sx1)
+            if abs(xm - cx) <= tol_x:
+                ylo, yhi = min(sy0, sy1), max(sy0, sy1)
+                if yhi > by1 + 12.0:
+                    v_top_sum += dy
+                    if ylo <= by1 + 32.0:
+                        v_top_near = True
+                    if dy >= min_single_v and ylo <= by1 + 32.0:
+                        has_v_single = True
+                if ylo < by0 - 12.0:
+                    v_bot_sum += dy
+                    if yhi >= by0 - 32.0:
+                        v_bot_near = True
+                    if dy >= min_single_v and yhi >= by0 - 32.0:
+                        has_v_single = True
+        if dy <= 3.0 and dx >= 4.0:
+            ym = 0.5 * (sy0 + sy1)
+            if abs(ym - cy) <= tol_y:
+                xlo, xhi = min(sx0, sx1), max(sx0, sx1)
+                if xhi > bx1 + 12.0:
+                    h_left_sum += dx
+                    if xlo <= bx1 + 32.0:
+                        h_left_near = True
+                    if dx >= min_single_h and xlo <= bx1 + 32.0:
+                        has_h_single = True
+                if xlo < bx0 - 12.0:
+                    h_right_sum += dx
+                    if xhi >= bx0 - 32.0:
+                        h_right_near = True
+                    if dx >= min_single_h and xhi >= bx0 - 32.0:
+                        has_h_single = True
+
+    has_v = has_v_single or (v_top_near and v_top_sum >= min_dash_v) or (v_bot_near and v_bot_sum >= min_dash_v)
+    has_h = has_h_single or (h_left_near and h_left_sum >= min_dash_h) or (h_right_near and h_right_sum >= min_dash_h)
+    return has_v, has_h
+
+
+def _longest_monotonic_chain(cands, reverse_order=False):
+    """Select longest strictly monotonic subsequence by _grid_natural_key."""
+    n = len(cands)
+    if n < 2:
+        return []
+    keys = [_grid_natural_key(c["label"]) for c in cands]
+    dp_len = [1] * n
+    dp_ray = [1 if c["has_ray"] else 0 for c in cands]
+    parent = [-1] * n
+    for i in range(n):
+        for j in range(i):
+            if keys[j][0] != keys[i][0]:
+                continue
+            ok = (keys[j] > keys[i]) if reverse_order else (keys[j] < keys[i])
+            if ok:
+                cand_score = (dp_len[j] + 1, dp_ray[j] + (1 if cands[i]["has_ray"] else 0))
+                cur_score = (dp_len[i], dp_ray[i])
+                if cand_score > cur_score:
+                    dp_len[i] = cand_score[0]
+                    dp_ray[i] = cand_score[1]
+                    parent[i] = j
+    best_i = max(range(n), key=lambda idx: (dp_len[idx], dp_ray[idx]))
+    if dp_len[best_i] < 2:
+        return []
+    chain = []
+    cur = best_i
+    while cur != -1:
+        chain.append(cands[cur])
+        cur = parent[cur]
+    chain.reverse()
+    return chain
+
+
+def _consolidate_axis_chains(band_lists, dim_pt, axis_kind):
+    """Cluster collinear perimeter bubbles, run monotonic LIS, and separate primary vs secondary."""
+    chains = []
+    for cands in band_lists:
+        if len(cands) < 2:
+            continue
+        ortho_sorted = sorted(cands, key=lambda c: c["ortho_pt"])
+        ortho_clusters = []
+        for item in ortho_sorted:
+            tol = max(14.0, 0.75 * item["diam"])
+            if ortho_clusters and abs(item["ortho_pt"] - ortho_clusters[-1]["ref"]) <= tol:
+                cl = ortho_clusters[-1]
+                cl["items"].append(item)
+                cl["ref"] = sum(x["ortho_pt"] for x in cl["items"]) / len(cl["items"])
+            else:
+                ortho_clusters.append({"ref": item["ortho_pt"], "items": [item]})
+
+        for cl in ortho_clusters:
+            by_fam = {}
+            for item in cl["items"]:
+                by_fam.setdefault(item["family"], []).append(item)
+            for fam_items in by_fam.values():
+                fam_sorted = sorted(fam_items, key=lambda c: c["coord_pt"])
+                deduped = []
+                for it in fam_sorted:
+                    if deduped and abs(it["coord_pt"] - deduped[-1]["coord_pt"]) <= 8.0:
+                        if it["has_ray"] and not deduped[-1]["has_ray"]:
+                            deduped[-1] = it
+                    else:
+                        deduped.append(it)
+                if len(deduped) < 2:
+                    continue
+                inc_chain = _longest_monotonic_chain(deduped, reverse_order=False)
+                best_chain = inc_chain
+                if axis_kind == "y":
+                    dec_chain = _longest_monotonic_chain(deduped, reverse_order=True)
+                    inc_score = (sum(1 for c in inc_chain if c["has_ray"]), len(inc_chain))
+                    dec_score = (sum(1 for c in dec_chain if c["has_ray"]), len(dec_chain))
+                    if dec_score > inc_score:
+                        best_chain = dec_chain
+                if len(best_chain) >= 2:
+                    ordered = sorted(best_chain, key=lambda c: _grid_natural_key(c["label"]))
+                    chains.append(ordered)
+
+    if not chains:
+        return [], []
+
+    # Merge opposite-margin chains belonging to the same physical grid family
+    merged_groups = []
+    for ch in chains:
+        ch_map = {c["label"]: c for c in ch}
+        placed = False
+        for grp in merged_groups:
+            shared = set(ch_map.keys()) & set(grp.keys())
+            if shared:
+                max_diff = max(abs(ch_map[k]["coord_pt"] - grp[k]["coord_pt"]) for k in shared)
+                if max_diff <= max(20.0, 0.02 * dim_pt) and (
+                    len(shared) >= max(2, min(len(ch_map), len(grp)) // 2)
+                ):
+                    for k, item in ch_map.items():
+                        if k in grp:
+                            ex = grp[k]
+                            n_b = len(ex["bubble_bboxes"])
+                            ex["coord_pt"] = (ex["coord_pt"] * n_b + item["coord_pt"]) / float(n_b + 1)
+                            ex["bubble_bboxes"].extend(item["bubble_bboxes"])
+                            ex["has_ray"] = bool(ex["has_ray"] or item["has_ray"])
+                        else:
+                            grp[k] = dict(item, bubble_bboxes=list(item["bubble_bboxes"]))
+                    placed = True
+                    break
+        if not placed:
+            merged_groups.append(
+                {c["label"]: dict(c, bubble_bboxes=list(c["bubble_bboxes"])) for c in ch}
+            )
+
+    formatted = []
+    for grp in merged_groups:
+        items = sorted(grp.values(), key=lambda c: _grid_natural_key(c["label"]))
+        ray_cnt = sum(1 for c in items if c["has_ray"])
+        span = (max(c["coord_pt"] for c in items) - min(c["coord_pt"] for c in items)) / max(1.0, dim_pt)
+        entries = [
+            {
+                "label": c["label"],
+                "coord_pt": round(c["coord_pt"], 2),
+                "coord_norm": round(max(0.0, min(1.0, (c["coord_pt"] - c["origin_pt"]) / max(1.0, dim_pt))), 4),
+                "bubble_bboxes": c["bubble_bboxes"],
+                "has_ray": bool(c["has_ray"]),
+            }
+            for c in items
+        ]
+        formatted.append(((1 if ray_cnt > 0 else 0, ray_cnt, len(entries), round(span, 3)), entries))
+
+    formatted.sort(key=lambda x: x[0], reverse=True)
+    primary = formatted[0][1]
+    secondary = formatted[1][1] if len(formatted) > 1 else []
+    return primary, secondary
+
+
+def extract_grid_axes(page, drawings=None, atoms=None):
+    """Detect perimeter circular/octagonal grid bubbles, natural-sort axes, and reject keynotes."""
+    rx0 = float(page.rect.x0)
+    ry0 = float(page.rect.y0)
+    pw = max(1.0, float(abs(page.rect.width)))
+    ph = max(1.0, float(abs(page.rect.height)))
+
+    if drawings is None:
+        drawings = _safe_probe_drawings(page)
+    if atoms is None:
+        atoms = _extract_clean_text_atoms(page)
+
+    prims = _extract_vector_primitives(drawings)
+    bubbles = prims["bubbles"]
+    segments = prims["segments"]
+
+    top_cands = []
+    bot_cands = []
+    left_cands = []
+    right_cands = []
+
+    for b in bubbles:
+        bx0, by0, bx1, by1 = b["bbox"]
+        cx, cy, w, h = b["cx"], b["cy"], b["w"], b["h"]
+        nx_c = (cx - rx0) / pw
+        ny_c = (cy - ry0) / ph
+
+        in_top = ny_c <= 0.26
+        in_bot = ny_c >= 0.74
+        in_left = nx_c <= 0.26
+        in_right = nx_c >= 0.74
+        if not (in_top or in_bot or in_left or in_right):
+            continue
+
+        if _bubble_has_bisector(b, segments):
+            continue
+
+        inside_atoms = []
+        has_inline_note = False
+        for a in atoms or ():
+            ax0, ay0, ax1, ay1 = float(a["x0"]), float(a["y0"]), float(a["x1"]), float(a["y1"])
+            axc = 0.5 * (ax0 + ax1)
+            ayc = 0.5 * (ay0 + ay1)
+            if (bx0 - 2.0) <= axc <= (bx1 + 2.0) and (by0 - 2.0) <= ayc <= (by1 + 2.0):
+                if (ax1 - ax0) <= max(w + 12.0, 2.2 * w):
+                    inside_atoms.append(a)
+            elif (
+                ax0 > bx1
+                and (ax0 - bx1) <= 45.0
+                and abs(ayc - cy) <= max(10.0, 0.75 * h)
+                and len((a.get("text") or "").strip()) >= 8
+            ):
+                has_inline_note = True
+
+        if not inside_atoms:
+            continue
+        if len(inside_atoms) == 1:
+            lbl = (inside_atoms[0].get("text") or "").strip()
+        else:
+            ys = [0.5 * (float(a["y0"]) + float(a["y1"])) for a in inside_atoms]
+            if (max(ys) - min(ys)) > 4.0:
+                continue
+            inside_atoms.sort(key=lambda a: float(a["x0"]))
+            lbl = "".join((a.get("text") or "").strip() for a in inside_atoms)
+
+        if not lbl or SHEET_ID_RE.search(lbl) or not GRID_LABEL_RE.match(lbl):
+            continue
+
+        has_v_ray, has_h_ray = _bubble_ray_flags(b, segments, pw, ph)
+        if has_inline_note and not (has_v_ray or has_h_ray):
+            continue
+
+        fam = "numeric" if lbl[0].isdigit() else "alpha"
+        diam = 0.5 * (w + h)
+
+        def _mk(coord_pt, origin_pt, ortho_pt, has_ray):
+            return {
+                "label": lbl,
+                "family": fam,
+                "coord_pt": coord_pt,
+                "origin_pt": origin_pt,
+                "ortho_pt": ortho_pt,
+                "diam": diam,
+                "nx_c": nx_c,
+                "ny_c": ny_c,
+                "bubble_bboxes": [b["bbox"]],
+                "has_ray": has_ray,
+            }
+
+        assign_x = in_top or in_bot
+        assign_y = in_left or in_right
+        if assign_x and assign_y:
+            if has_v_ray and not has_h_ray:
+                assign_y = False
+            elif has_h_ray and not has_v_ray:
+                assign_x = False
+
+        if assign_x:
+            if not (nx_c >= 0.72 and not has_v_ray):
+                item_x = _mk(cx, rx0, cy, has_v_ray)
+                if in_top:
+                    top_cands.append(item_x)
+                else:
+                    bot_cands.append(item_x)
+        if assign_y:
+            item_y = _mk(cy, ry0, cx, has_h_ray)
+            if in_left:
+                left_cands.append(item_y)
+            else:
+                right_cands.append(item_y)
+
+    # Disambiguate right-sidebar circled keynotes: require ray OR matching left-band bubble
+    left_refs = {(c["label"], round(c["coord_pt"], 0)) for c in left_cands}
+    filtered_right = []
+    for rc in right_cands:
+        if rc["has_ray"]:
+            filtered_right.append(rc)
+        elif any(lbl == rc["label"] and abs(lcy - rc["coord_pt"]) <= 18.0 for lbl, lcy in left_refs):
+            filtered_right.append(rc)
+
+    x_primary, x_secondary = _consolidate_axis_chains([top_cands, bot_cands], pw, "x")
+    y_primary, y_secondary = _consolidate_axis_chains([left_cands, filtered_right], ph, "y")
+
+    secondary_axes = {}
+    if x_secondary:
+        secondary_axes["x"] = x_secondary
+    if y_secondary:
+        secondary_axes["y"] = y_secondary
+
+    all_items = x_primary + y_primary
+    if not all_items:
+        confidence = 0.0
+    else:
+        base_cov = (0.30 if x_primary else 0.0) + (0.30 if y_primary else 0.0)
+        if not (x_primary and y_primary):
+            base_cov = 0.40
+        ray_ratio = sum(1 for it in all_items if it["has_ray"]) / float(len(all_items))
+        mult_bonus = min(1.0, len(all_items) / 6.0)
+        confidence = round(min(1.0, base_cov + 0.25 * ray_ratio + 0.15 * mult_bonus), 4)
+
+    return {
+        "x": x_primary,
+        "y": y_primary,
+        "x_labels": [it["label"] for it in x_primary],
+        "y_labels": [it["label"] for it in y_primary],
+        "confidence": confidence,
+        "secondary_axes": secondary_axes,
+    }
+
+
+def _resolve_1d_axis(val, axis_items, snap_tol_norm=0.008):
+    """Resolve 1D normalized coordinate along an axis with bracketed margin support."""
+    if not axis_items:
+        return None
+    ordered = sorted(axis_items, key=lambda it: float(it["coord_norm"]))
+    if len(ordered) == 1:
+        if abs(val - float(ordered[0]["coord_norm"])) <= snap_tol_norm:
+            return ordered[0]["label"]
+        return None
+
+    coords = [float(it["coord_norm"]) for it in ordered]
+    deltas = sorted(abs(coords[i + 1] - coords[i]) for i in range(len(coords) - 1))
+    delta_med = deltas[len(deltas) // 2]
+    margin = 0.5 * delta_med
+    if val < (coords[0] - margin) or val > (coords[-1] + margin):
+        return None
+
+    best_idx = min(range(len(ordered)), key=lambda i: abs(val - coords[i]))
+    if abs(val - coords[best_idx]) <= snap_tol_norm:
+        return ordered[best_idx]["label"]
+
+    if val < coords[0]:
+        return ordered[0]["label"]
+    if val > coords[-1]:
+        return ordered[-1]["label"]
+
+    for i in range(len(ordered) - 1):
+        if coords[i] <= val <= coords[i + 1]:
+            l_a, l_b = sorted(
+                [ordered[i]["label"], ordered[i + 1]["label"]],
+                key=_grid_natural_key,
+            )
+            return f"{l_a}-{l_b}"
+    return None
+
+
+def resolve_grid_ref(norm_bbox, grid_axes, snap_tol_norm: float = 0.008):
+    """Resolve normalized bbox/point onto structural grid coordinates with CHK-03 bracket."""
+    if not norm_bbox or not isinstance(grid_axes, dict):
+        return None
+    if len(norm_bbox) == 4:
+        nx = 0.5 * (float(norm_bbox[0]) + float(norm_bbox[2]))
+        ny = 0.5 * (float(norm_bbox[1]) + float(norm_bbox[3]))
+    elif len(norm_bbox) == 2:
+        nx, ny = float(norm_bbox[0]), float(norm_bbox[1])
+    else:
+        return None
+
+    x_items = grid_axes.get("x") or []
+    y_items = grid_axes.get("y") or []
+    if not x_items and not y_items:
+        return None
+
+    rx = _resolve_1d_axis(nx, x_items, snap_tol_norm=snap_tol_norm) if x_items else None
+    ry = _resolve_1d_axis(ny, y_items, snap_tol_norm=snap_tol_norm) if y_items else None
+
+    if x_items and y_items:
+        if rx is None or ry is None:
+            return None
+        return f"{rx} / {ry}"
+    return rx if x_items else ry
+
+
+def _callout_kind_from_prefix(prefix):
+    """Map callout prefix token to canonical edge kind."""
+    p = (prefix or "").upper()
+    if p.startswith("SEC"):
+        return "section"
+    if p.startswith("EL"):
+        return "elevation"
+    return "detail"
+
+
+def extract_sheet_callouts(
+    page, atoms=None, drawings=None, grid_axes=None, tile_grid: str = "4x4"
+):
+    """Extract primary_sheet_id, cross-sheet detail/section callouts, and revision deltas."""
+    cols, rows = _parse_tile_grid(tile_grid)
+    rx0 = float(page.rect.x0)
+    ry0 = float(page.rect.y0)
+    pw = max(1.0, float(abs(page.rect.width)))
+    ph = max(1.0, float(abs(page.rect.height)))
+
+    if drawings is None:
+        drawings = _safe_probe_drawings(page)
+    if atoms is None:
+        atoms = _extract_clean_text_atoms(page)
+
+    prims = _extract_vector_primitives(drawings)
+    callouts = []
+    revision_deltas = []
+    seen_callout_keys = set()
+    bisected_atom_ids = set()
+
+    def _norm_pt_bbox(bx0, by0, bx1, by1):
+        nx0 = round(max(0.0, min(1.0, (bx0 - rx0) / pw)), 4)
+        ny0 = round(max(0.0, min(1.0, (by0 - ry0) / ph)), 4)
+        nx1 = round(max(0.0, min(1.0, (bx1 - rx0) / pw)), 4)
+        ny1 = round(max(0.0, min(1.0, (by1 - ry0) / ph)), 4)
+        tid = _tile_id_from_norm_point(0.5 * (nx0 + nx1), 0.5 * (ny0 + ny1), cols=cols, rows=rows)
+        gref = resolve_grid_ref([nx0, ny0, nx1, ny1], grid_axes) if grid_axes else None
+        return [nx0, ny0, nx1, ny1], [round(bx0, 2), round(by0, 2), round(bx1, 2), round(by1, 2)], tid, gref
+
+    # 1. Stacked bisected circle callouts ("3" over divider line over "S-501")
+    for b in prims["bubbles"]:
+        if not _bubble_has_bisector(b, prims["segments"]):
+            continue
+        bx0, by0, bx1, by1 = b["bbox"]
+        inside = []
+        for idx, a in enumerate(atoms or ()):
+            axc = 0.5 * (float(a["x0"]) + float(a["x1"]))
+            ayc = 0.5 * (float(a["y0"]) + float(a["y1"]))
+            if (bx0 - 3.0) <= axc <= (bx1 + 3.0) and (by0 - 3.0) <= ayc <= (by1 + 3.0):
+                inside.append((idx, ayc, a))
+        if not inside:
+            continue
+        for idx, _, _ in inside:
+            bisected_atom_ids.add(idx)
+        inside.sort(key=lambda x: x[1])
+        detail_no = None
+        target_sheet = None
+        raw_txt = " ".join((x[2].get("text") or "").strip() for x in inside).strip()
+        if len(inside) >= 2:
+            top_txt = (inside[0][2].get("text") or "").strip().upper()
+            bot_txt = (inside[-1][2].get("text") or "").strip().upper()
+            m_sid = SHEET_ID_RE.search(bot_txt)
+            if m_sid and re.match(r"^[A-Z0-9]{1,4}$", top_txt):
+                detail_no = top_txt
+                target_sheet = m_sid.group(1)
+        if not target_sheet:
+            m_combo = re.search(
+                r"\b([A-Z0-9]{1,4})\s*[/\s]\s*([A-Z]{1,3}-\d{1,4}(?:\.\d+)?)\b",
+                raw_txt.upper(),
+            )
+            if m_combo:
+                detail_no = m_combo.group(1)
+                target_sheet = m_combo.group(2)
+        if target_sheet:
+            nb, pb, tid, gref = _norm_pt_bbox(bx0, by0, bx1, by1)
+            ckey = ("detail", detail_no or "", target_sheet, tid)
+            if ckey not in seen_callout_keys:
+                seen_callout_keys.add(ckey)
+                callouts.append(
+                    {
+                        "kind": "detail",
+                        "detail_no": detail_no,
+                        "target_sheet": target_sheet,
+                        "text": raw_txt,
+                        "norm_bbox": nb,
+                        "pt_bbox": pb,
+                        "tile_id": tid,
+                        "grid_ref": gref,
+                    }
+                )
+
+    # 2. Text-based detail/section/elevation/reference callouts + title-block sheet scoring
+    sheet_scores = {}
+    for idx, a in enumerate(atoms or ()):
+        txt = (a.get("text") or "").strip()
+        if not txt:
+            continue
+        ax0, ay0, ax1, ay1 = float(a["x0"]), float(a["y0"]), float(a["x1"]), float(a["y1"])
+        nb, pb, tid, gref = _norm_pt_bbox(ax0, ay0, ax1, ay1)
+        txt_up = txt.upper()
+
+        matched_ref_spans = False
+        if idx not in bisected_atom_ids:
+            for m in DETAIL_SLASH_CALLOUT_RE.finditer(txt_up):
+                kind = _callout_kind_from_prefix(m.group(1))
+                dno = m.group(2).strip()
+                tgt = m.group(3).strip()
+                matched_ref_spans = True
+                ckey = (kind, dno, tgt, tid)
+                if ckey not in seen_callout_keys:
+                    seen_callout_keys.add(ckey)
+                    callouts.append(
+                        {
+                            "kind": kind,
+                            "detail_no": dno,
+                            "target_sheet": tgt,
+                            "text": txt[:140],
+                            "norm_bbox": nb,
+                            "pt_bbox": pb,
+                            "tile_id": tid,
+                            "grid_ref": gref,
+                        }
+                    )
+            for m in DETAIL_ON_SHEET_RE.finditer(txt_up):
+                kind = _callout_kind_from_prefix(m.group(1))
+                tgt = m.group(2).strip()
+                matched_ref_spans = True
+                ckey = (kind, "", tgt, tid)
+                if ckey not in seen_callout_keys:
+                    seen_callout_keys.add(ckey)
+                    callouts.append(
+                        {
+                            "kind": kind,
+                            "detail_no": None,
+                            "target_sheet": tgt,
+                            "text": txt[:140],
+                            "norm_bbox": nb,
+                            "pt_bbox": pb,
+                            "tile_id": tid,
+                            "grid_ref": gref,
+                        }
+                    )
+            for m in SEE_SHEET_CALLOUT_RE.finditer(txt_up):
+                tgt = m.group(1).strip()
+                matched_ref_spans = True
+                ckey = ("reference", "", tgt, tid)
+                if ckey not in seen_callout_keys:
+                    seen_callout_keys.add(ckey)
+                    callouts.append(
+                        {
+                            "kind": "reference",
+                            "detail_no": None,
+                            "target_sheet": tgt,
+                            "text": txt[:140],
+                            "norm_bbox": nb,
+                            "pt_bbox": pb,
+                            "tile_id": tid,
+                            "grid_ref": gref,
+                        }
+                    )
+
+        # Revision markers in text
+        for m_rev in REV_MARKER_RE.finditer(txt):
+            rev_id = next((g for g in m_rev.groups() if g), None)
+            rev_kind = "addendum" if "ADDENDUM" in m_rev.group(0).upper() else "revision_tag"
+            revision_deltas.append(
+                {
+                    "kind": rev_kind,
+                    "rev_id": rev_id.upper() if rev_id else None,
+                    "text": m_rev.group(0).strip(),
+                    "norm_bbox": nb,
+                    "pt_bbox": pb,
+                    "tile_id": tid,
+                    "grid_ref": gref,
+                }
+            )
+
+        # Score candidate primary_sheet_id outside callout/bisected atoms
+        if idx in bisected_atom_ids or matched_ref_spans:
+            continue
+        is_ref_ctx = bool(
+            re.search(r"\b(?:SEE|REF|REFER|DETAIL|DTL|SEC|SECT|SECTION|ELEV)\b", txt_up)
+        )
+        if is_ref_ctx:
+            continue
+        for m_sid in SHEET_ID_RE.finditer(txt_up):
+            sid = m_sid.group(1)
+            sc = 1.0
+            if nb[0] >= 0.60 and nb[1] >= 0.65:
+                sc += 10.0
+            elif nb[0] >= 0.72 or nb[1] >= 0.80:
+                sc += 6.0
+            if re.search(
+                r"\b(?:SHEET|SHT|DWG|DRAWING)\s*(?:NO\.?\s*[:\-]?\s*)?" + re.escape(sid) + r"\b",
+                txt_up,
+            ):
+                sc += 8.0
+            fsize = float(a.get("size") or 10.0)
+            if fsize >= 11.5:
+                sc += 2.0 * min(3.0, fsize / 12.0)
+            if sc > sheet_scores.get(sid, 0.0):
+                sheet_scores[sid] = sc
+
+    # 3. Vector delta triangles & revision cloud contours
+    for tri in prims["triangles"]:
+        tx0, ty0, tx1, ty1 = tri["bbox"]
+        tag = None
+        for a in atoms or ():
+            axc = 0.5 * (float(a["x0"]) + float(a["x1"]))
+            ayc = 0.5 * (float(a["y0"]) + float(a["y1"]))
+            if (tx0 - 3.0) <= axc <= (tx1 + 3.0) and (ty0 - 3.0) <= ayc <= (ty1 + 3.0):
+                t_cand = (a.get("text") or "").strip().upper()
+                if re.match(r"^[A-Z0-9]{1,3}$", t_cand):
+                    tag = t_cand
+                    break
+        if tag is not None:
+            nb, pb, tid, gref = _norm_pt_bbox(tx0, ty0, tx1, ty1)
+            if not any(
+                d.get("rev_id") == tag and d.get("tile_id") == tid for d in revision_deltas
+            ):
+                revision_deltas.append(
+                    {
+                        "kind": "delta_triangle",
+                        "rev_id": tag,
+                        "text": f"\u0394{tag}",
+                        "norm_bbox": nb,
+                        "pt_bbox": pb,
+                        "tile_id": tid,
+                        "grid_ref": gref,
+                    }
+                )
+
+    for cld in prims["clouds"]:
+        cx0, cy0, cx1, cy1 = cld["bbox"]
+        nb, pb, tid, gref = _norm_pt_bbox(cx0, cy0, cx1, cy1)
+        attached_rev = None
+        for rd in revision_deltas:
+            rb = rd.get("pt_bbox") or []
+            if len(rb) == 4 and not (rb[2] < cx0 - 36.0 or rb[0] > cx1 + 36.0 or rb[3] < cy0 - 36.0 or rb[1] > cy1 + 36.0):
+                attached_rev = rd.get("rev_id")
+                break
+        revision_deltas.append(
+            {
+                "kind": "revision_cloud",
+                "rev_id": attached_rev,
+                "text": f"CLOUD {attached_rev}" if attached_rev else "REVISION CLOUD",
+                "norm_bbox": nb,
+                "pt_bbox": pb,
+                "tile_id": tid,
+                "grid_ref": gref,
+            }
+        )
+
+    primary_sheet_id = (
+        max(sheet_scores.keys(), key=lambda s: sheet_scores[s])
+        if sheet_scores
+        else None
+    )
+    return {
+        "primary_sheet_id": primary_sheet_id,
+        "callouts": callouts,
+        "revision_deltas": revision_deltas,
+    }
+
+
+def build_callout_graph(spatial_pages: list):
+    """Build cross-sheet callout graph mapping sheet IDs to 1-based pages and unresolved targets."""
+    sheets = {}
+    for sp in spatial_pages or ():
+        if not isinstance(sp, dict):
+            continue
+        p_num = int(sp.get("page", 1))
+        psid = sp.get("primary_sheet_id")
+        if psid:
+            sid_norm = str(psid).strip().upper()
+            if sid_norm and sid_norm not in sheets:
+                sheets[sid_norm] = p_num
+
+    edges = []
+    dangling = set()
+    for sp in spatial_pages or ():
+        if not isinstance(sp, dict):
+            continue
+        p_num = int(sp.get("page", 1))
+        psid = sp.get("primary_sheet_id")
+        from_sheet = str(psid).strip().upper() if psid else None
+        for c in sp.get("callouts") or ():
+            if not isinstance(c, dict):
+                continue
+            target = str(c.get("target_sheet") or "").strip().upper()
+            if not target:
+                continue
+            resolved = target in sheets
+            if not resolved:
+                dangling.add(target)
+            edges.append(
+                {
+                    "from_sheet": from_sheet,
+                    "from_page": p_num,
+                    "target_sheet": target,
+                    "detail_no": c.get("detail_no"),
+                    "kind": c.get("kind", "reference"),
+                    "resolved": resolved,
+                }
+            )
+
+    return {
+        "sheets": sheets,
+        "edges": edges,
+        "dangling_targets": sorted(dangling),
+    }
 
 
 def _parse_tile_grid(tile_grid="4x4"):
@@ -1654,6 +2667,18 @@ def extract_spatial_cad_index(
         if blocks is not None
         else (regime_info.get("_atoms") or _extract_clean_text_atoms(page))
     )
+    drawings = regime_info.get("_drawings")
+    if drawings is None:
+        drawings = _safe_probe_drawings(page)
+
+    grid_axes = extract_grid_axes(page, drawings=drawings, atoms=atoms)
+    callout_info = extract_sheet_callouts(
+        page,
+        atoms=atoms,
+        drawings=drawings,
+        grid_axes=grid_axes,
+        tile_grid=f"{cols}x{rows}",
+    )
 
     tiles = OrderedDict()
     for r_i in range(rows):
@@ -1699,6 +2724,9 @@ def extract_spatial_cad_index(
         }
         if "dir" in a:
             entry["dir"] = a["dir"]
+        gref = resolve_grid_ref([nx0, ny0, nx1, ny1], grid_axes)
+        if gref:
+            entry["grid_ref"] = gref
         localized_blocks.append(entry)
 
         t_rec = tiles[tid]
@@ -1721,7 +2749,9 @@ def extract_spatial_cad_index(
                 {"text": txt[:120], "norm_bbox": [nx0, ny0, nx1, ny1], "tile_id": tid}
             )
 
-    aligned_tabs = _extract_aligned_block_tables(page, blocks=blocks)
+    aligned_tabs = _extract_aligned_block_tables(
+        page, blocks=blocks, atoms=None if blocks is not None else atoms
+    )
     out_tables = []
     seen_sigs = set()
 
@@ -1745,6 +2775,13 @@ def extract_spatial_cad_index(
             t_item["tile_id"] = _tile_id_from_norm_point(
                 0.5 * (nb[0] + nb[2]), 0.5 * (nb[1] + nb[3]), cols=cols, rows=rows
             )
+            gref = resolve_grid_ref(nb, grid_axes)
+            if gref:
+                t_item["grid_ref"] = gref
+        if isinstance(tab, dict):
+            for mk in ("col_bounds_norm", "raw_col_bounds_norm", "keep_cols"):
+                if mk in tab:
+                    t_item[mk] = tab[mk]
         out_tables.append(t_item)
 
     for at in aligned_tabs:
@@ -1753,20 +2790,25 @@ def extract_spatial_cad_index(
             continue
         seen_sigs.add(sig)
         nb = at["norm_bbox"]
-        out_tables.append(
-            {
-                "bbox": at["bbox"],
-                "norm_bbox": nb,
-                "tile_id": _tile_id_from_norm_point(
-                    0.5 * (nb[0] + nb[2]), 0.5 * (nb[1] + nb[3]), cols=cols, rows=rows
-                ),
-                "rows": at["rows"],
-                "nrows": at["nrows"],
-                "ncols": at["ncols"],
-                "markdown": rows_to_markdown(at["rows"]),
-                "source": "aligned_blocks",
-            }
-        )
+        t_item = {
+            "bbox": at["bbox"],
+            "norm_bbox": nb,
+            "tile_id": _tile_id_from_norm_point(
+                0.5 * (nb[0] + nb[2]), 0.5 * (nb[1] + nb[3]), cols=cols, rows=rows
+            ),
+            "col_bounds_norm": at.get("col_bounds_norm"),
+            "raw_col_bounds_norm": at.get("raw_col_bounds_norm"),
+            "keep_cols": at.get("keep_cols"),
+            "rows": at["rows"],
+            "nrows": at["nrows"],
+            "ncols": at["ncols"],
+            "markdown": rows_to_markdown(at["rows"]),
+            "source": "aligned_blocks",
+        }
+        gref = resolve_grid_ref(nb, grid_axes)
+        if gref:
+            t_item["grid_ref"] = gref
+        out_tables.append(t_item)
 
     page_num = getattr(page, "number", 0) + 1
     return {
@@ -1776,7 +2818,11 @@ def extract_spatial_cad_index(
         "tile_grid": f"{cols}x{rows}",
         "regime": regime_clean["regime"],
         "regime_info": regime_clean,
+        "primary_sheet_id": callout_info["primary_sheet_id"],
         "sheet_id_hints": sorted(sheet_ids),
+        "grid_axes": grid_axes,
+        "callouts": callout_info["callouts"],
+        "revision_deltas": callout_info["revision_deltas"],
         "titleblock_hints": titleblock_hints,
         "legend_hints": legend_hints,
         "tiles": tiles,
@@ -2312,22 +3358,46 @@ def rank_spatial_rois(spatial_index, query, top_k=5, xlaya_bridge=False):
             )
 
         blocks_by_tid = {}
+        grid_refs_by_tid = {}
         for blk in pg.get("blocks") or []:
             tid = blk.get("tile_id")
             if tid and blk.get("text"):
                 blocks_by_tid.setdefault(tid, []).append(str(blk["text"]))
+            if tid and blk.get("grid_ref"):
+                grid_refs_by_tid.setdefault(tid, []).append(str(blk["grid_ref"]))
 
         tables_by_tid = {}
         for tab in pg.get("tables") or []:
             tid = tab.get("tile_id")
             if tid and tab.get("markdown"):
                 tables_by_tid.setdefault(tid, []).append(str(tab["markdown"]))
+            if tid and tab.get("grid_ref"):
+                grid_refs_by_tid.setdefault(tid, []).append(str(tab["grid_ref"]))
+
+        callouts_by_tid = {}
+        callout_strs_by_tid = {}
+        for co in pg.get("callouts") or []:
+            tid = co.get("tile_id")
+            if not tid:
+                continue
+            for field in ("text", "target_sheet", "detail_no"):
+                val = co.get(field)
+                if val:
+                    callouts_by_tid.setdefault(tid, []).append(str(val))
+            if co.get("target_sheet"):
+                callout_strs_by_tid.setdefault(tid, []).append(str(co["target_sheet"]))
+            if co.get("text"):
+                callout_strs_by_tid.setdefault(tid, []).append(str(co["text"]))
+            if co.get("grid_ref"):
+                grid_refs_by_tid.setdefault(tid, []).append(str(co["grid_ref"]))
 
         tiles_map = pg.get("tiles") or {}
         for tid, t_rec in tiles_map.items():
             parts = list(t_rec.get("sample_labels") or [])
             parts.extend(blocks_by_tid.get(tid, ()))
             parts.extend(tables_by_tid.get(tid, ()))
+            parts.extend(callouts_by_tid.get(tid, ()))
+            parts.extend(grid_refs_by_tid.get(tid, ()))
             raw_doc = normalize_text(" ".join(parts)).strip()
             if not raw_doc:
                 continue
@@ -2339,6 +3409,8 @@ def rank_spatial_rois(spatial_index, query, top_k=5, xlaya_bridge=False):
                     "norm_bbox": list(t_rec.get("norm_bbox") or [0.0, 0.0, 1.0, 1.0]),
                     "regime": regime,
                     "vector_density": vec_density,
+                    "grid_refs": list(dict.fromkeys(grid_refs_by_tid.get(tid, ()))),
+                    "callout_strs": list(dict.fromkeys(callout_strs_by_tid.get(tid, ()))),
                     "raw_low": re.sub(r"\s+", " ", raw_doc).lower(),
                     "tokens": toks,
                     "counts": Counter(toks),
@@ -2408,10 +3480,46 @@ def rank_spatial_rois(spatial_index, query, top_k=5, xlaya_bridge=False):
             if not matched:
                 matched.append(q_low)
 
-        if bm25 <= 0.0 and sheet_boost <= 0.0 and num_boost <= 0.0 and sub_boost <= 0.0:
+        grid_callout_boost = 0.0
+        for gr in d["grid_refs"]:
+            gr_low = gr.lower()
+            gr_parts = [p.strip() for p in re.split(r"[\s/,-]+", gr_low) if p.strip()]
+            if gr_low in q_low or (
+                gr_parts
+                and all(
+                    re.search(rf"(?<![a-z0-9]){re.escape(gp)}(?![a-z0-9])", q_low)
+                    for gp in gr_parts
+                )
+            ):
+                grid_callout_boost += 2.5
+                if gr_low not in matched:
+                    matched.append(gr_low)
+                break
+        for cs in d["callout_strs"]:
+            cs_low = cs.lower()
+            if cs_low in q_low or cs_low in q_sheet_ids:
+                grid_callout_boost += 2.5
+                if cs_low not in matched:
+                    matched.append(cs_low)
+                break
+
+        if (
+            bm25 <= 0.0
+            and sheet_boost <= 0.0
+            and num_boost <= 0.0
+            and sub_boost <= 0.0
+            and grid_callout_boost <= 0.0
+        ):
             continue
 
-        total_score = bm25 + sheet_boost + num_boost + sub_boost + 0.25 * d["vector_density"]
+        total_score = (
+            bm25
+            + sheet_boost
+            + num_boost
+            + sub_boost
+            + grid_callout_boost
+            + 0.25 * d["vector_density"]
+        )
         if xlaya_scores is not None and idx < len(xlaya_scores):
             total_score += float(xlaya_scores[idx])
 
@@ -2901,10 +4009,10 @@ def parse_page_selection(pages_arg, total_pages):
     return sorted(selected)
 
 
-def clean_table_rows(raw_rows):
-    """Normalize table cells, prune empty columns/rows, and validate tables."""
+def _clean_table_rows_with_meta(raw_rows):
+    """Normalize table cells, prune empty columns/rows, and return (rows, keep_cols)."""
     if not raw_rows:
-        return []
+        return [], []
     rows = []
     for raw_r in raw_rows:
         if not raw_r:
@@ -2921,21 +4029,21 @@ def clean_table_rows(raw_rows):
             rows.append(norm_r)
 
     if len(rows) < 2:
-        return []
+        return [], []
 
     ncol = max(len(r) for r in rows)
     keep_cols = [
         ci for ci in range(ncol) if any(ci < len(r) and r[ci] for r in rows)
     ]
     if len(keep_cols) < 2:
-        return []
+        return [], []
 
     pruned = [
         [r[ci] if ci < len(r) else "" for ci in keep_cols] for r in rows
     ]
     multi_col_rows = sum(1 for r in pruned if sum(1 for c in r if c) >= 2)
     if multi_col_rows < 2 or (multi_col_rows / len(pruned)) < 0.60:
-        return []
+        return [], []
     total_cells = len(pruned) * len(keep_cols)
     raw_total = max(1, len(raw_rows) * ncol)
     filled_cells = sum(1 for r in pruned for c in r if c)
@@ -2946,8 +4054,53 @@ def clean_table_rows(raw_rows):
             or (filled_cells / raw_total) < 0.32
         )
     ):
+        return [], []
+    return pruned, keep_cols
+
+
+def clean_table_rows(raw_rows):
+    """Normalize table cells, prune empty columns/rows, and validate tables."""
+    cleaned, _ = _clean_table_rows_with_meta(raw_rows)
+    return cleaned
+
+
+def _extract_tab_raw_col_bounds_norm(tab_obj, page_rect, bbox, raw_ncol):
+    """Extract normalized [nx0, nx1] column bounds from a PyMuPDF Table pre-pruning."""
+    rx0 = float(page_rect.x0)
+    pw = max(1.0, float(abs(page_rect.width)))
+    ncol = max(int(raw_ncol or 0), int(getattr(tab_obj, "col_count", 0) or 0))
+    if ncol <= 0:
         return []
-    return pruned
+    col_x0 = [None] * ncol
+    col_x1 = [None] * ncol
+    try:
+        for row in getattr(tab_obj, "rows", None) or ():
+            cells = getattr(row, "cells", None) or ()
+            for ci in range(min(ncol, len(cells))):
+                cb = cells[ci]
+                if cb and len(cb) == 4:
+                    cx0, _, cx1, _ = [float(v) for v in cb]
+                    col_x0[ci] = cx0 if col_x0[ci] is None else min(col_x0[ci], cx0)
+                    col_x1[ci] = cx1 if col_x1[ci] is None else max(col_x1[ci], cx1)
+    except Exception:  # nosec B110
+        pass
+
+    bx0, bx1 = float(bbox[0]), float(bbox[2])
+    bw = max(1.0, bx1 - bx0)
+    bounds = []
+    for ci in range(ncol):
+        if col_x0[ci] is not None and col_x1[ci] is not None and col_x1[ci] > col_x0[ci]:
+            x0, x1 = col_x0[ci], col_x1[ci]
+        else:
+            x0 = bx0 + (ci / float(ncol)) * bw
+            x1 = bx0 + ((ci + 1) / float(ncol)) * bw
+        bounds.append(
+            [
+                round(max(0.0, min(1.0, (x0 - rx0) / pw)), 4),
+                round(max(0.0, min(1.0, (x1 - rx0) / pw)), 4),
+            ]
+        )
+    return bounds
 
 
 def _is_booktabs_strip(rows):
@@ -3023,7 +4176,9 @@ def _find_booktabs_rule_bboxes(page, drawings=None):
     ]
 
 
-def extract_tables_from_page(page, fitz_mod, raw_text="", drawings=None):
+def extract_tables_from_page(
+    page, fitz_mod, raw_text: str = "", drawings=None, return_meta: bool = False
+):
     """Two-Stage Grid + LaTeX booktabs table extractor using PyMuPDF."""
     extracted = []
     if drawings is None:
@@ -3067,17 +4222,21 @@ def extract_tables_from_page(page, fitz_mod, raw_text="", drawings=None):
     except Exception:  # nosec B110
         raw_tabs = []
 
-    # Pre-extract rows before any subsequent page.find_tables(clip=...) call,
+    # Pre-extract rows and column bounds before any page.find_tables(clip=...) call,
     # which mutates PyMuPDF's internal table buffers on the same Page object.
     cached_tabs = []
     for tab in sorted(raw_tabs, key=lambda x: (x.bbox[1], x.bbox[0])):
         try:
-            cached_tabs.append((list(tab.bbox), tab.extract() or []))
+            t_rows = tab.extract() or []
+            t_box = list(tab.bbox)
+            raw_ncol = max((len(r) for r in t_rows if r), default=0)
+            raw_cols = _extract_tab_raw_col_bounds_norm(tab, page.rect, t_box, raw_ncol)
+            cached_tabs.append((t_box, t_rows, raw_cols))
         except Exception:  # nosec B110
             pass
 
     groups = []
-    for box, rows in cached_tabs:
+    for box, rows, raw_cols in cached_tabs:
         if len(rows) >= 5:
             r_ncol = max((len(r) for r in rows if r), default=1)
             r_fill = sum(
@@ -3098,13 +4257,17 @@ def extract_tables_from_page(page, fitz_mod, raw_text="", drawings=None):
             groups[-1]["bbox"][3] = max(groups[-1]["bbox"][3], box[3])
             groups[-1]["rows_list"].append(rows)
             groups[-1]["last_rows"] = rows
+            if len(raw_cols) >= len(groups[-1]["raw_cols"]):
+                groups[-1]["raw_cols"] = raw_cols
         else:
             groups.append(
                 {
                     "bbox": box,
                     "rows_list": [rows],
                     "last_rows": rows,
+                    "raw_cols": raw_cols,
                     "reextract": False,
+                    "source": "vector_grid",
                 }
             )
 
@@ -3128,6 +4291,7 @@ def extract_tables_from_page(page, fitz_mod, raw_text="", drawings=None):
                         max(gbox[3], rbox[3]),
                     ]
                     grp["reextract"] = True
+                    grp["source"] = "booktabs"
                 matched = True
                 break
         if not matched:
@@ -3149,11 +4313,18 @@ def extract_tables_from_page(page, fitz_mod, raw_text="", drawings=None):
                         "bbox": rbox,
                         "rows_list": [],
                         "last_rows": [],
+                        "raw_cols": [],
                         "reextract": True,
+                        "source": "booktabs",
                     }
                 )
 
     groups.sort(key=lambda g: (g["bbox"][1], g["bbox"][0]))
+
+    rx0 = float(page.rect.x0)
+    ry0 = float(page.rect.y0)
+    pw = max(1.0, float(abs(page.rect.width)))
+    ph = max(1.0, float(abs(page.rect.height)))
 
     for grp in groups:
         t0_rows = grp["rows_list"][0] if grp["rows_list"] else []
@@ -3171,7 +4342,7 @@ def extract_tables_from_page(page, fitz_mod, raw_text="", drawings=None):
                 and max_nl < 2
             )
         ):
-            candidates.append(t0_rows)
+            candidates.append((t0_rows, grp["bbox"], grp["raw_cols"], grp["source"]))
         else:
             try:
                 clip_rect = fitz_mod.Rect(grp["bbox"])
@@ -3183,15 +4354,55 @@ def extract_tables_from_page(page, fitz_mod, raw_text="", drawings=None):
                     min_words_vertical=min_v,
                 ).tables
                 for st in sub_tabs:
-                    candidates.append(st.extract())
+                    st_rows = st.extract() or []
+                    st_box = list(st.bbox)
+                    st_ncol = max((len(r) for r in st_rows if r), default=0)
+                    st_raw_cols = _extract_tab_raw_col_bounds_norm(
+                        st, page.rect, st_box, st_ncol
+                    )
+                    candidates.append((st_rows, st_box, st_raw_cols, "booktabs"))
             except Exception:  # nosec B110
                 pass
             if not candidates and t0_rows:
-                candidates.append(t0_rows)
+                candidates.append((t0_rows, grp["bbox"], grp["raw_cols"], grp["source"]))
 
-        for cand in candidates:
-            cleaned = clean_table_rows(cand)
-            if cleaned:
+        for cand_rows, cand_box, cand_raw_cols, cand_src in candidates:
+            cleaned, keep_cols = _clean_table_rows_with_meta(cand_rows)
+            if not cleaned:
+                continue
+            if return_meta:
+                raw_ncol = max((len(r) for r in cand_rows if r), default=len(cleaned[0]))
+                if not cand_raw_cols or len(cand_raw_cols) < raw_ncol:
+                    bx0, bx1 = float(cand_box[0]), float(cand_box[2])
+                    bw = max(1.0, bx1 - bx0)
+                    cand_raw_cols = [
+                        [
+                            round(max(0.0, min(1.0, (bx0 + (ci / float(raw_ncol)) * bw - rx0) / pw)), 4),
+                            round(max(0.0, min(1.0, (bx0 + ((ci + 1) / float(raw_ncol)) * bw - rx0) / pw)), 4),
+                        ]
+                        for ci in range(raw_ncol)
+                    ]
+                col_bounds_norm = [
+                    cand_raw_cols[ci] for ci in keep_cols if ci < len(cand_raw_cols)
+                ]
+                norm_bbox = [
+                    round(max(0.0, min(1.0, (float(cand_box[0]) - rx0) / pw)), 4),
+                    round(max(0.0, min(1.0, (float(cand_box[1]) - ry0) / ph)), 4),
+                    round(max(0.0, min(1.0, (float(cand_box[2]) - rx0) / pw)), 4),
+                    round(max(0.0, min(1.0, (float(cand_box[3]) - ry0) / ph)), 4),
+                ]
+                extracted.append(
+                    {
+                        "rows": cleaned,
+                        "bbox": [round(float(v), 2) for v in cand_box],
+                        "norm_bbox": norm_bbox,
+                        "col_bounds_norm": col_bounds_norm,
+                        "raw_col_bounds_norm": cand_raw_cols,
+                        "keep_cols": keep_cols,
+                        "source": cand_src,
+                    }
+                )
+            else:
                 extracted.append(cleaned)
 
     return extracted
@@ -3884,12 +5095,16 @@ def run_vlm_engine(
     }
 
 
-def _dedup_merge_page_tables(vector_tables, aligned_tables):
+def _dedup_merge_page_tables(vector_tables, aligned_tables, return_meta=False):
     """Merge vector/booktabs tables with aligned-block tables without duplicates."""
-    merged = list(vector_tables)
+    merged = []
     seen_sigs = set()
     vec_sets = []
-    for rows in vector_tables:
+    for item in vector_tables or ():
+        is_dict = isinstance(item, dict)
+        rows = item["rows"] if is_dict else item
+        if not rows:
+            continue
         flat = tuple(tuple(c.strip() for c in r) for r in rows[:4])
         seen_sigs.add(flat)
         cells = {
@@ -3903,8 +5118,16 @@ def _dedup_merge_page_tables(vector_tables, aligned_tables):
             toks.update(t for t in c.split() if len(t) >= 2)
         if cells:
             vec_sets.append((cells, toks))
+        if return_meta:
+            merged.append(
+                dict(item)
+                if is_dict
+                else {"rows": rows, "source": "vector_grid"}
+            )
+        else:
+            merged.append(rows)
 
-    for item in aligned_tables:
+    for item in aligned_tables or ():
         rows = item["rows"]
         flat = tuple(tuple(c.strip() for c in r) for r in rows[:4])
         if flat in seen_sigs:
@@ -3931,15 +5154,1003 @@ def _dedup_merge_page_tables(vector_tables, aligned_tables):
         seen_sigs.add(flat)
         if aln_cells:
             vec_sets.append((aln_cells, aln_toks))
-        merged.append(rows)
+        merged.append(dict(item) if return_meta else rows)
+
+    if return_meta:
+        merged.sort(
+            key=lambda t: (
+                float((t.get("norm_bbox") or [0.0, 0.0, 1.0, 1.0])[1]),
+                float((t.get("norm_bbox") or [0.0, 0.0, 1.0, 1.0])[0]),
+            )
+        )
     return merged
 
 
+_HEADER_SCHEMA_KW_RE = re.compile(
+    r"\b(?:item|no|code|id|name|type|desc(?:ription)?|qty|quantity|unit|price|"
+    r"cost|amount|total|budget|status|phase|zone|area|share|owner|material|"
+    r"spec(?:ification)?|remarks?|note|date|category|diameter|flow|contractor|"
+    r"phone|license|floor|level|room|finish)\b|"
+    r"รายการ|ลำดับ|จำนวน|หน่วย|ราคา|พื้นที่|หมายเหตุ|สถานะ|หมวด",
+    re.IGNORECASE,
+)
+
+
+def _norm_header_cell(cell):
+    """Normalize a table header cell while stripping continuation tags."""
+    s = normalize_text(str(cell or "")).strip().lower()
+    s = re.sub(r"\(\s*cont(?:inued)?\.?\s*\)|\(\s*ต่อ\s*\)", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _col_iou_1d(b1, b2):
+    """Return 1D normalized X-interval IoU and center drift."""
+    inter = max(0.0, min(float(b1[1]), float(b2[1])) - max(float(b1[0]), float(b2[0])))
+    union = max(1e-6, max(float(b1[1]), float(b2[1])) - min(float(b1[0]), float(b2[0])))
+    c1 = 0.5 * (float(b1[0]) + float(b1[1]))
+    c2 = 0.5 * (float(b2[0]) + float(b2[1]))
+    return inter / union, abs(c1 - c2)
+
+
+def _align_table_columns_for_stitch(prev_item, next_item):
+    """Gate 3 & Gate 4: align column bounds (recovering blank-pruned cols) and check X-IoU/drift."""
+    p_rows = prev_item.get("rows") or []
+    n_rows = next_item.get("rows") or []
+    if not p_rows or not n_rows:
+        return None
+
+    p_cols = list(prev_item.get("col_bounds_norm") or [])
+    n_cols = list(next_item.get("col_bounds_norm") or [])
+    p_raw = list(prev_item.get("raw_col_bounds_norm") or p_cols)
+    n_raw = list(next_item.get("raw_col_bounds_norm") or n_cols)
+
+    p_ncols = len(p_rows[0])
+    n_ncols = len(n_rows[0])
+
+    # Fallback when synthetic callers omit col_bounds_norm entirely
+    if not p_cols or not n_cols:
+        if p_ncols != n_ncols:
+            return None
+        return {
+            "prev_rows": [list(r) + [""] * (p_ncols - len(r)) for r in p_rows],
+            "next_rows": [list(r) + [""] * (n_ncols - len(r)) for r in n_rows],
+            "col_bounds_norm": p_cols or n_cols,
+            "raw_col_bounds_norm": p_raw or n_raw,
+            "mean_iou": 1.0,
+            "median_drift": 0.0,
+            "blank_col_recovered": False,
+        }
+
+    if len(p_cols) != p_ncols or len(n_cols) != n_ncols:
+        return None
+
+    if len(p_cols) == len(n_cols):
+        ious = []
+        drifts = []
+        for pb, nb in zip(p_cols, n_cols):
+            iou, drift = _col_iou_1d(pb, nb)
+            ious.append(iou)
+            drifts.append(drift)
+        mean_iou = sum(ious) / max(1, len(ious))
+        min_iou = min(ious) if ious else 0.0
+        s_drifts = sorted(drifts)
+        med_drift = s_drifts[len(s_drifts) // 2] if s_drifts else 1.0
+        if mean_iou >= 0.80 and min_iou >= 0.50 and med_drift <= 0.025:
+            return {
+                "prev_rows": [list(r) + [""] * (p_ncols - len(r)) for r in p_rows],
+                "next_rows": [list(r) + [""] * (n_ncols - len(r)) for r in n_rows],
+                "col_bounds_norm": p_cols,
+                "raw_col_bounds_norm": p_raw if len(p_raw) >= len(p_cols) else p_cols,
+                "mean_iou": round(mean_iou, 4),
+                "median_drift": round(med_drift, 4),
+                "blank_col_recovered": False,
+            }
+        # Only abort early when neither fragment pruned any raw columns; otherwise fall through to Gate 3
+        if len(p_raw) <= len(p_cols) and len(n_raw) <= len(n_cols):
+            return None
+
+    # Gate 3: Blank-column pruning recovery via raw_col_bounds_norm / X-interval union
+    master = list(p_raw if len(p_raw) >= len(n_raw) else n_raw)
+    for b in p_cols + n_cols:
+        matched = False
+        for mb in master:
+            iou, drift = _col_iou_1d(b, mb)
+            if iou >= 0.45 or drift <= 0.035:
+                matched = True
+                break
+        if not matched:
+            master.append(list(b))
+    master.sort(key=lambda b: (float(b[0]), float(b[1])))
+    n_master = len(master)
+    if n_master < max(len(p_cols), len(n_cols)):
+        return None
+
+    def _map_cols(cols_list):
+        mapping = {}
+        used_slots = set()
+        for ci, cb in enumerate(cols_list):
+            best_si = None
+            best_score = -1e9
+            for si, mb in enumerate(master):
+                if si in used_slots:
+                    continue
+                iou, drift = _col_iou_1d(cb, mb)
+                if iou >= 0.45 or drift <= 0.04:
+                    sc = iou - 2.0 * drift
+                    if sc > best_score:
+                        best_score = sc
+                        best_si = si
+            if best_si is None:
+                return None
+            used_slots.add(best_si)
+            mapping[ci] = best_si
+        return mapping
+
+    p_map = _map_cols(p_cols)
+    n_map = _map_cols(n_cols)
+    if p_map is None or n_map is None:
+        return None
+
+    p_by_slot = {si: p_cols[ci] for ci, si in p_map.items()}
+    n_by_slot = {si: n_cols[ci] for ci, si in n_map.items()}
+    shared_slots = sorted(set(p_by_slot.keys()) & set(n_by_slot.keys()))
+    if len(shared_slots) < min(len(p_cols), len(n_cols)):
+        return None
+
+    ious = []
+    drifts = []
+    for si in shared_slots:
+        iou, drift = _col_iou_1d(p_by_slot[si], n_by_slot[si])
+        ious.append(iou)
+        drifts.append(drift)
+    mean_iou = sum(ious) / max(1, len(ious))
+    min_iou = min(ious) if ious else 0.0
+    s_drifts = sorted(drifts)
+    med_drift = s_drifts[len(s_drifts) // 2] if s_drifts else 1.0
+    if mean_iou < 0.80 or min_iou < 0.50 or med_drift > 0.025:
+        return None
+
+    # Ensure unpopulated slots actually have valid blank-column provenance or don't collide
+    def _expand_rows(rows, cmap):
+        out = []
+        for r in rows:
+            new_r = [""] * n_master
+            for ci, si in cmap.items():
+                if ci < len(r):
+                    new_r[si] = r[ci]
+            out.append(new_r)
+        return out
+
+    return {
+        "prev_rows": _expand_rows(p_rows, p_map),
+        "next_rows": _expand_rows(n_rows, n_map),
+        "col_bounds_norm": master,
+        "raw_col_bounds_norm": master,
+        "mean_iou": round(mean_iou, 4),
+        "median_drift": round(med_drift, 4),
+        "blank_col_recovered": True,
+    }
+
+
+def _evaluate_header_gate5(prev_rows, next_rows, blank_recovered=False):
+    """Gate 5: detect repeated headers to strip vs distinct header schemas to block."""
+    h_prev = prev_rows[0]
+    h_next = next_rows[0]
+    ncols = max(len(h_prev), len(h_next))
+    np_cells = [_norm_header_cell(h_prev[i] if i < len(h_prev) else "") for i in range(ncols)]
+    nn_cells = [_norm_header_cell(h_next[i] if i < len(h_next) else "") for i in range(ncols)]
+
+    pair_sims = []
+    for a, b in zip(np_cells, nn_cells):
+        if a and b:
+            pair_sims.append(difflib.SequenceMatcher(None, a, b).ratio())
+        elif a or b:
+            if not blank_recovered:
+                pair_sims.append(0.0)
+    mean_sim = (sum(pair_sims) / len(pair_sims)) if pair_sims else 0.0
+    full_sim = difflib.SequenceMatcher(
+        None,
+        " | ".join(c for c in np_cells if c),
+        " | ".join(c for c in nn_cells if c),
+    ).ratio()
+    header_sim = max(mean_sim, full_sim)
+
+    if np_cells == nn_cells or header_sim >= 0.90:
+        return "strip_repeated", header_sim
+
+    # Bridge row on row 0 of next table is NOT a distinct table header
+    if BRIDGE_CARRY_RE.search(" ".join(h_next)):
+        return "keep_data", header_sim
+
+    prev_body = prev_rows[1:]
+    next_body = next_rows[1:]
+
+    # Determine which columns are numeric in table body
+    num_col_flags = []
+    for ci in range(ncols):
+        body_vals = [
+            str(r[ci]).strip()
+            for r in (prev_body + next_body)
+            if ci < len(r) and str(r[ci]).strip()
+        ]
+        if body_vals:
+            n_num = sum(1 for v in body_vals if NUMERIC_CELL_RE.match(v))
+            num_col_flags.append((n_num / float(len(body_vals))) >= 0.50)
+        else:
+            num_col_flags.append(False)
+
+    non_empty_hn = [str(c).strip() for c in h_next if str(c).strip()]
+    hn_num_cnt = sum(1 for c in non_empty_hn if NUMERIC_CELL_RE.match(c))
+    hn_num_ratio = hn_num_cnt / max(1, len(non_empty_hn))
+
+    # Signal 1: numeric body column(s) topped by non-numeric alpha label in h_next
+    text_over_num_col = 0
+    for ci, is_num_col in enumerate(num_col_flags):
+        val = str(h_next[ci]).strip() if ci < len(h_next) else ""
+        if is_num_col and val and not NUMERIC_CELL_RE.match(val) and not re.match(r"^\d+$", val):
+            text_over_num_col += 1
+    if text_over_num_col >= 1 and hn_num_ratio < 0.35 and header_sim < 0.75:
+        return "block_distinct_header", header_sim
+
+    # Signal 2: >=2 header-schema keywords across h_next with low similarity to h_prev
+    kw_hits = sum(1 for c in non_empty_hn if _HEADER_SCHEMA_KW_RE.search(c))
+    if kw_hits >= 2 and hn_num_ratio < 0.35 and header_sim < 0.65 and len(next_body) >= 1:
+        return "block_distinct_header", header_sim
+
+    # Signal 3: all-text header row containing zero digits/codes while body contains codes/numbers
+    hn_has_digit = any(re.search(r"\d", c) for c in non_empty_hn)
+    hp_has_digit = any(re.search(r"\d", str(c)) for c in h_prev)
+    nb_has_digit = any(
+        re.search(r"\d", str(c))
+        for r in next_body[:4]
+        for c in r
+    )
+    if (
+        (not hn_has_digit)
+        and (not hp_has_digit)
+        and nb_has_digit
+        and len(non_empty_hn) >= 2
+        and header_sim < 0.45
+        and len(next_body) >= 1
+    ):
+        return "block_distinct_header", header_sim
+
+    return "keep_data", header_sim
+
+
+def stitch_multipage_tables(
+    page_tables: list, page_prose_stats: dict | None = None
+):
+    """Run 6-gate cascade to stitch multi-page continuation tables across consecutive pages."""
+    if not page_tables:
+        return {"stitched_tables": [], "per_page_tables": {}, "merge_events": []}
+
+    by_page = {}
+    for idx, raw_t in enumerate(page_tables):
+        if not isinstance(raw_t, dict) or not raw_t.get("rows"):
+            continue
+        p_num = int(raw_t.get("page", 1))
+        t_copy = copy.deepcopy(raw_t)
+        t_copy["page"] = p_num
+        t_copy["start_page"] = p_num
+        t_copy["end_page"] = p_num
+        t_copy["pages"] = [p_num]
+        t_copy["merged"] = False
+        t_copy["superseded_csv_paths"] = []
+        t_copy.setdefault("table_index", idx + 1)
+        by_page.setdefault(p_num, []).append(t_copy)
+
+    for p_num, items in by_page.items():
+        items.sort(
+            key=lambda t: (
+                float((t.get("norm_bbox") or [0.0, 0.0, 1.0, 1.0])[1]),
+                float((t.get("norm_bbox") or [0.0, 0.0, 1.0, 1.0])[0]),
+                int(t.get("table_index", 0)),
+            )
+        )
+
+    sorted_pages = sorted(by_page.keys())
+    prose_stats = page_prose_stats or {}
+    merge_events = []
+
+    # Track the active tail chain for each page so 3+ pages fold transitively
+    page_slots = {p: list(by_page[p]) for p in sorted_pages}
+    # Map any folded table slot back to the owning chain dict on start_page
+    merged_owner = {}
+
+    for i in range(len(sorted_pages) - 1):
+        p_prev = sorted_pages[i]
+        p_next = sorted_pages[i + 1]
+        if p_next != p_prev + 1:
+            continue
+        prev_list = page_slots.get(p_prev) or []
+        next_list = page_slots.get(p_next) or []
+        if not prev_list or not next_list:
+            continue
+
+        prev_slot = prev_list[-1]
+        owner = merged_owner.get(id(prev_slot), prev_slot)
+        next_item = next_list[0]
+
+        # Gate 1: Consecutive page seam AND (<120 interstitial prose chars OR continuation signal)
+        st_prev = prose_stats.get(p_prev) or prose_stats.get(str(p_prev)) or {}
+        st_next = prose_stats.get(p_next) or prose_stats.get(str(p_next)) or {}
+        below_chars = int(
+            st_prev.get("prose_chars_below_last", st_prev.get("chars_below", 0)) or 0
+        )
+        above_chars = int(
+            st_next.get("prose_chars_above_first", st_next.get("chars_above", 0)) or 0
+        )
+        interstitial_chars = int(
+            st_next.get("interstitial_chars", below_chars + above_chars)
+        )
+        seam_texts = [
+            str(st_prev.get("text_below_last") or ""),
+            str(st_next.get("text_above_first") or ""),
+            str(prev_slot.get("context_below") or ""),
+            str(next_item.get("context_above") or ""),
+            " ".join(str(c) for c in (next_item["rows"][0] if next_item["rows"] else ())),
+            " ".join(str(c) for c in (owner["rows"][-1] if owner["rows"] else ())),
+        ]
+        has_cont_signal = bool(
+            st_prev.get("has_continuation_signal")
+            or st_next.get("has_continuation_signal")
+            or any(CONT_SIGNAL_RE.search(t) for t in seam_texts if t)
+        )
+        if interstitial_chars >= 120 and not has_cont_signal:
+            continue
+
+        # Gate 2 (Part A): Terminal A_neg shield on owner's tail rows
+        tail_rows = owner["rows"][-2:] if len(owner["rows"]) >= 2 else owner["rows"][-1:]
+        terminal_hit = False
+        for tr in tail_rows:
+            tr_txt = " ".join(str(c or "") for c in tr).strip()
+            if TERMINAL_TOTAL_RE.search(tr_txt) and not BRIDGE_CARRY_RE.search(tr_txt):
+                terminal_hit = True
+                break
+        if terminal_hit:
+            continue
+
+        # Gate 3 & Gate 4: Blank-col recovery + Column X-IoU >= 0.80 & median drift <= 0.025
+        aligned = _align_table_columns_for_stitch(owner, next_item)
+        if aligned is None:
+            continue
+
+        # Gate 5: Repeated header strip vs distinct-header A_neg shield
+        gate5_action, hdr_sim = _evaluate_header_gate5(
+            aligned["prev_rows"],
+            aligned["next_rows"],
+            blank_recovered=aligned["blank_col_recovered"],
+        )
+        if gate5_action == "block_distinct_header":
+            continue
+
+        header_stripped = gate5_action == "strip_repeated"
+        cur_prev_rows = [list(r) for r in aligned["prev_rows"]]
+        cur_next_rows = (
+            [list(r) for r in aligned["next_rows"][1:]]
+            if header_stripped
+            else [list(r) for r in aligned["next_rows"]]
+        )
+
+        # Gate 2 (Part B): Bridge carry rows allow merge and strip duplicate seam carry rows
+        stripped_bridge = []
+        if cur_prev_rows:
+            prev_tail_txt = " ".join(str(c or "") for c in cur_prev_rows[-1]).strip()
+        else:
+            prev_tail_txt = ""
+        next_head_txt = (
+            " ".join(str(c or "") for c in cur_next_rows[0]).strip()
+            if cur_next_rows
+            else ""
+        )
+        prev_is_bridge = bool(BRIDGE_CARRY_RE.search(prev_tail_txt))
+        prev_is_carry = bool(
+            re.search(r"\b(?:carried\s+forward|c/f)\b|ยอดยกไป", prev_tail_txt, re.IGNORECASE)
+        )
+        next_is_bridge = bool(BRIDGE_CARRY_RE.search(next_head_txt))
+        next_is_brought = bool(
+            re.search(r"\b(?:brought\s+forward|b/f)\b|ยอดยกมา", next_head_txt, re.IGNORECASE)
+        )
+
+        if prev_is_carry and (next_is_brought or next_is_bridge):
+            stripped_bridge.append(prev_tail_txt)
+            cur_prev_rows.pop()
+            if cur_next_rows:
+                stripped_bridge.append(next_head_txt)
+                cur_next_rows.pop(0)
+        elif next_is_brought or (prev_is_bridge and next_is_bridge):
+            if cur_next_rows:
+                stripped_bridge.append(next_head_txt)
+                cur_next_rows.pop(0)
+        elif prev_is_carry:
+            stripped_bridge.append(prev_tail_txt)
+            cur_prev_rows.pop()
+
+        # Gate 6: Transitive folding across 3+ pages
+        combined_rows = cur_prev_rows + cur_next_rows
+        if not combined_rows:
+            continue
+
+        owner["rows"] = combined_rows
+        owner["nrows"] = len(combined_rows)
+        owner["ncols"] = len(combined_rows[0])
+        owner["col_bounds_norm"] = aligned["col_bounds_norm"]
+        owner["raw_col_bounds_norm"] = aligned["raw_col_bounds_norm"]
+        owner["end_page"] = p_next
+        if p_next not in owner["pages"]:
+            owner["pages"].append(p_next)
+        owner["merged"] = True
+        if next_item.get("csv_path"):
+            owner["superseded_csv_paths"].append(next_item["csv_path"])
+
+        # Remove next_item from p_next's emitted list; if next_item was the ONLY table on p_next,
+        # map next_item's slot ID to owner so p_next -> p_next+1 continues folding transitively!
+        next_list.pop(0)
+        if not next_list:
+            page_slots[p_next] = [next_item]
+            merged_owner[id(next_item)] = owner
+
+        merge_events.append(
+            {
+                "from_page": p_prev,
+                "to_page": p_next,
+                "start_page": owner["start_page"],
+                "interstitial_chars": interstitial_chars,
+                "has_continuation_signal": has_cont_signal,
+                "header_stripped": header_stripped,
+                "header_similarity": round(hdr_sim, 4),
+                "col_iou": aligned["mean_iou"],
+                "col_drift": aligned["median_drift"],
+                "blank_col_recovered": aligned["blank_col_recovered"],
+                "bridge_detected": bool(prev_is_bridge or next_is_bridge),
+                "stripped_bridge_rows": stripped_bridge,
+            }
+        )
+
+    stitched_tables = []
+    per_page_tables = {}
+    for p_num in sorted_pages:
+        kept = []
+        for slot in page_slots[p_num]:
+            if id(slot) in merged_owner:
+                continue
+            slot["nrows"] = len(slot["rows"])
+            slot["ncols"] = len(slot["rows"][0]) if slot["rows"] else 0
+            stitched_tables.append(slot)
+            kept.append(slot)
+        per_page_tables[p_num] = kept
+
+    return {
+        "stitched_tables": stitched_tables,
+        "per_page_tables": per_page_tables,
+        "merge_events": merge_events,
+    }
+
+
+def _parse_numeric_cell(val):
+    """Parse numeric cell value (supports commas and optional trailing %) or return None."""
+    s = normalize_text(str(val or "")).strip()
+    if not s or not NUMERIC_CELL_RE.match(s):
+        return None
+    s_clean = s.rstrip("%").replace(",", "").strip()
+    try:
+        return float(s_clean)
+    except ValueError:
+        return None
+
+
+def _diff_page_atoms(old_atoms, new_atoms, old_rect, new_rect, grid_axes, cols, rows):
+    """Tolerance-match vector atoms (<=0.015 norm or <=2.0pt jitter = 0 diff)."""
+    o_rx0, o_ry0 = float(old_rect.x0), float(old_rect.y0)
+    o_pw = max(1.0, float(abs(old_rect.width)))
+    o_ph = max(1.0, float(abs(old_rect.height)))
+    n_rx0, n_ry0 = float(new_rect.x0), float(new_rect.y0)
+    n_pw = max(1.0, float(abs(new_rect.width)))
+    n_ph = max(1.0, float(abs(new_rect.height)))
+
+    def _prep(atoms_list, rx0, ry0, pw, ph):
+        out = []
+        for a in atoms_list or ():
+            txt = re.sub(r"\s+", " ", normalize_text(a.get("text") or "")).strip()
+            if not txt:
+                continue
+            x0, y0, x1, y1 = float(a["x0"]), float(a["y0"]), float(a["x1"]), float(a["y1"])
+            cx, cy = 0.5 * (x0 + x1), 0.5 * (y0 + y1)
+            nx0 = max(0.0, min(1.0, (x0 - rx0) / pw))
+            ny0 = max(0.0, min(1.0, (y0 - ry0) / ph))
+            nx1 = max(0.0, min(1.0, (x1 - rx0) / pw))
+            ny1 = max(0.0, min(1.0, (y1 - ry0) / ph))
+            nx, ny = 0.5 * (nx0 + nx1), 0.5 * (ny0 + ny1)
+            out.append(
+                {
+                    "text": txt,
+                    "cx": cx,
+                    "cy": cy,
+                    "nx": nx,
+                    "ny": ny,
+                    "norm_bbox": [round(nx0, 4), round(ny0, 4), round(nx1, 4), round(ny1, 4)],
+                    "pt_bbox": [round(x0, 2), round(y0, 2), round(x1, 2), round(y1, 2)],
+                }
+            )
+        return out
+
+    olds = _prep(old_atoms, o_rx0, o_ry0, o_pw, o_ph)
+    news = _prep(new_atoms, n_rx0, n_ry0, n_pw, n_ph)
+
+    def _within_tol(a, b):
+        return (
+            (abs(a["nx"] - b["nx"]) <= 0.015 and abs(a["ny"] - b["ny"]) <= 0.015)
+            or (abs(a["cx"] - b["cx"]) <= 2.0 and abs(a["cy"] - b["cy"]) <= 2.0)
+        )
+
+    matched_o = set()
+    matched_n = set()
+
+    # Pass 1: exact text + tolerance match -> 0 diff
+    by_text_n = {}
+    for ni, na in enumerate(news):
+        by_text_n.setdefault(na["text"], []).append(ni)
+
+    for oi, oa in enumerate(olds):
+        cands = by_text_n.get(oa["text"])
+        if not cands:
+            continue
+        best_ni = None
+        best_dist = 1e9
+        for ni in cands:
+            if ni in matched_n:
+                continue
+            na = news[ni]
+            if _within_tol(oa, na):
+                d = math.hypot(oa["cx"] - na["cx"], oa["cy"] - na["cy"])
+                if d < best_dist:
+                    best_dist = d
+                    best_ni = ni
+        if best_ni is not None:
+            matched_o.add(oi)
+            matched_n.add(best_ni)
+
+    # Pass 2: same-location text change -> modified
+    modified = []
+    for oi, oa in enumerate(olds):
+        if oi in matched_o:
+            continue
+        best_ni = None
+        best_dist = 1e9
+        for ni, na in enumerate(news):
+            if ni in matched_n:
+                continue
+            if _within_tol(oa, na):
+                d = math.hypot(oa["cx"] - na["cx"], oa["cy"] - na["cy"])
+                if d < best_dist:
+                    best_dist = d
+                    best_ni = ni
+        if best_ni is not None:
+            na = news[best_ni]
+            matched_o.add(oi)
+            matched_n.add(best_ni)
+            tid = _tile_id_from_norm_point(na["nx"], na["ny"], cols=cols, rows=rows)
+            modified.append(
+                {
+                    "old_text": oa["text"],
+                    "new_text": na["text"],
+                    "norm_bbox": na["norm_bbox"],
+                    "tile_id": tid,
+                    "grid_ref": resolve_grid_ref(na["norm_bbox"], grid_axes),
+                }
+            )
+
+    removed = []
+    for oi, oa in enumerate(olds):
+        if oi not in matched_o:
+            tid = _tile_id_from_norm_point(oa["nx"], oa["ny"], cols=cols, rows=rows)
+            removed.append(
+                {
+                    "text": oa["text"],
+                    "norm_bbox": oa["norm_bbox"],
+                    "tile_id": tid,
+                    "grid_ref": resolve_grid_ref(oa["norm_bbox"], grid_axes),
+                }
+            )
+
+    added = []
+    for ni, na in enumerate(news):
+        if ni not in matched_n:
+            tid = _tile_id_from_norm_point(na["nx"], na["ny"], cols=cols, rows=rows)
+            added.append(
+                {
+                    "text": na["text"],
+                    "norm_bbox": na["norm_bbox"],
+                    "tile_id": tid,
+                    "grid_ref": resolve_grid_ref(na["norm_bbox"], grid_axes),
+                }
+            )
+
+    return {"added": added, "removed": removed, "modified": modified}
+
+
+def _diff_page_tables(old_tabs, new_tabs, grid_axes, cols, rows):
+    """Diff structured tables cell-by-cell and compute numeric_delta when numeric."""
+    cell_diffs = []
+    used_new = set()
+    pairs = []
+
+    for oi, ot in enumerate(old_tabs):
+        oh = " | ".join(ot["rows"][0]).lower() if ot.get("rows") else ""
+        best_ni = None
+        best_sim = 0.0
+        for ni, nt in enumerate(new_tabs):
+            if ni in used_new:
+                continue
+            nh = " | ".join(nt["rows"][0]).lower() if nt.get("rows") else ""
+            sim = difflib.SequenceMatcher(None, oh, nh).ratio()
+            if sim >= 0.70 and sim > best_sim:
+                best_sim = sim
+                best_ni = ni
+        if best_ni is None and oi < len(new_tabs) and oi not in used_new:
+            best_ni = oi
+        if best_ni is not None:
+            used_new.add(best_ni)
+            pairs.append((oi, ot, new_tabs[best_ni]))
+
+    for ti, ot, nt in pairs:
+        o_rows = ot.get("rows") or []
+        n_rows = nt.get("rows") or []
+        headers = n_rows[0] if n_rows else (o_rows[0] if o_rows else [])
+        nb = nt.get("norm_bbox") or ot.get("norm_bbox")
+        tid = (
+            _tile_id_from_norm_point(0.5 * (nb[0] + nb[2]), 0.5 * (nb[1] + nb[3]), cols=cols, rows=rows)
+            if nb
+            else None
+        )
+        gref = resolve_grid_ref(nb, grid_axes) if nb else None
+
+        # Match rows by unique col-0 key if possible, else by index
+        o_keys = [str(r[0]).strip().lower() if r else "" for r in o_rows]
+        n_keys = [str(r[0]).strip().lower() if r else "" for r in n_rows]
+        use_key_match = (
+            len(o_rows) >= 2
+            and len(n_rows) >= 2
+            and len(set(o_keys)) == len(o_keys)
+            and len(set(n_keys)) == len(n_keys)
+            and all(o_keys)
+            and all(n_keys)
+        )
+        row_pairs = []
+        if use_key_match:
+            n_by_k = {n_keys[ri]: (ri, n_rows[ri]) for ri in range(len(n_rows))}
+            used_nr = set()
+            for ri, rk in enumerate(o_keys):
+                if rk in n_by_k:
+                    nri, nr = n_by_k[rk]
+                    used_nr.add(nri)
+                    row_pairs.append((nri, o_rows[ri], nr, o_rows[ri][0]))
+                else:
+                    cell_diffs.append(
+                        {
+                            "table_index": ti + 1,
+                            "row": ri,
+                            "col": None,
+                            "kind": "row_removed",
+                            "row_key": o_rows[ri][0],
+                            "col_header": headers[0] if headers else "col_0",
+                            "old_value": " | ".join(str(c or "") for c in o_rows[ri]),
+                            "new_value": "",
+                            "numeric_delta": None,
+                            "tile_id": tid,
+                            "grid_ref": gref,
+                        }
+                    )
+            for nri, nr in enumerate(n_rows):
+                if nri not in used_nr:
+                    cell_diffs.append(
+                        {
+                            "table_index": ti + 1,
+                            "row": nri,
+                            "col": None,
+                            "kind": "row_added",
+                            "row_key": nr[0] if nr else str(nri),
+                            "col_header": headers[0] if headers else "col_0",
+                            "old_value": "",
+                            "new_value": " | ".join(str(c or "") for c in nr),
+                            "numeric_delta": None,
+                            "tile_id": tid,
+                            "grid_ref": gref,
+                        }
+                    )
+        else:
+            for ri in range(min(len(o_rows), len(n_rows))):
+                rk = o_rows[ri][0] if o_rows[ri] else str(ri)
+                row_pairs.append((ri, o_rows[ri], n_rows[ri], rk))
+
+        for ri, r_old, r_new, row_key in row_pairs:
+            max_c = max(len(r_old), len(r_new))
+            for ci in range(max_c):
+                ov = re.sub(r"\s+", " ", str(r_old[ci] if ci < len(r_old) else "")).strip()
+                nv = re.sub(r"\s+", " ", str(r_new[ci] if ci < len(r_new) else "")).strip()
+                if ov != nv:
+                    v_old = _parse_numeric_cell(ov)
+                    v_new = _parse_numeric_cell(nv)
+                    num_delta = (
+                        round(v_new - v_old, 6)
+                        if (v_old is not None and v_new is not None)
+                        else None
+                    )
+                    col_hdr = headers[ci] if ci < len(headers) else f"col_{ci}"
+                    cell_diffs.append(
+                        {
+                            "table_index": ti + 1,
+                            "row": ri,
+                            "col": ci,
+                            "row_key": row_key,
+                            "col_header": col_hdr,
+                            "old_value": ov,
+                            "new_value": nv,
+                            "numeric_delta": num_delta,
+                            "tile_id": tid,
+                            "grid_ref": gref,
+                        }
+                    )
+    return cell_diffs
+
+
+def diff_pdf_drawings(
+    old_pdf, new_pdf, pages=None, profile="edge", tile_grid="4x4"
+):
+    """Compare two PDF drawing revisions by sheet ID, callouts, schedule cells, atoms, and 72-DPI tile MAD."""
+    import fitz
+    from PIL import Image, ImageChops
+
+    resolve_hardware_profile(profile)
+    cols, rows = _parse_tile_grid(tile_grid)
+
+    owns_old = not isinstance(old_pdf, fitz.Document)
+    owns_new = not isinstance(new_pdf, fitz.Document)
+    if owns_old and not os.path.exists(str(old_pdf)):
+        raise FileNotFoundError(f"Old PDF not found for drawing diff: {old_pdf}")
+    if owns_new and not os.path.exists(str(new_pdf)):
+        raise FileNotFoundError(f"New PDF not found for drawing diff: {new_pdf}")
+    doc_old = None
+    doc_new = None
+
+    try:
+        doc_old = fitz.open(str(old_pdf)) if owns_old else old_pdf
+        doc_new = fitz.open(str(new_pdf)) if owns_new else new_pdf
+        def _sel_indices(total_p):
+            if pages is None:
+                return list(range(total_p))
+            if isinstance(pages, str):
+                return parse_page_selection(pages, total_p)
+            return sorted({int(p) - 1 for p in pages if 1 <= int(p) <= total_p})
+
+        def _extract_rev_page(doc_obj, page_idx):
+            pg = doc_obj[page_idx]
+            raw_t, tdict = _extract_text_and_dict_fast(pg)
+            atoms = _extract_clean_text_atoms(pg, text_dict=tdict)
+            drws = _safe_probe_drawings(pg)
+            g_axes = extract_grid_axes(pg, drawings=drws, atoms=atoms)
+            c_info = extract_sheet_callouts(
+                pg,
+                atoms=atoms,
+                drawings=drws,
+                grid_axes=g_axes,
+                tile_grid=f"{cols}x{rows}",
+            )
+            vtabs = extract_tables_from_page(
+                pg, fitz, raw_text=raw_t, drawings=drws, return_meta=True
+            )
+            atabs = _extract_aligned_block_tables(pg, atoms=atoms)
+            tabs = _dedup_merge_page_tables(vtabs, atabs, return_meta=True)
+            return {
+                "page": page_idx + 1,
+                "page_obj": pg,
+                "atoms": atoms,
+                "grid_axes": g_axes,
+                "primary_sheet_id": c_info["primary_sheet_id"],
+                "callouts": c_info["callouts"],
+                "revision_deltas": c_info["revision_deltas"],
+                "tables": tabs,
+            }
+
+        old_pages = [_extract_rev_page(doc_old, i) for i in _sel_indices(len(doc_old))]
+        new_pages = [_extract_rev_page(doc_new, i) for i in _sel_indices(len(doc_new))]
+
+        # Match by primary_sheet_id first, then positional fallback for unlabelled pages
+        used_old = set()
+        used_new = set()
+        matched_pairs = []
+
+        new_by_sid = {}
+        for ni, npg in enumerate(new_pages):
+            sid = npg["primary_sheet_id"]
+            if sid:
+                new_by_sid.setdefault(str(sid).upper(), []).append(ni)
+
+        for oi, opg in enumerate(old_pages):
+            sid = opg["primary_sheet_id"]
+            if sid:
+                cands = [ni for ni in new_by_sid.get(str(sid).upper(), ()) if ni not in used_new]
+                if cands:
+                    ni = cands[0]
+                    used_old.add(oi)
+                    used_new.add(ni)
+                    matched_pairs.append(("sheet_id", opg, new_pages[ni]))
+
+        rem_old = [opg for oi, opg in enumerate(old_pages) if oi not in used_old]
+        rem_new = [npg for ni, npg in enumerate(new_pages) if ni not in used_new]
+        unlabelled_old = [opg for opg in rem_old if not opg.get("primary_sheet_id")]
+        unlabelled_new = [npg for npg in rem_new if not npg.get("primary_sheet_id")]
+        labelled_rem_old = [opg for opg in rem_old if opg.get("primary_sheet_id")]
+        labelled_rem_new = [npg for npg in rem_new if npg.get("primary_sheet_id")]
+        for opg, npg in zip(unlabelled_old, unlabelled_new):
+            matched_pairs.append(("positional", opg, npg))
+
+        added_sheets = [
+            {"page": npg["page"], "primary_sheet_id": npg["primary_sheet_id"]}
+            for npg in (labelled_rem_new + unlabelled_new[len(unlabelled_old):])
+        ]
+        removed_sheets = [
+            {"page": opg["page"], "primary_sheet_id": opg["primary_sheet_id"]}
+            for opg in (labelled_rem_old + unlabelled_old[len(unlabelled_new):])
+        ]
+
+        sheet_diffs = []
+        total_atom_diffs = 0
+        total_table_diffs = 0
+        total_callout_diffs = 0
+        total_changed_tiles = 0
+
+        for match_method, opg, npg in matched_pairs:
+            g_axes = npg["grid_axes"] if (npg["grid_axes"]["x"] or npg["grid_axes"]["y"]) else opg["grid_axes"]
+            atom_diffs = _diff_page_atoms(
+                opg["atoms"],
+                npg["atoms"],
+                opg["page_obj"].rect,
+                npg["page_obj"].rect,
+                g_axes,
+                cols,
+                rows,
+            )
+
+            def _ckey(c):
+                return (
+                    str(c.get("kind") or ""),
+                    str(c.get("detail_no") or ""),
+                    str(c.get("target_sheet") or "").upper(),
+                )
+
+            o_cmap = {_ckey(c): c for c in opg["callouts"]}
+            n_cmap = {_ckey(c): c for c in npg["callouts"]}
+            added_callouts = [c for k, c in n_cmap.items() if k not in o_cmap]
+            removed_callouts = [c for k, c in o_cmap.items() if k not in n_cmap]
+
+            def _rkey(r):
+                return (str(r.get("kind") or ""), str(r.get("rev_id") or ""), str(r.get("text") or ""))
+
+            o_rmap = {_rkey(r): r for r in opg["revision_deltas"]}
+            n_rmap = {_rkey(r): r for r in npg["revision_deltas"]}
+            added_revs = [r for k, r in n_rmap.items() if k not in o_rmap]
+            removed_revs = [r for k, r in o_rmap.items() if k not in n_rmap]
+
+            table_cell_diffs = _diff_page_tables(
+                opg["tables"], npg["tables"], g_axes, cols, rows
+            )
+
+            # 72 DPI grayscale tile Mean Absolute Difference (MAD > 0.012)
+            opix = opg["page_obj"].get_pixmap(dpi=72, colorspace=fitz.csGRAY, alpha=False)
+            npix = npg["page_obj"].get_pixmap(dpi=72, colorspace=fitz.csGRAY, alpha=False)
+            o_im = Image.frombytes("L", [opix.width, opix.height], opix.samples)
+            n_im = Image.frombytes("L", [npix.width, npix.height], npix.samples)
+            if o_im.size != n_im.size:
+                n_im = n_im.resize(o_im.size, Image.Resampling.BILINEAR)
+            d_im = ImageChops.difference(o_im, n_im)
+            iw, ih = d_im.size
+
+            changed_tiles = []
+            max_mad = 0.0
+            for ri in range(rows):
+                for ci in range(cols):
+                    nx0, ny0 = ci / float(cols), ri / float(rows)
+                    nx1, ny1 = (ci + 1) / float(cols), (ri + 1) / float(rows)
+                    px0 = max(0, min(iw - 1, int(round(nx0 * iw))))
+                    py0 = max(0, min(ih - 1, int(round(ny0 * ih))))
+                    px1 = max(px0 + 1, min(iw, int(round(nx1 * iw))))
+                    py1 = max(py0 + 1, min(ih, int(round(ny1 * ih))))
+                    tile_crop = d_im.crop((px0, py0, px1, py1))
+                    hist = tile_crop.histogram()
+                    npx = max(1, (px1 - px0) * (py1 - py0))
+                    mad = sum(val * cnt for val, cnt in enumerate(hist)) / (255.0 * npx)
+                    if mad > max_mad:
+                        max_mad = mad
+                    if mad > 0.012:
+                        tid = f"{_col_index_to_letters(ci)}{ri + 1}"
+                        nb = [round(nx0, 4), round(ny0, 4), round(nx1, 4), round(ny1, 4)]
+                        changed_tiles.append(
+                            {
+                                "tile_id": tid,
+                                "mad": round(mad, 6),
+                                "norm_bbox": nb,
+                                "grid_ref": resolve_grid_ref(nb, g_axes),
+                            }
+                        )
+            changed_tiles.sort(key=lambda t: (-t["mad"], t["tile_id"]))
+
+            n_atom_d = (
+                len(atom_diffs["added"])
+                + len(atom_diffs["removed"])
+                + len(atom_diffs["modified"])
+            )
+            n_call_d = len(added_callouts) + len(removed_callouts)
+            n_rev_d = len(added_revs) + len(removed_revs)
+            has_changes = bool(
+                n_atom_d > 0
+                or n_call_d > 0
+                or n_rev_d > 0
+                or len(table_cell_diffs) > 0
+                or len(changed_tiles) > 0
+            )
+            total_atom_diffs += n_atom_d
+            total_table_diffs += len(table_cell_diffs)
+            total_callout_diffs += n_call_d
+            total_changed_tiles += len(changed_tiles)
+
+            sheet_diffs.append(
+                {
+                    "primary_sheet_id": npg["primary_sheet_id"] or opg["primary_sheet_id"],
+                    "old_page": opg["page"],
+                    "new_page": npg["page"],
+                    "match_method": match_method,
+                    "has_changes": has_changes,
+                    "atom_diffs": atom_diffs,
+                    "callout_diffs": {
+                        "added": added_callouts,
+                        "removed": removed_callouts,
+                    },
+                    "revision_diffs": {
+                        "added": added_revs,
+                        "removed": removed_revs,
+                    },
+                    "table_cell_diffs": table_cell_diffs,
+                    "changed_tiles": changed_tiles,
+                    "tile_mad_max": round(max_mad, 6),
+                }
+            )
+
+        return {
+            "version": __version__,
+            "old_pdf": str(old_pdf) if owns_old else getattr(doc_old, "name", "old_doc"),
+            "new_pdf": str(new_pdf) if owns_new else getattr(doc_new, "name", "new_doc"),
+            "tile_grid": f"{cols}x{rows}",
+            "summary": {
+                "matched_sheets": len(sheet_diffs),
+                "changed_sheets": sum(1 for s in sheet_diffs if s["has_changes"]),
+                "added_sheets": len(added_sheets),
+                "removed_sheets": len(removed_sheets),
+                "total_atom_diffs": total_atom_diffs,
+                "total_table_cell_diffs": total_table_diffs,
+                "total_callout_diffs": total_callout_diffs,
+                "total_changed_tiles": total_changed_tiles,
+            },
+            "sheets": sheet_diffs,
+            "added_sheets": added_sheets,
+            "removed_sheets": removed_sheets,
+        }
+    finally:
+        if owns_old:
+            doc_old.close()
+        if owns_new:
+            doc_new.close()
+
+
 def _save_page_tables(output_dir, page_num, rec, raw_tables, seen_md=None):
-    """Persist deduplicated tables to CSV and append Markdown representations to rec."""
+    """Persist deduplicated tables to CSV and track metadata + Markdown entries on rec."""
     added = 0
     seen = seen_md if seen_md is not None else set(rec.get("md_tables") or [])
-    for rows in raw_tables or ():
+    entries = rec.setdefault("table_entries", [])
+    for item in raw_tables or ():
+        is_dict = isinstance(item, dict)
+        rows = item.get("rows") if is_dict else item
         if not rows:
             continue
         md_tab = rows_to_markdown(rows)
@@ -3955,6 +6166,18 @@ def _save_page_tables(output_dir, page_num, rec, raw_tables, seen_md=None):
             writer = csv.writer(f_csv)
             writer.writerows(rows)
         rec["md_tables"].append(md_tab)
+        meta_entry = {
+            "page": page_num,
+            "table_index": t_idx,
+            "csv_path": csv_path,
+            "rows": [list(r) for r in rows],
+            "source": item.get("source", "vector_grid") if is_dict else "vector_grid",
+        }
+        if is_dict:
+            for mk in ("norm_bbox", "bbox", "col_bounds_norm", "raw_col_bounds_norm", "keep_cols"):
+                if mk in item and item[mk] is not None:
+                    meta_entry[mk] = item[mk]
+        entries.append(meta_entry)
     return added
 
 
@@ -3984,6 +6207,98 @@ def _apply_stitched_tile_result(output_dir, page_num, rec, stitched, spatial_pag
     return added
 
 
+_PAGE_NUM_STAMP_RE = re.compile(
+    r"^\s*(?:page\s*)?\d+(?:\s*(?:/|of)\s*\d+)?\s*$", re.IGNORECASE
+)
+
+
+def _compute_page_prose_stats_for_stitch(page_records, stage0_ctx, selected_indices):
+    """Measure prose chars above first table and below last table per page for Gate 1."""
+    stats = {}
+    for p_idx in selected_indices:
+        rec = page_records[p_idx]
+        p_num = rec["page"]
+        entries = rec.get("table_entries") or []
+        if not entries:
+            continue
+        ctx = stage0_ctx.get(p_idx) or {}
+        rx0, ry0, rx1, ry1 = ctx.get("page_rect") or (0.0, 0.0, 1000.0, 1000.0)
+        ph = max(1.0, float(ry1) - float(ry0))
+        atoms = ctx.get("atoms") or []
+
+        sorted_e = sorted(
+            entries,
+            key=lambda t: (
+                float((t.get("norm_bbox") or [0.0, 0.0, 1.0, 1.0])[1]),
+                float((t.get("norm_bbox") or [0.0, 0.0, 1.0, 1.0])[0]),
+            ),
+        )
+        first_nb = sorted_e[0].get("norm_bbox") or [0.0, 0.0, 1.0, 1.0]
+        last_nb = sorted_e[-1].get("norm_bbox") or [0.0, 0.0, 1.0, 1.0]
+
+        above_texts = []
+        below_texts = []
+        above_chars = 0
+        below_chars = 0
+        for a in atoms:
+            txt = (a.get("text") or "").strip()
+            if not txt:
+                continue
+            ny0 = (float(a["y0"]) - float(ry0)) / ph
+            ny1 = (float(a["y1"]) - float(ry0)) / ph
+            nyc = 0.5 * (ny0 + ny1)
+            is_stamp = bool(
+                _PAGE_NUM_STAMP_RE.match(txt) and (nyc <= 0.07 or nyc >= 0.93)
+            )
+            if nyc < float(first_nb[1]) - 0.002:
+                above_texts.append(txt)
+                if not is_stamp:
+                    above_chars += non_ws_count(txt)
+            elif nyc > float(last_nb[3]) + 0.002:
+                below_texts.append(txt)
+                if not is_stamp:
+                    below_chars += non_ws_count(txt)
+
+        stats[p_num] = {
+            "prose_chars_above_first": above_chars,
+            "prose_chars_below_last": below_chars,
+            "text_above_first": " ".join(above_texts),
+            "text_below_last": " ".join(below_texts),
+        }
+    return stats
+
+
+def _format_drawing_diff_markdown(diff_res):
+    """Format drawing_diff summary into a concise Markdown section."""
+    s = diff_res.get("summary") or {}
+    lines = [
+        "## Drawing Revision Diff",
+        "",
+        f"- Matched Sheets: `{s.get('matched_sheets', 0)}` "
+        f"(Changed: `{s.get('changed_sheets', 0)}`, "
+        f"Added: `{s.get('added_sheets', 0)}`, "
+        f"Removed: `{s.get('removed_sheets', 0)}`)",
+        f"- Atom Diffs: `{s.get('total_atom_diffs', 0)}` | "
+        f"Table Cell Diffs: `{s.get('total_table_cell_diffs', 0)}` | "
+        f"Callout Diffs: `{s.get('total_callout_diffs', 0)}` | "
+        f"Changed Tiles (MAD > 0.012): `{s.get('total_changed_tiles', 0)}`",
+    ]
+    for sh in diff_res.get("sheets") or ():
+        if not sh.get("has_changes"):
+            continue
+        sid = sh.get("primary_sheet_id") or f"Page {sh.get('new_page')}"
+        tiles_str = ", ".join(
+            f"{t['tile_id']}(MAD={t['mad']:.4f})"
+            for t in (sh.get("changed_tiles") or ())[:6]
+        )
+        lines.append(
+            f"- **{sid}** (old p{sh.get('old_page')} -> new p{sh.get('new_page')}): "
+            f"changed_tiles=[{tiles_str or 'none'}], "
+            f"table_diffs={len(sh.get('table_cell_diffs') or ())}"
+        )
+    return "\n".join(lines)
+
+
 def extract_pdf(
     pdf_path,
     output_dir,
@@ -4004,6 +6319,8 @@ def extract_pdf(
     grid_overlay=True,
     sniper_query=None,
     xlaya_bridge=False,
+    diff_with=None,
+    stitch_tables=True,
 ):
     """Single-pass C++ PyMuPDF text/table/spatial extractor with profile-gated OCR."""
     t_start = time.time()
@@ -4012,6 +6329,7 @@ def extract_pdf(
     md_out_path = os.path.join(output_dir, "extracted_document.md")
     manifest_path = os.path.join(output_dir, "ocr_manifest.json")
     spatial_index_path = os.path.join(output_dir, "spatial_index.json")
+    drawing_diff_path = os.path.join(output_dir, "drawing_diff.json")
     pages_dir = os.path.join(output_dir, "_tmp_pages")
 
     prof = resolve_hardware_profile(profile)
@@ -4061,28 +6379,24 @@ def extract_pdf(
                     fitz,
                     raw_text=raw_text,
                     drawings=regime_info.get("_drawings"),
+                    return_meta=True,
                 )
             aligned_tables = _extract_aligned_block_tables(
                 page, atoms=regime_info.get("_atoms")
             )
-            page_tables = _dedup_merge_page_tables(vector_tables, aligned_tables)
+            page_tables = _dedup_merge_page_tables(
+                vector_tables, aligned_tables, return_meta=True
+            )
 
             page_needs_ocr = bool(qual["needs_ocr"] or regime_info["needs_ocr"])
             if mode == "vlm" or (mode == "auto" and page_needs_ocr):
                 pages_needing_ocr.append(page_idx)
 
             if drawing_index or sniper_query:
-                aligned_sigs = {
-                    tuple(tuple(r) for r in at["rows"][:4]) for at in aligned_tables
-                }
-                merged_spatial_tables = list(aligned_tables)
-                for vt in vector_tables:
-                    if tuple(tuple(r) for r in vt[:4]) not in aligned_sigs:
-                        merged_spatial_tables.append({"rows": vt, "source": "vector_grid"})
                 s_idx = extract_spatial_cad_index(
                     page,
                     tile_grid=tile_grid,
-                    tables=merged_spatial_tables,
+                    tables=page_tables,
                     regime_info=regime_info,
                 )
                 spatial_pages.append(s_idx)
@@ -4131,6 +6445,7 @@ def extract_pdf(
                 "stage0_ms": stage0_ms,
                 "table_count": 0,
                 "md_tables": [],
+                "table_entries": [],
                 "engine": "pymupdf_vector",
             }
             tables_extracted += _save_page_tables(output_dir, page_num, rec, page_tables)
@@ -4366,6 +6681,80 @@ def extract_pdf(
                     spatial_page=spatial_page_map.get(p_idx),
                 )
 
+    table_merge_events = []
+    if stitch_tables:
+        all_table_entries = [
+            entry
+            for p_idx in selected_indices
+            for entry in (page_records[p_idx].get("table_entries") or ())
+        ]
+        if len(all_table_entries) >= 2 and len({e["page"] for e in all_table_entries}) >= 2:
+            prose_stats = _compute_page_prose_stats_for_stitch(
+                page_records, stage0_ctx, selected_indices
+            )
+            stitch_res = stitch_multipage_tables(
+                all_table_entries, page_prose_stats=prose_stats
+            )
+            table_merge_events = stitch_res.get("merge_events") or []
+            if table_merge_events:
+                for st in stitch_res["stitched_tables"]:
+                    for sup_path in st.get("superseded_csv_paths") or ():
+                        if sup_path and os.path.isfile(sup_path):
+                            os.unlink(sup_path)
+
+                per_page_stitched = stitch_res.get("per_page_tables") or {}
+                tables_extracted = 0
+                for p_idx in selected_indices:
+                    rec = page_records[p_idx]
+                    p_num = rec["page"]
+                    kept_tabs = per_page_stitched.get(p_num, [])
+                    # Stage surviving CSV renames/rewrites cleanly so disk table_p{page}_{idx}.csv
+                    # always matches Table {page}.{idx} in extracted_document.md 1-to-1 (FALS-R2-07).
+                    old_csvs = [
+                        t.get("csv_path")
+                        for t in kept_tabs
+                        if t.get("csv_path") and os.path.isfile(t["csv_path"])
+                    ]
+                    target_csvs = [
+                        os.path.join(output_dir, f"table_p{p_num}_{t_i}.csv")
+                        for t_i in range(1, len(kept_tabs) + 1)
+                    ]
+                    for old_p in old_csvs:
+                        if old_p not in target_csvs and os.path.isfile(old_p):
+                            os.unlink(old_p)
+                    for t_i, (t, target_csv) in enumerate(zip(kept_tabs, target_csvs), start=1):
+                        if t.get("rows"):
+                            with open(target_csv, "w", encoding="utf-8-sig", newline="") as f_csv:
+                                writer = csv.writer(f_csv)
+                                writer.writerows(t["rows"])
+                        t["table_index"] = t_i
+                        t["csv_path"] = target_csv
+
+                    rec["table_entries"] = list(kept_tabs)
+                    rec["md_tables"] = [rows_to_markdown(t["rows"]) for t in kept_tabs]
+                    rec["md_table_labels"] = [
+                        (
+                            f"Table {p_num}.{t_i} (Stitched Pages {t['start_page']}..{t['end_page']})"
+                            if len(t.get("pages") or ()) > 1
+                            else f"Table {p_num}.{t_i}"
+                        )
+                        for t_i, t in enumerate(kept_tabs, start=1)
+                    ]
+                    rec["table_count"] = len(kept_tabs)
+                    tables_extracted += len(kept_tabs)
+
+    diff_res = None
+    if diff_with:
+        diff_res = diff_pdf_drawings(
+            diff_with,
+            pdf_path,
+            pages=pages_arg,
+            profile=prof["profile"],
+            tile_grid=tile_grid,
+        )
+        with open(drawing_diff_path, "w", encoding="utf-8", newline="\n") as f_diff:
+            json.dump(diff_res, f_diff, indent=2, ensure_ascii=False)
+
     sniper_rois = []
     if sniper_query and spatial_pages:
         sniper_rois = rank_spatial_rois(
@@ -4384,6 +6773,7 @@ def extract_pdf(
                     "profile": prof["profile"],
                     "tile_grid": tile_grid,
                     "pages": spatial_pages,
+                    "callout_graph": build_callout_graph(spatial_pages),
                 },
                 f_idx,
                 indent=2,
@@ -4404,8 +6794,11 @@ def extract_pdf(
         md_sec = [f"## Page {p_num}", "", rec["text"]]
         if rec["md_tables"]:
             md_sec.append(f"\n### Extracted Tables (Page {p_num})")
-            for t_i, md_tab in enumerate(rec["md_tables"], start=1):
-                md_sec.append(f"\n#### Table {p_num}.{t_i}\n\n{md_tab}")
+            md_labels = rec.get("md_table_labels") or [
+                f"Table {p_num}.{t_i}" for t_i in range(1, len(rec["md_tables"]) + 1)
+            ]
+            for lbl, md_tab in zip(md_labels, rec["md_tables"]):
+                md_sec.append(f"\n#### {lbl}\n\n{md_tab}")
         md_chunks.append("\n".join(md_sec))
 
         mpage = {
@@ -4432,6 +6825,9 @@ def extract_pdf(
             mpage["tiled_canvas"] = rec["tiled_canvas"]
         manifest_pages.append(mpage)
 
+    if diff_res is not None:
+        md_chunks.append(_format_drawing_diff_markdown(diff_res))
+
     with open(text_out_path, "w", encoding="utf-8", newline="\n") as f_txt:
         f_txt.write("\n".join(txt_chunks))
 
@@ -4447,6 +6843,7 @@ def extract_pdf(
         "pages_processed": len(selected_indices),
         "total_chars": total_chars,
         "tables_extracted": tables_extracted,
+        "table_merge_events": table_merge_events,
         "low_text_or_ocr_pages": [p + 1 for p in pages_needing_ocr],
         "elapsed_ms": elapsed_ms,
         "pages": manifest_pages,
@@ -4458,6 +6855,9 @@ def extract_pdf(
     if sniper_query:
         manifest_data["sniper_query"] = sniper_query
         manifest_data["sniper_rois"] = sniper_rois
+    if diff_res is not None:
+        manifest_data["drawing_diff_path"] = drawing_diff_path
+        manifest_data["drawing_diff_summary"] = diff_res["summary"]
 
     with open(manifest_path, "w", encoding="utf-8", newline="\n") as f_man:
         json.dump(manifest_data, f_man, indent=2, ensure_ascii=False)
@@ -4468,6 +6868,7 @@ def extract_pdf(
         "pages_processed": len(selected_indices),
         "total_chars": total_chars,
         "tables_extracted": tables_extracted,
+        "table_merge_events": table_merge_events,
         "low_text_pages": [p + 1 for p in pages_needing_ocr],
         "elapsed_ms": elapsed_ms,
         "text_path": text_out_path,
@@ -4482,6 +6883,9 @@ def extract_pdf(
     if sniper_query:
         res["sniper_query"] = sniper_query
         res["sniper_rois"] = sniper_rois
+    if diff_res is not None:
+        res["drawing_diff_path"] = drawing_diff_path
+        res["drawing_diff_summary"] = diff_res["summary"]
     if vlm_info:
         res["vlm"] = vlm_info
     return res
@@ -4740,6 +7144,38 @@ def run_self_test(profile="nano", genomes_file=None):
         assert m_metrics["skipped_image_info"] is True
         assert m_metrics["image_count"] == 163
 
+        # 4. Verify v2.4.0 Seam A primitives (natural sort, bracketed grid ref, callout graph, stitching)
+        assert _grid_natural_key("2.1") < _grid_natural_key("10")
+        assert _grid_natural_key("Z") < _grid_natural_key("AA")
+        demo_axes = {
+            "x": [
+                {"label": "A", "coord_pt": 100.0, "coord_norm": 0.1, "bubble_bboxes": [], "has_ray": True},
+                {"label": "B", "coord_pt": 400.0, "coord_norm": 0.4, "bubble_bboxes": [], "has_ray": True},
+                {"label": "C", "coord_pt": 700.0, "coord_norm": 0.7, "bubble_bboxes": [], "has_ray": True},
+            ],
+            "y": [
+                {"label": "1", "coord_pt": 100.0, "coord_norm": 0.1, "bubble_bboxes": [], "has_ray": True},
+                {"label": "2", "coord_pt": 500.0, "coord_norm": 0.5, "bubble_bboxes": [], "has_ray": True},
+            ],
+        }
+        assert resolve_grid_ref([0.25, 0.30], demo_axes) == "A-B / 1-2"
+        assert resolve_grid_ref([0.95, 0.30], demo_axes) is None
+        cg = build_callout_graph(
+            [
+                {"page": 1, "primary_sheet_id": "A-101", "callouts": [{"target_sheet": "S-501", "detail_no": "3", "kind": "detail"}]},
+                {"page": 2, "primary_sheet_id": "S-501", "callouts": [{"target_sheet": "M-999", "detail_no": None, "kind": "reference"}]},
+            ]
+        )
+        assert cg["sheets"]["S-501"] == 2
+        assert cg["dangling_targets"] == ["M-999"]
+        st_demo = stitch_multipage_tables(
+            [
+                {"page": 1, "rows": [["Item", "Qty"], ["1", "10"]], "col_bounds_norm": [[0.1, 0.5], [0.5, 0.8]]},
+                {"page": 2, "rows": [["Item", "Qty"], ["2", "20"]], "col_bounds_norm": [[0.1, 0.5], [0.5, 0.8]]},
+            ]
+        )
+        assert len(st_demo["merge_events"]) == 1 and len(st_demo["stitched_tables"]) == 1
+
     if prof["profile"] in ("nano", "edge") and "torch" in sys.modules:
         raise AssertionError(
             f"PyTorch imported during self-test under profile={prof['profile']!r}"
@@ -4751,13 +7187,14 @@ def run_self_test(profile="nano", genomes_file=None):
         "profile": prof["profile"],
         "torch_loaded": "torch" in sys.modules,
         "regimes_verified": list(XOCR_REGIMES),
+        "tables_extracted": int(res["tables_extracted"]),
         "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
     }
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="XOCR v2.3.0 — 5-Profile PDF, CAD Drawing & Table AI Engine"
+        description="XOCR v2.4.0 — 5-Profile PDF, CAD Drawing & Table AI Engine"
     )
     parser.add_argument(
         "input_path", nargs="?", help="Path to target PDF or image file"
@@ -4884,6 +7321,18 @@ def main():
         default="th,en",
         help="Comma-separated language codes for local OCR (default: th,en)",
     )
+    parser.add_argument(
+        "--diff-with",
+        dest="diff_with",
+        default=None,
+        help="Compare input PDF against an older baseline PDF revision and emit drawing_diff.json",
+    )
+    parser.add_argument(
+        "--no-stitch-tables",
+        dest="no_stitch_tables",
+        action="store_true",
+        help="Disable 6-gate cross-page continuation table stitching",
+    )
     args = parser.parse_args()
 
     if args.self_test:
@@ -4924,6 +7373,14 @@ def main():
         print(json.dumps(err))
         sys.exit(1)
 
+    diff_with_path = None
+    if args.diff_with:
+        diff_with_path = os.path.abspath(args.diff_with)
+        if not os.path.exists(diff_with_path):
+            err = {"status": "error", "message": f"Diff input not found: {diff_with_path}"}
+            print(json.dumps(err, ensure_ascii=False))
+            sys.exit(1)
+
     summary = {
         "status": "success",
         "version": __version__,
@@ -4956,6 +7413,8 @@ def main():
                 grid_overlay=not args.no_grid_overlay,
                 sniper_query=args.sniper_query,
                 xlaya_bridge=args.xlaya_bridge,
+                diff_with=diff_with_path,
+                stitch_tables=not args.no_stitch_tables,
             )
             summary.update(pdf_res)
         else:
@@ -4967,7 +7426,7 @@ def main():
                 profile=args.profile,
             )
             summary.update(img_res)
-    except ValueError as exc:
+    except (ValueError, FileNotFoundError) as exc:
         err = {"status": "error", "message": str(exc)}
         print(json.dumps(err, ensure_ascii=False))
         sys.exit(1)
