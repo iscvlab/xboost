@@ -16,7 +16,7 @@ Red failure modes prevented:
 1. Letting hard-won bug root causes, benchmark speedups, or reviewer traps evaporate when a chat session ends instead of ratcheting them into a lookup-ready Playbook.
 2. Requiring the user to manually invoke `/xsync` or `/xcreate-skill` after updating compound learning playbooks, leaving `COMPOUND_LEARNING_PLAYBOOK.md` and its `docs/` mirror out of sync.
 3. **Session Hangover / Recency Bias**: Polluting global `/x*` skills with project-specific domain equations, fixed-equation heuristics, or domain CLI scripts that break other paradigms (`∃ valid_paradigm : breaks`).
-4. Dumping multi-hundred-line narrative walls into Playbooks until they exceed the `46,080`-byte single-read ceiling instead of enforcing compact 5-column lookup tables (`< 35 KB` per Playbook).
+4. Dumping multi-hundred-line narrative walls into Playbooks until they exceed the `46,080`-byte single-read ceiling instead of enforcing compact 5-column lookup tables and sharding (`< 35 KB` LF per `L1`/`L2` file).
 
 ---
 
@@ -28,8 +28,8 @@ flowchart TD
     subgraph Canvas [" "]
         In["Post-Session Findings (/xlearn or /learn)"] --> Sieve{"/xlaya + 5-Gate Falsification Sieve"}
         Sieve -->|"100% Domain-Agnostic Agent Process Law (Passes Gates 1-5 + Blind Critic)"| T0["Tier 0 (Tier B Consent Gate): Global /x* Skills & UL-01..UL-08"]
-        Sieve -->|"Cross-Workspace Code / Array / Vision / CAD / FALS-* Pattern"| T1["Tier 1 (Tier A Autonomous): COMPOUND_LEARNING_PLAYBOOK.md (< 35 KB)"]
-        Sieve -->|"Specialized Domain Protocol Pattern (PRs / Plant 3D / Quant)"| T2["Tier 2 (Tier A Autonomous): Specialized Domain Playbooks (Playbooks 2-4)"]
+        Sieve -->|"Cross-Workspace Code / Array / Vision / CAD / FALS-* Pattern"| T1["Tier 1 (Tier A Autonomous): COMPOUND_LEARNING_PLAYBOOK.md (Single File or L1 Hub + L2 Shards < 35 KB LF)"]
+        Sieve -->|"Specialized Domain Protocol Pattern"| T2["Tier 2 (Tier A Autonomous): Specialized Domain Playbooks"]
         T1 --> T2
         T1 --> Sync["Built-In Auto-Closure: audit_workspace_docs.py --federated + SHA-256 Mirror Sync"]
         T2 --> Sync
@@ -42,20 +42,16 @@ flowchart TD
 1. **`Tier 0 (Consent-Gated Global Skill & Universal Law Evolution — Tier B)`**:
    * **Canonical Owners**: `UL-01..UL-08`, `G1..G5`, and `Axis 1..4` in [`../xboost/references/deep_audit_protocol.md`](../xboost/references/deep_audit_protocol.md) and `<GLOBAL_SKILLS_ROOT>/*/SKILL.md`.
    * **Rule**: Only 100% domain-agnostic AI agent reasoning/verification laws that survive all 5 pre-proposal steps and the Wave 2A Blind Counter-Domain Critic (`Archetypes A × B × C`) may be proposed for Tier 0 (report-first; requires explicit user consent before editing global skills).
-2. **`Tier 1 (Autonomous Core Compound Learning Hub — Tier A)`**:
-   * **Canonical Owner**: Umbrella `COMPOUND_LEARNING_PLAYBOOK.md` (mirrored byte-for-byte to `agent-skills/docs/COMPOUND_LEARNING_PLAYBOOK.md`, kept strictly `< 35 KB` below the `46,080`-byte single-read ceiling).
-   * **4-Sub-Tier Structure**:
-     * **`Tier 1A`**: Universal Code, Array, Memory & Algorithmic Complexity Patterns (`OPT-*`).
-     * **`Tier 1B`**: Spatial, Vision, Raster & Document OCR Patterns (bridging [`/xocr`](../xocr/SKILL.md)).
-     * **`Tier 1C`**: Desktop CAD/GIS (`Rhino`/`GH`/`QGIS`), Non-Intrusive GUI Automation ([`/xmouse`](../xmouse/SKILL.md)), Web UI & IoT Patterns.
-     * **`Tier 1D`**: Universal Falsification & Anti-Cheat Guardrails (`FALS-01..11`).
-   * **Mandatory 5-Column Actionable Lookup Schema**: Every pattern row MUST follow:
-     `| Pattern ID & Category | Where to Look (Grep / AST Signature) | Bug / Optimization Opportunity | Potential Risk / Trap (FALS-*) & Safe Fix Recipe | Compact Proof Receipts |`
+2. **`Tier 1 (Autonomous Elastic Core Hub `L1` + Cohesive Domain Shards `L2` — Tier A)`**:
+   * **Elastic Topology (`Single File → L1 + L2 Shards`)**: Keep `COMPOUND_LEARNING_PLAYBOOK.md` (`== docs/COMPOUND_LEARNING_PLAYBOOK.md`) as a single self-contained file while comfortably `< 35 KB`; once approaching `35 KB` (below the `46,080`-byte `read_file` ceiling), factor into a compact **`L1` Router Hub** (`≤ 15 KB`, `≤ 200` lines: Cascade Table + Shard Dispatch + 1-line Quick-Trigger Index) pointing via closed-subgraph relative links to cohesive **`L2` Domain Shards** (`playbooks/*.md` == `docs/playbooks/*.md`, each strictly `< 35 KB` LF):
+     * **`Tier 1A`**: Universal Code, Vectorization, GPU, Graph, Memory, Concurrency & MOO Patterns (`PAT-*`, `OPT-*`).
+     * **`Tier 1B`**: Spatial, Vision, Raster, Document OCR & SWE Agent Patterns (bridging [`/xocr`](../xocr/SKILL.md) and [`/xlaya`](../xlaya/SKILL.md)).
+     * **`Tier 1C`**: Desktop CAD/GIS, PBR, Non-Intrusive GUI Automation ([`/xmouse`](../xmouse/SKILL.md)), Web, Edge IoT & Quantitative Systems.
+     * **`Tier 1D`**: Universal Falsification Guardrails (`FALS-*`), Maintainer Governance Fingerprints (`GOV-*`) & Contribution Rollups.
+   * **Gate 5 Pointer-Over-Paste & 5-Column Schema**: When sharded (`L1 + L2`), full 5-column lookup rows reside **strictly** in the owning `L2` shard (never duplicated as prose walls inside `L1`):
+     `| Pattern ID & Category | Where to Look (Grep / AST Signature) | Bug / Optimization Opportunity | Risk / Trap (FALS-*) & Safe Fix Recipe | Compact Proof Receipts |`
 3. **`Tier 2 (Autonomous Specialized Domain Ratchet Playbooks — Tier A)`**:
-   * `COMPOUND_LEARNING_PLAYBOOK.md` links directly via relative links (`./...`) to 3 specialized sibling Playbooks in the parent umbrella directory:
-     1. **Playbook 2 — GitHub PR & OSS Deep-Scan Protocol** (`OSS_CONTRIBUTION_AND_DEEP_SCAN_PROTOCOL.md`: `Phases 0–7` end-to-end OSS PR workflow, `Track 2A/2B/2C` deep scan, `GOV-01..07` maintainer governance filters, and the Single-SSOT Live OSS PR Ledger)
-     2. **Playbook 3 — Plant Allometry & 3D Botanical Modeling Protocol** (`PLANT_STUDIO_PROTOCOL.md`: `19` Architectural Invariants, `6-Tier ACM` hierarchy, `8` Differential-Geometry Foliage Laws, and `9-Gate` `ont_verify.py` validator)
-     3. **Playbook 4 — Quant Trading & Evolution Ratchet Protocol** (`TRADING_AND_EVOLUTION_PROTOCOL.md`: `60/20/20` Walk-Forward isolation, `CHEAT-01..08` zero-cheat gates, `GATE-01..07` stress tests, `4-Gate Ratchet`, and `31/31` pytest verification)
+   * `COMPOUND_LEARNING_PLAYBOOK.md` (`L1` Cascade Table) indexes specialized sibling **Tier 2 Domain Playbooks** (`*PROTOCOL*.md` / `*PLAYBOOK*.md` across active subsystem workspaces). Format sibling repo paths outside the mirrored `COMPOUND_LEARNING_PLAYBOOK.md` ↔ `playbooks/*.md` subgraph as inline code spans or verified repository URLs so standalone `docs/` mirrors resolve `100%` of relative links independently.
 
 ### When NOT to Use
 
@@ -76,17 +72,17 @@ flowchart TD
 ### Tier A: Autonomous Playbook Ratchet + Built-In `/xsync --federated` Closure
 When the user runs `/xlearn` (or `/learn`) to capture bugs, optimizations, review-bot lessons, or domain invariants from a session:
 
-1. **Step 1 — Semantic Triage & Deduplication ([`/xlaya`](../xlaya/SKILL.md) Pre-Filter)**:
-   * Extract the candidate lesson's `Where to Look (Grep / AST Signature)`, `Bug / Optimization Opportunity`, `Potential Risk / Trap (FALS-*) & Safe Fix Recipe`, and `Compact Proof Receipts` (max 1–2 examples with quantified `Before → After` delta).
-   * When [`/xlaya`](../xlaya/SKILL.md) is available, run [`../xlaya/scripts/laya_triage.py`](../xlaya/scripts/laya_triage.py) (`--mode shortlist` / `--mode contradiction`) against the target Playbook to merge into an existing `OPT-*` / `FALS-*` / `GOV-*` row rather than appending duplicate rows.
-2. **Step 2 — Update Target Tier 1 & Tier 2 Playbooks (`< 35 KB` Budget Guard)**:
-   * Apply surgical `edit_file` updates to `COMPOUND_LEARNING_PLAYBOOK.md` (`Tier 1A/1B/1C/1D`) and/or the specialized Tier 2 Playbook (`OSS_CONTRIBUTION_AND_DEEP_SCAN_PROTOCOL.md`, `PLANT_STUDIO_PROTOCOL.md`, or `TRADING_AND_EVOLUTION_PROTOCOL.md`).
-   * Copy updated `COMPOUND_LEARNING_PLAYBOOK.md` byte-for-byte to `agent-skills/docs/COMPOUND_LEARNING_PLAYBOOK.md` and verify every Playbook remains `< 35 KB`.
+1. **Step 1 — Cross-Shard Semantic Triage & Deduplication ([`/xlaya`](../xlaya/SKILL.md) Pre-Filter)**:
+   * Extract the candidate lesson's `Where to Look (Grep / AST Signature)`, `Bug / Optimization Opportunity`, `Risk / Trap (FALS-*) & Safe Fix Recipe`, and `Compact Proof Receipts` (max 1–2 examples with quantified `Before → After` delta).
+   * When [`/xlaya`](../xlaya/SKILL.md) is available, run [`../xlaya/scripts/laya_triage.py`](../xlaya/scripts/laya_triage.py) (or `xlaya_triage` MCP, `--mode shortlist` and `--mode contradiction`, `--profile nano` for pure-Python speed) across **both** `COMPOUND_LEARNING_PLAYBOOK.md` (`L1`) and all `L2` shards (`playbooks/*.md` / `docs/playbooks/*.md`) to merge into an existing `PAT-*/OPT-*`, `FALS-*`, or `GOV-*` row rather than creating cross-shard duplicates.
+2. **Step 2 — Update Owning `L2` Shard / `L1` Hub & Tier 2 Playbooks (`< 35 KB` LF Guard)**:
+   * Apply surgical `edit_file` updates to the owning Tier 1 `L2` shard (`playbooks/*.md` for `Tier 1A/1B/1C/1D`, keeping `L1` `COMPOUND_LEARNING_PLAYBOOK.md` synchronized with a 1-line quick-trigger row and accurate counts — or directly to `COMPOUND_LEARNING_PLAYBOOK.md` when unsharded) and/or the matching Tier 2 Domain Playbook.
+   * Keep every `L1` and `L2` file strictly `< 35 KB` UTF-8 LF (`0` `\r\n`), and mirror `COMPOUND_LEARNING_PLAYBOOK.md` ↔ `docs/COMPOUND_LEARNING_PLAYBOOK.md` and `playbooks/*.md` ↔ `docs/playbooks/*.md` byte-for-byte. Factor any single playbook approaching `35 KB` into `L1 + L2` shards.
 3. **Step 3 — Strict Opt-In [`/xobsidian`](../xobsidian/SKILL.md) Second Brain Ratchet (`/xlearn /xobsidian`)**:
    * **Without `/xobsidian`**: Never touch any Obsidian vault.
    * **With `/xobsidian`**: Mint or update converged `#tier/method`, `#tier/asset`, or `#tier/package` atomic notes and parent `Hub - *.md` tables in `VAULT_ROOT` with `≥ 2` Hub/Peer links and `≥ 2` Cross-Domain Bridges, verifying `BROKEN=0`, `ORPHANS=0`, `DUP_NEIGHBOR_GROUPS=0`.
 4. **Step 4 — Automatic Built-In [`/xsync`](../xsync/SKILL.md) `--federated` Closure (Zero Manual Follow-Up)**:
-   * Automatically execute [`../xsync/scripts/audit_workspace_docs.py`](../xsync/scripts/audit_workspace_docs.py) `--federated` across the active workspace and parent umbrella to verify `0` broken relative links, `0` raw LaTeX math macros, and `100%` SHA-256 mirror parity—so the user never has to invoke `/xsync` or `/xcreate-skill` manually after `/xlearn`.
+   * Automatically execute [`../xsync/scripts/audit_workspace_docs.py`](../xsync/scripts/audit_workspace_docs.py) `--federated` across the active workspace and parent umbrella to verify `0` broken relative links across `L1`/`L2` shards, `0` raw LaTeX math macros, and `100%` SHA-256 mirror parity—so the user never has to invoke `/xsync` or `/xcreate-skill` manually after `/xlearn`.
 
 ---
 
@@ -150,9 +146,9 @@ Every rule distilled into a global skill via `/xlearn` (or [`/xcreate-skill`](..
 | **`/xboost /xlearn`** | **Build-Verify-Ratchet Loop**: Executes [`/xboost`](../xboost/SKILL.md) Phases 1–4, then automatically distills verified bug root causes, AST/grep signatures, and `Before → After` benchmark receipts into Tier 1/Tier 2 Playbooks with built-in [`/xsync`](../xsync/SKILL.md) `--federated` mirror closure. |
 | **`/xlearn /xultra`** | **Blind Counter-Domain Critic & Multi-Playbook Swarm (`Maker ≠ Checker`)**: Spawns Wave 1 Playbook/Skill Distillers + Wave 2A Blind Counter-Domain Critics (`TypeName="research"`, [`/xultra`](../xultra/SKILL.md)) to stress-test candidate laws across `Archetypes A × B × C` and verify Playbook byte budgets (`< 35 KB`) and SHA-256 mirrors in Wave 2B. |
 | **`/xdeep-research /xlearn`** | **Deep-Scan & Precedent Playbook Ratchet**: Harvests upstream PR patterns, maintainer governance rules (`GOV-*`), or domain equations via [`/xdeep-research`](../xdeep-research/SKILL.md) and ratchets verified patterns into `COMPOUND_LEARNING_PLAYBOOK.md` and `OSS_CONTRIBUTION_AND_DEEP_SCAN_PROTOCOL.md`. |
-| **`/xlearn /xlaya`** | **System 1 Duplicate & Contradiction Triage**: Runs [`/xlaya`](../xlaya/SKILL.md) (`laya_triage.py --mode shortlist` and `--mode contradiction`) across all 4 Playbooks in milliseconds (`0` LLM tokens) to merge into existing `OPT-*`/`FALS-*` rows and catch stale metrics. |
+| **`/xlearn /xlaya`** | **System 1 Cross-Shard Duplicate & Contradiction Triage**: Runs [`/xlaya`](../xlaya/SKILL.md) (`laya_triage.py --mode shortlist` and `--mode contradiction`, `--profile nano`) across `L1`, `L2` shards (`playbooks/*.md`), and Tier 2 Domain Playbooks in milliseconds (`0` LLM tokens) to merge into existing `PAT-*/OPT-*`/`FALS-*`/`GOV-*` rows and catch stale metrics. |
 | **`/xlearn /xobsidian`** *(Strict Opt-In)* | **Playbook + Second Brain Dual Ratchet**: Pairs Tier 1/Tier 2 Playbook updates with [`/xobsidian`](../xobsidian/SKILL.md) atomic note minting (`#tier/method`, `#tier/asset`, `#tier/package`) and 1-line Graph Integrity verification (`BROKEN=0`, `ORPHANS=0`, `DUP_NEIGHBOR_GROUPS=0`). |
-| **`/xlearn /xcreate-skill`** & **`/xlearn /xpublish`** | **Tier B Global Skill Upgrade & Pre-Flight Gate**: When a candidate law survives `/xlearn`'s 5-Step Pre-Proposal Sieve and receives user consent, applies surgical edits via [`/xcreate-skill`](../xcreate-skill/SKILL.md) and validates all 15 skills via [`/xpublish`](../xpublish/SKILL.md) (`audit_engine.py --platform skill`). |
+| **`/xlearn /xcreate-skill`** & **`/xlearn /xpublish`** | **Tier B Global Skill Upgrade & Pre-Flight Gate**: When a candidate law survives `/xlearn`'s 5-Step Pre-Proposal Sieve and receives user consent, applies surgical edits via [`/xcreate-skill`](../xcreate-skill/SKILL.md) and validates all skills via [`/xpublish`](../xpublish/SKILL.md) (`audit_engine.py --platform skill`). |
 | **`/xbrief /xlearn`** & **`/xplan /xlearn`** | **Playbook-Grounded Briefing & Planning**: Loads `COMPOUND_LEARNING_PLAYBOOK.md` and domain Playbooks via [`/xbrief`](../xbrief/SKILL.md) or [`/xplan`](../xplan/SKILL.md), then ratchets newly discovered architectural constraints at session end. |
 | **`/xocr /xlearn`** & **`/xmouse /xlearn`** | **Vision/OCR & Desktop GUI Pattern Distillation**: Distills PDF/table extraction edge cases from [`/xocr`](../xocr/SKILL.md) (`Tier 1B`) and Win32 UIA / Set-of-Mark desktop automation patterns from [`/xmouse`](../xmouse/SKILL.md) (`Tier 1C`) into `COMPOUND_LEARNING_PLAYBOOK.md`. |
 | **`/xcontext /xlearn /xkickoff`** | **End-of-Session Compaction Guard & Handoff**: Checks context window health via [`/xcontext`](../xcontext/SKILL.md), ratchets session learnings into Playbooks via `/xlearn`, and generates a pristine next-session prompt via [`/xkickoff`](../xkickoff/SKILL.md). |
@@ -161,7 +157,7 @@ Every rule distilled into a global skill via `/xlearn` (or [`/xcreate-skill`](..
 
 ## 5. Completion Rubric
 
-- [ ] **3-Tier Routing Enforced**: Classified findings into `Tier 0` (Consent-Gated Global Skills), `Tier 1` (`COMPOUND_LEARNING_PLAYBOOK.md`), and/or `Tier 2` (Playbooks 2–4).
-- [ ] **5-Column Actionable Schema & `< 35 KB` Cap**: Every Tier 1 pattern includes `Where to Look (Grep / AST Signature)` + `Potential Risk / Trap (FALS-*)`, max 1–2 compact proof examples, and keeps each Playbook `< 35 KB`.
-- [ ] **Automatic Built-In `/xsync --federated` Closure**: Synchronized `COMPOUND_LEARNING_PLAYBOOK.md` ↔ `docs/COMPOUND_LEARNING_PLAYBOOK.md` (SHA-256 match) and ran `audit_workspace_docs.py --federated` with `0` errors.
+- [ ] **3-Tier Routing Enforced**: Classified findings into `Tier 0` (Consent-Gated Global Skills), `Tier 1` (`COMPOUND_LEARNING_PLAYBOOK.md` `L1` + `L2` shards), and/or `Tier 2` (Tier 2 Domain Playbooks).
+- [ ] **5-Column Schema, Pointer-Over-Paste & `< 35 KB` LF Cap**: Every Tier 1 pattern includes `Where to Look (Grep / AST Signature)` + `Risk / Trap (FALS-*)`, keeps full rows only in the owning `L2` shard (no prose duplication in `L1`), and keeps each `L1`/`L2` file `< 35 KB` UTF-8 LF.
+- [ ] **Automatic Built-In `/xsync --federated` Closure**: Synchronized `COMPOUND_LEARNING_PLAYBOOK.md` ↔ `docs/COMPOUND_LEARNING_PLAYBOOK.md` and `playbooks/*.md` ↔ `docs/playbooks/*.md` (SHA-256 match) and ran `audit_workspace_docs.py --federated` with `0` errors.
 - [ ] **Tier B 5-Step Pre-Proposal Sieve & Blind Critic Gate**: For any global skill consideration, ran the Wave 2A Blind Counter-Domain Critic *before* suggesting in chat and listed pruned project-specific ideas first.

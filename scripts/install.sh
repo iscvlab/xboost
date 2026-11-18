@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# XBoost Composable Agent Skills (v3.5.0) - Universal Installer (macOS & Linux) - iscvlab/xboost
+# XBoost Composable Agent Skills (v3.6.0) - Universal Installer (macOS & Linux) - iscvlab/xboost
 # Links the 15-skill XBoost (/x*) suite into Claude Code (~/.claude/skills), Grok (~/.grok/skills),
 # Gemini/Antigravity (~/.gemini/config/skills), and Cursor/Codex (~/.agents/skills).
 
@@ -18,7 +18,7 @@ LEGACY_DIRS=(
 )
 
 echo "============================================================"
-echo "  ⚡ XBoost Agent Skills (v3.5.0) - Universal Installer"
+echo "  ⚡ XBoost Agent Skills (v3.6.0) - Universal Installer"
 echo "============================================================"
 echo "Source: $SKILLS_SRC"
 
@@ -137,5 +137,5 @@ fi
 
 echo ""
 echo "============================================================"
-echo "  ✓ XBoost v3.5.0 Installation Complete! All 15 /x* skills ready."
+echo "  ✓ XBoost v3.6.0 Installation Complete! All 15 /x* skills ready."
 echo "============================================================"

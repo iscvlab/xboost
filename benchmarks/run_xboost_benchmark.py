@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-XBoost v3.5.0 — Reproducible Multi-Trial Empirical Benchmark Suite.
+XBoost v3.6.0 — Reproducible Multi-Trial Empirical Benchmark Suite.
 Executes 7 falsifiable experiments across real installed skills, multi-workspace
 corpora, 25 seeded red-team defects, historical IDE conversation transcripts,
-and 22 real-world upstream open-source contributions:
+and 24 real-world upstream open-source PRs + 1 Hold:
   Exp 1: Skill Frontmatter & Context Budget Audit (XBoost 15 vs Official Cloud/Vendor Skills)
   Exp 2: Context Compression & 2-Hop Vault Isolation (3 Warm-ups + 30 Timed Trials)
   Exp 3: System 1 Section Triage & Contradiction Speed (/xlaya, 3 Warm-ups + 30 Timed Trials)
   Exp 4: 25-Defect Red-Team Catch Rate & CLI Gate Latency (3 Warm-ups + 20 Timed Trials)
   Exp 5: Composable Workflow Ablation Matrix (Level 0 Baseline -> Level 3 Full Chain)
   Exp 6: Real Session Token Economics (Inputs + KV-Cache Read + Thinking + Output + Tier Sizing)
-  Exp 7: 3-Tier Compound Learning Playbook & Real-World Upstream Open-Source Speedups
+  Exp 7: 4-Tier Sharded Compound Learning Playbooks & Real-World Upstream Open-Source Speedups
 """
 
 import json
@@ -147,7 +147,7 @@ def parse_skill_frontmatter(skill_md_path: Path) -> Dict[str, Any]:
         desc_parts = []
         for ln in lines:
             if re.match(r"^description\s*:", ln):
-                val = re.sub(r"^description\s*:\s*[>|]?\s*", "", ln).strip()
+                val = re.sub(r"^description\s*:\s*(?:[>|][+-]?)?\s*", "", ln).strip()
                 val = val.strip("\"'")
                 if val:
                     desc_parts.append(val)
@@ -223,7 +223,7 @@ def run_exp1_skill_discovery_audit() -> Dict[str, Any]:
 
     return {
         "total_installed_skills_scanned": len(all_parsed),
-        "xboost_15": summarize_group(f"XBoost v3.5.0 Suite ({len(bx_parsed)} Composable /x* Skills)", bx_parsed),
+        "xboost_15": summarize_group(f"XBoost v3.6.0 Suite ({len(bx_parsed)} Composable /x* Skills)", bx_parsed),
         "official_enterprise": summarize_group(
             f"Official Cloud & Enterprise Vendor Skills (N={len(ent_parsed)})", ent_parsed
         ),
@@ -408,7 +408,7 @@ def run_exp3_xlaya_triage_speed(warmup: int = 3, trials: int = 30) -> Dict[str, 
     iscv_docs = parent_ws / "ISCV-Workspace" / "docs"
     targets = [REPO_ROOT / "README.md", REPO_ROOT / "CHANGELOG.md"]
     if (REPO_ROOT / "docs").is_dir():
-        targets.extend(sorted((REPO_ROOT / "docs").glob("*.md")))
+        targets.extend(sorted((REPO_ROOT / "docs").rglob("*.md")))
     for smd in sorted(SKILLS_DIR.glob("*/SKILL.md")):
         targets.append(smd)
     if iscv_docs.is_dir():
@@ -967,7 +967,7 @@ def generate_markdown_report(results: Dict[str, Any]) -> str:
     cb = e4["category_breakdown"]
 
     lines = [
-        "# XBoost (`v3.5.0`) — Empirical Benchmark & Token Economics Report",
+        "# XBoost (`v3.6.0`) — Empirical Benchmark & Token Economics Report",
         "",
         "> **Reproducible Verification Harness**: Generated deterministically by "
         "[`benchmarks/run_xboost_benchmark.py`](./run_xboost_benchmark.py)  ",
@@ -975,14 +975,14 @@ def generate_markdown_report(results: Dict[str, Any]) -> str:
         f"`{e2['repo_md_files_available']}` Repository Markdown Specs • "
         f"`{e2['vault_md_files_available']}` Obsidian Second Brain Nodes • "
         f"`{e6['total_sessions_analyzed']}` Real IDE Sessions (`{e6['total_turns_analyzed']}` Prompt Turns) • "
-        "`22` Upstream Open-Source Contributions (`5 MERGED`)  ",
+        "`24` Upstream Open-Source PRs + `1` Hold (`10 MERGED`)  ",
         f"> **Statistical Rigor**: Timing benchmarks execute `{e2['warmup']}` warm-up passes followed by "
         f"`N = {e2['trials']}` timed iterations (`time.perf_counter_ns()`), reporting **Median (`P50`)**, "
         "**Mean ± StdDev**, **IQR (`P25–P75`)**, and **`P95`**.",
         "",
         "---",
         "",
-        "## ⚡ TL;DR - Empirical Scorecard at a Glance (`v3.5.0`)",
+        "## ⚡ TL;DR - Empirical Scorecard at a Glance (`v3.6.0`)",
         "",
         "| Evaluation Dimension | Workflow / Cohort Configuration | "
         "Visual Comparison Bar | Measured Result & Delta vs. Baseline |",
@@ -1026,7 +1026,7 @@ def generate_markdown_report(results: Dict[str, Any]) -> str:
         f"`{e3['full_corpus_tokens']:,}` tok (Full {e3['files_chunked']}-File Read) |",
         f"| **4. Dual-Trigger Budget Guard ↑**<br>"
         f"*(`Use when` + `Do NOT use` across `N={all1['count']}`)* | "
-        f"**XBoost `v3.5.0` Suite (`N = {bx1['count']}`)**<br>"
+        f"**XBoost `v3.6.0` Suite (`N = {bx1['count']}`)**<br>"
         f"All Installed Host Skills (`N = {all1['count']}`)<br>"
         f"Official Cloud/Vendor Skills (`N = {ent1['count']}`) | "
         f"`████████████████████` **`{bx1['dual_trigger_guard_pct']}% ({bx1['count']}/{bx1['count']})`**<br>"
@@ -1054,12 +1054,12 @@ def generate_markdown_report(results: Dict[str, Any]) -> str:
         f"`{t_no['total_processed_tokens']['mean'] / 1e6:.2f}M` tok/turn "
         f"(`{t_no['uncached_new_input_tokens']['mean'] / 1e3:.1f}k` new in, "
         f"`{t_no['output_tokens']['mean'] / 1e3:.1f}k` out) |",
-        "| **6. Compound Learning OSS Speedups ↑**<br>*(`22` Upstream Contributions, `Batch 0 + A + B + C`)* | "
-        "**`/xlearn` 3-Tier Playbooks (`PAT-*` + `GOV-*` + `FALS-*`)**<br>"
+        "| **6. Compound Learning OSS Speedups ↑**<br>*(`24` PRs + `1` Hold, `Batch 0 + A + B + C`)* | "
+        "**`/xlearn` 4-Tier Sharded Playbooks (`PAT-*/OPT-*` + `GOV-*` + `FALS-*`)**<br>"
         "Unvectorized Upstream Baseline (`HEAD`) | "
         "`████████████████████` **`4.0× – 1,735.6× Faster`**<br>"
         "`░░░░░░░░░░░░░░░░░░░░` `1.0× Baseline` | "
-        "**`100%` `assert_allclose` Parity (`5 MERGED`, `9 OPEN PRs`)** ✨<br>"
+        "**`100%` `assert_allclose` Parity (`10 MERGED`, `9 OPEN PRs`)** ✨<br>"
         "Python `np.vectorize`, `O(N²)` scans & OGR disk-seek loops |",
         "",
         "---",
@@ -1104,12 +1104,14 @@ def generate_markdown_report(results: Dict[str, Any]) -> str:
         f"**`{t_m['kv_cache_read_tokens']['mean']:,.0f}` KV-cache read tokens** per turn "
         f"(`~{s_m['total_processed_tokens']['mean'] / 1e6:.2f}M` total tokens across a full "
         f"`{s_m['steps']['mean']:.0f}`-step marathon session).",
-        "6. **3-Tier Compound Learning Playbooks (`4.0×` – `1,735.6×` Real-World Upstream Speedups)**: "
+        "6. **4-Tier Sharded Compound Learning Playbooks (`4.0×` – `1,735.6×` Real-World Upstream Speedups)**: "
         "By distilling verified bug and bottleneck signatures via [`/xlearn`](../skills/xlearn/SKILL.md) into "
-        "[`docs/COMPOUND_LEARNING_PLAYBOOK.md`](../docs/COMPOUND_LEARNING_PLAYBOOK.md) (`19 PAT-*`, `7 GOV-*`, "
-        "`11 FALS-*` + 3 specialized domain playbooks), XBoost achieved **`4.0×` to `1,735.6×` measured "
-        "wall-clock speedups** with **`100%` numerical equivalence** across **22 upstream open-source "
-        "contributions** (`5 MERGED`, `9 OPEN PRs`, `4 OPEN Issues`, `4 Staged`).",
+        "[`docs/COMPOUND_LEARNING_PLAYBOOK.md`](../docs/COMPOUND_LEARNING_PLAYBOOK.md) "
+        "(`L1` Router Hub → `docs/playbooks/PLAYBOOK_1A..1D_*.md` `L2` Shards: "
+        "`24 PAT-*/OPT-*` across `21` families incl. `OPT-MOO-01`, `7 GOV-*`, "
+        "`13 FALS-01..13` + Tier 2/3 domain playbooks), XBoost achieved **`4.0×` to `1,735.6×` measured "
+        "wall-clock speedups** with **`100%` numerical equivalence** across **24 upstream open-source "
+        "PRs + 1 Hold** (`10 MERGED`, `9 OPEN PRs`, `1 Hold`, `5 Closed/Staged`).",
         "",
         "---",
         "",
@@ -1120,7 +1122,7 @@ def generate_markdown_report(results: Dict[str, Any]) -> str:
         "Dual Trigger Guard (`Use when` + `Do NOT use`) | Full `SKILL.md` Tokens (`Mean ± SD` / `Median`) | "
         "Bundled CLI Scripts (`LOC`) |",
         "|:---|:---:|:---:|:---:|:---:|:---:|:---:|",
-        f"| **XBoost `v3.5.0` Suite (`/x*` Skills)** | `{bx1['count']}` | "
+        f"| **XBoost `v3.6.0` Suite (`/x*` Skills)** | `{bx1['count']}` | "
         f"**`{bx1['desc_chars']['mean']} ± {bx1['desc_chars']['std']}`** (`{bx1['desc_chars']['median']}`) | "
         f"**`{bx1['budget_500_compliance_pct']}%`** | **`{bx1['dual_trigger_guard_pct']}%`** | "
         f"`{bx1['body_tokens']['mean']:,.0f} ± {bx1['body_tokens']['std']:,.0f}` "
@@ -1343,43 +1345,42 @@ def generate_markdown_report(results: Dict[str, Any]) -> str:
         "",
         "---",
         "",
-        "## Experiment 7: 3-Tier Compound Learning Playbooks & "
-        "Real-World Upstream Open-Source Speedup Receipts (`22` Contributions)",
+        "## Experiment 7: 4-Tier Sharded Compound Learning Playbooks & "
+        "Real-World Upstream Open-Source Speedup Receipts (`24 PRs + 1 Hold`)",
         "",
         "To evaluate how [`/xlearn`](../skills/xlearn/SKILL.md) and "
         "[`docs/COMPOUND_LEARNING_PLAYBOOK.md`](../docs/COMPOUND_LEARNING_PLAYBOOK.md) "
-        "(`19 PAT-*` Defect & Bottleneck Archetypes across `16` families, "
-        "`7 GOV-*` Governance Fingerprints, and `11 FALS-*` Mirage Guardrails) "
+        "(`L1` Router Hub → `docs/playbooks/PLAYBOOK_1A..1D_*.md` `L2` Shards: "
+        "`24 PAT-*/OPT-*` across `21` families incl. `OPT-MOO-01`, `7 GOV-*`, and `13 FALS-01..13`) "
         "compound engineering effectiveness across external codebases, we executed XBoost "
         "(`Stage 1 /xbrief + /xdeep-research → Stage 3 /xboost + /xultra → "
         "Stage 4 /xlearn + /xpublish --platform pr + /xsync --federated`) across "
-        "**22 upstream open-source contributions** (`5 MERGED`, `9 OPEN PRs`, `4 OPEN Issues`, `4 Staged`):",
+        "**24 upstream open-source PRs + 1 Hold** (`10 MERGED`, `9 OPEN PRs`, `1 Hold`, `5 Closed/Staged`):",
         "",
         "| Cohort & Upstream Target | Playbook Patterns & Governance | "
         "Baseline Bottleneck / Defect (`HEAD`) | XBoost Patch & Numerical Verification | "
         "Measured Wall-Clock Speedup / Receipt |",
         "|:---|:---|:---|:---|:---|",
         "| **`Group B` — [`ladybug-tools/uwg #292`](https://github.com/ladybug-tools/uwg/pull/292)** "
-        "*(MIT, `MERGED`)* | `PAT-VEC-03`, `PAT-CACHE-01`, `GOV-02` | "
+        "*(MIT, `OPEN`)* | `PAT-VEC-03`, `PAT-CACHE-01`, `GOV-02` | "
         "`sum(soil_temp)` inside `105,120`-step loop (`8.85 s`); hardcoded `[0]` climate zone (`#291`); "
         "`windProf` step-buffer leak | Hoisted precomputed `forcIP.deepTemp` (`5.10 ms`); "
         "indexed `[zone_idx]`; reset `windProf`; preserved upstream `CRLF` (`38`-line diff) | "
-        "**`1,735.6×` speedup** (`68/68` `pytest` PASS, **`MERGED`**) |",
+        "**`1,735.6×` speedup** (`68/68` `pytest` PASS, **`OPEN`**) |",
         "| **`Group B` — [`os-climate/physrisk #651`](https://github.com/os-climate/physrisk/pull/651)** "
-        "*(FINOS / Linux Foundation, `Staged`)* | `PAT-VEC-01..02`, `PAT-NUM-01`, `GOV-01` | "
+        "*(FINOS / Linux Foundation, `OPEN`)* | `PAT-VEC-01..02`, `PAT-NUM-01`, `GOV-01` | "
         "`O(N²)` list scan in `geocode_in_place` (`541.3 ms`); `np.vectorize` in "
         "`get_impact_distrib` (`7.15 s`); caller array mutation & `left = -1` wrap | "
         "Direct key iteration (`0.32 ms`); broadcasted `scipy.stats.norm.cdf` (`0.22 s`); "
         "non-mutating `np.minimum`; clamped `np.maximum(0, right - 1)` | "
-        "**`1,669.6×` & `32.5×` speedups** (`11/11` `pytest` PASS, unbundled staged) |",
+        "**`1,669.6×` & `32.5×` speedups** (`11/11` `pytest` PASS, **`OPEN`**) |",
         "| **`Group A` — [`Weecology/DeepForest #1449`](https://github.com/Weecology/DeepForest/pull/1449) & "
-        "[`#1440`](https://github.com/Weecology/DeepForest/issues/1440)** | "
+        "[`#1464`](https://github.com/Weecology/DeepForest/pull/1464)** *(`#1449 MERGED`)* | "
         "`PAT-VEC-01`, `PAT-GIS-01`, `GOV-07` | Row-wise `.iterrows()` + `shapely.geometry.box` loops in "
         "`utilities.py`, `IoU.py`, `evaluate.py`; `PathLike` rejection (`#1440`) | "
         "Vectorized `shapely.box` & `STRtree` (`421.3×` `convert_to_sv_format`, "
-        "`173.9×` `IoU.match_points`, `74.4×` `utilities.py`); `os.fspath()` | "
-        "**`74.4× – 421.3×` speedups** (`CI 3.12 PASS`, closes "
-        "[`#1447`](https://github.com/Weecology/DeepForest/issues/1447)) |",
+        "`173.9×` `IoU.match_points`, `74.4×` `utilities.py`); `os.fspath()` (`#1464` `OPEN`) | "
+        "**`74.4× – 421.3×` speedups** (`#1449` **`MERGED`** `a60b890` + `#1464` `OPEN`) |",
         "| **`Group B` — [`CLIMADA-project/climada_python #1349`]"
         "(https://github.com/CLIMADA-project/climada_python/pull/1349) & "
         "[`#1350`](https://github.com/CLIMADA-project/climada_python/pull/1350)** *(ETH Zürich)* | "
@@ -1387,55 +1388,56 @@ def generate_markdown_report(results: Dict[str, Any]) -> str:
         "CSR column-slice loop in `impact_at_reg`; `.nonzero()` explicit-zero drop; ISO/NaN bugs (`#1331`) | "
         "C-vectorized `shapely.box` (`69.9×` isolated `apply_box`, `2.1×` E2E); "
         "`imp_mat @ reg_ind` CSR matmul (`11.7×` E2E); ISO & `isnan` guards | "
-        "**`69.9×` & `11.7×` speedups** (`17/17` tests PASS, `base: develop`) |",
+        "**`69.9×` & `11.7×` speedups** (`#1350` **`MERGED`** `a1f1440`, `#1349` **`OPEN`**) |",
         "| **`Group A` — [`gboeing/osmnx #1412`](https://github.com/gboeing/osmnx/pull/1412), "
         "[`#1410`](https://github.com/gboeing/osmnx/issues/1410) & "
-        "[`#1405`](https://github.com/gboeing/osmnx/issues/1405)** | "
-        "`PAT-GRAPH-01..02`, `PAT-NUM-01`, `GOV-07` | Zero-length self-loop `ZeroDivisionError` in "
+        "[`#1405`](https://github.com/gboeing/osmnx/issues/1405)** *(`MERGED`)* | "
+        "`PAT-CONC-01`, `PAT-NUM-01`, `GOV-07` | Zero-length self-loop `ZeroDivisionError` in "
         "`stats.circuity_avg` (`#1410`); `pytest-xdist` collision (`#1405`) | "
         "Guarded `edge_length_total == 0` returning `np.float64(0.0)` (`PR #1412` invited by `@gboeing`); "
-        "`40.2×` vectorization; `xdist_group` marker | **`40.2×` speedup** • **`PR #1412` LIVE** (`100%` CI PASS) |",
+        "`40.2×` vectorization; `xdist_group` marker | **`40.2×` speedup** • **`PR #1412 MERGED`** |",
         "| **`Group B` — [`Deltares/hydromt #1566`](https://github.com/Deltares/hydromt/pull/1566)** "
-        "*(Deltares Netherlands)* | `PAT-VEC-01`, `PAT-GIS-01`, `GOV-03` | "
+        "*(Deltares Netherlands, `OPEN`)* | `PAT-VEC-01`, `PAT-GIS-01`, `GOV-03` | "
         "Scalar `box()` loop in `create_mesh2d_from_geom` (`897 ms`); dropped `crs` on projected `bbox` "
         "(`#1563`); `nodata_ref = None` before warning log | C-vectorized `shapely.box` (`32.6 ms`); "
         "passed `crs=self.metadata.crs` & reprojected `geom`; logged `nodata_ref` before reset | "
-        "**`27.5×` speedup** (`114/114` `pytest` PASS, `docs/changelog.rst`) |",
-        "| **`Group B` — [`natcap/invest #2813`](https://github.com/natcap/invest/issues/2813) & "
-        "[`#2829`](https://github.com/natcap/invest/pull/2829)** *(Stanford NatCap)* | "
+        "**`27.5×` speedup** (`114/114` `pytest` PASS, **`OPEN`**) |",
+        "| **`Group B` — [`natcap/invest #2813`](https://github.com/natcap/invest/issues/2813), "
+        "[`#2829`](https://github.com/natcap/invest/issues/2829) & "
+        "[`#2839`](https://github.com/natcap/invest/pull/2839)** *(Stanford NatCap)* | "
         "`PAT-VEC-03`, `PAT-GIS-01`, `GOV-05` | Repeated OGR `GetFeature(fid)` + `wkb.loads` inside "
         "AOI R-tree loops (`420.2 ms` UCM, `421.6 ms` UFRM); `&` vs `|` nodata mask | "
         "Pass-1 FID geometry cache (`23.1×` UCM `+0.51 MB` RAM) & Inverted AOI R-tree "
         "(`18.1×` `O(N)` / `2.0×` `O(M)` `0.18 MB` RAM UFRM); De Morgan `|` mask | "
-        "**`23.1×` UCM & `18.1×` UFRM speedups** (`100%` parity, on hold) |",
+        "**`23.1×` UCM & `O(M)` UFRM** (`#2829 Hold`, `#2839 Closed`) |",
         "| **`Group A` — [`martibosch/pylandstats #77`](https://github.com/martibosch/pylandstats/pull/77)** "
-        "*(`MERGED`)* | `PAT-VEC-02`, `PAT-GIS-01` | Per-label `scipy.ndimage.center_of_mass` scan "
+        "*(`OPEN`)* | `PAT-VEC-02`, `PAT-GIS-01` | Per-label `scipy.ndimage.center_of_mass` scan "
         "(`79.85 ms` on `66,496` patches); string `edge_depths` support (`#69`) | "
         "Single-pass vectorized `np.bincount(labels.ravel(), weights=...)` (`19.76 ms`) + "
-        "`landscapemetrics`-style string `edge_depths` | **`4.0×` speedup** (`9/9` `pytest` PASS, **`MERGED`**) |",
+        "`landscapemetrics`-style string `edge_depths` | **`4.0×` speedup** (`9/9` `pytest` PASS, **`OPEN`**) |",
         "| **`Group A & C` — [`opengeos/geoai #960`](https://github.com/opengeos/geoai/pull/960) (`MERGED`), "
-        "[`segment-geospatial #569`](https://github.com/opengeos/segment-geospatial/pull/569) & "
-        "[`mufeedvh/code2prompt #348`](https://github.com/mufeedvh/code2prompt/pull/348)** | "
+        "[`segment-geospatial #569`](https://github.com/opengeos/segment-geospatial/pull/569), "
+        "[`code2prompt #348`](https://github.com/mufeedvh/code2prompt/pull/348) & `UMEP` (`3` Staged)** | "
         "`PAT-PARITY-01`, `PAT-CV-01`, `GOV-06` | Host `PYTHONEXECUTABLE` venv bleed (`#951`); "
-        "missing `SamGeo` vector attributes (`#543`); Rust glob/token traversal in `code2prompt` | "
-        "Sanitized `PYTHON*` env vars (`geoai#960` **`MERGED`** as `0b13f11`); `SamGeo` vector attributes "
-        "(`10/10` CI); `code2prompt#348` (`9/9` `cargo test` PASS) | "
-        "**`geoai#960 MERGED`** • **`segment-geospatial#569` & `code2prompt#348` LIVE** |",
+        "missing `SamGeo` vector attrs (`#543`); Rust glob/token tree; `UMEP` `173.0×` UTCI / `799.8×` `load_walls` | "
+        "Sanitized `PYTHON*` env vars (`geoai#960` **`MERGED`** `0b13f11`); `SamGeo` (`10/10`); "
+        "`code2prompt#348` (`9/9` `OPEN`); `UMEP#885`/`#149`/`#6` split-staged | "
+        "**`geoai#960 MERGED`** • **`#569`/`#348` `OPEN`** • **`3` Staged** |",
         "| **`Batch 0` — [`xerj-org/xerj #2922–#2927`]"
         "(https://github.com/xerj-org/xerj/pulls?q=is%3Apr+author%3Anapattan) & "
-        "[`scb-10x/typhoon-ocr #15`](https://github.com/scb-10x/typhoon-ocr/pull/15)** *(`MERGED`)* | "
+        "[`scb-10x/typhoon-ocr #16`](https://github.com/scb-10x/typhoon-ocr/pull/16)** | "
         "`PAT-OCR-01`, `PAT-PARITY-01` | Sub-max image upscale (`5.11×` token bloat); legacy Thai PDF PUA "
         "junking (`exit 3`); Windows MSVC `#[cfg(unix)]` & spool lock test failures | "
-        "Downscale-only `resize_if_needed`; Rust/Python Thai PUA + Sara-Am normalizer "
-        "(`#2925` **`MERGED`**); `typhoon-ocr#15` (**`MERGED`**); Windows MSVC fixes | "
-        "**`-35.9%` vision tokens** • **`1,912/1,954` MSVC tests** • **`2 MERGED`** |",
+        "Downscale-only `resize_if_needed` (`#16 OPEN`, `#15 Closed`); Thai PUA + Sara-Am (`#2925 MERGED`); "
+        "`#2922..#2927` **`6/6 MERGED`** | "
+        "**`6 MERGED` + `1 OPEN PR`** (`-35.9%` vision tokens, `1,912/1,954` MSVC tests) |",
         "",
     ])
     return "\n".join(lines)
 
 
 def main() -> int:
-    print("🚀 Running XBoost v3.5.0 Reproducible 7-Experiment Benchmark Suite...")
+    print("🚀 Running XBoost v3.6.0 Reproducible 7-Experiment Benchmark Suite...")
     t_start = time.perf_counter()
 
     exp1 = run_exp1_skill_discovery_audit()
@@ -1483,7 +1485,7 @@ def main() -> int:
 
     elapsed = round(time.perf_counter() - t_start, 2)
     results = {
-        "benchmark_version": "3.5.0",
+        "benchmark_version": "3.6.0",
         "elapsed_wall_seconds": elapsed,
         "exp1_skill_discovery": exp1,
         "exp2_context_compression": exp2,
@@ -1495,8 +1497,8 @@ def main() -> int:
 
     json_path = SCRIPT_DIR / "BENCHMARK_RESULTS.json"
     md_path = SCRIPT_DIR / "BENCHMARK_REPORT.md"
-    json_path.write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    md_path.write_text(generate_markdown_report(results), encoding="utf-8")
+    json_path.write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n")
+    md_path.write_text(generate_markdown_report(results), encoding="utf-8", newline="\n")
 
     print(f"✨ Benchmark complete in {elapsed}s!")
     print(f"   • JSON Receipt : {json_path}")

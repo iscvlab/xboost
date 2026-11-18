@@ -1772,7 +1772,10 @@ def _extract_vector_primitives(drawings):
                     cur["verts"].append(p1)
                     cur["end"] = p1
                     cur["n_l"] += 1
-                    if math.hypot(p1[0] - cur["start"][0], p1[1] - cur["start"][1]) <= 1.5 and (cur["n_l"] + cur["n_c"]) >= 3:
+                    if (
+                        math.hypot(p1[0] - cur["start"][0], p1[1] - cur["start"][1]) <= 1.5
+                        and (cur["n_l"] + cur["n_c"]) >= 3
+                    ):
                         _flush_sub(cur)
                         cur = None
             elif op == "c" and len(item) >= 5:
@@ -1789,7 +1792,10 @@ def _extract_vector_primitives(drawings):
                     cur["pts"].extend([p1, p2, p3])
                     cur["end"] = p3
                     cur["n_c"] += 1
-                    if math.hypot(p3[0] - cur["start"][0], p3[1] - cur["start"][1]) <= 1.5 and (cur["n_l"] + cur["n_c"]) >= 2:
+                    if (
+                        math.hypot(p3[0] - cur["start"][0], p3[1] - cur["start"][1]) <= 1.5
+                        and (cur["n_l"] + cur["n_c"]) >= 2
+                    ):
                         _flush_sub(cur)
                         cur = None
             elif op == "re" and len(item) >= 2:
@@ -2516,7 +2522,9 @@ def extract_sheet_callouts(
         attached_rev = None
         for rd in revision_deltas:
             rb = rd.get("pt_bbox") or []
-            if len(rb) == 4 and not (rb[2] < cx0 - 36.0 or rb[0] > cx1 + 36.0 or rb[3] < cy0 - 36.0 or rb[1] > cy1 + 36.0):
+            if len(rb) == 4 and not (
+                rb[2] < cx0 - 36.0 or rb[0] > cx1 + 36.0 or rb[3] < cy0 - 36.0 or rb[1] > cy1 + 36.0
+            ):
                 attached_rev = rd.get("rev_id")
                 break
         revision_deltas.append(
@@ -5917,6 +5925,7 @@ def diff_pdf_drawings(
     try:
         doc_old = fitz.open(str(old_pdf)) if owns_old else old_pdf
         doc_new = fitz.open(str(new_pdf)) if owns_new else new_pdf
+
         def _sel_indices(total_p):
             if pages is None:
                 return list(range(total_p))
@@ -7162,8 +7171,16 @@ def run_self_test(profile="nano", genomes_file=None):
         assert resolve_grid_ref([0.95, 0.30], demo_axes) is None
         cg = build_callout_graph(
             [
-                {"page": 1, "primary_sheet_id": "A-101", "callouts": [{"target_sheet": "S-501", "detail_no": "3", "kind": "detail"}]},
-                {"page": 2, "primary_sheet_id": "S-501", "callouts": [{"target_sheet": "M-999", "detail_no": None, "kind": "reference"}]},
+                {
+                    "page": 1,
+                    "primary_sheet_id": "A-101",
+                    "callouts": [{"target_sheet": "S-501", "detail_no": "3", "kind": "detail"}],
+                },
+                {
+                    "page": 2,
+                    "primary_sheet_id": "S-501",
+                    "callouts": [{"target_sheet": "M-999", "detail_no": None, "kind": "reference"}],
+                },
             ]
         )
         assert cg["sheets"]["S-501"] == 2

@@ -466,7 +466,8 @@ def audit_pr_diff_invariants(
     3. Resolve diff (`base_ref`, working tree changes, or `HEAD~1..HEAD`) and inspect added lines (`+`) only.
     4. Block accidental CRLF line-ending injection or `100644 -> 100755` executable mode flips.
     5. Run diff-scoped Secret, Machine-Path, Python AST Security, and Flake8 checks on touched lines/files.
-    6. Discover upstream PR templates (`.github/pull_request_template.md`, etc.) & verify `--pr-body` parity (`BG-1..BG-3`).
+    6. Discover upstream PR templates (`.github/pull_request_template.md`, etc.)
+       and verify `--pr-body` parity (`BG-1..BG-3`).
     """
     git_dir = target / ".git"
     if not git_dir.exists():

@@ -26,7 +26,7 @@ $LegacyDirs = @(
 )
 
 Write-Host "============================================================" -ForegroundColor Cyan
-Write-Host "  * XBoost Agent Skills (v3.5.0) - Windows Installer" -ForegroundColor Cyan
+Write-Host "  * XBoost Agent Skills (v3.6.0) - Windows Installer" -ForegroundColor Cyan
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "Source: $SkillsSrc"
 
@@ -178,5 +178,5 @@ if (-not [string]::IsNullOrEmpty($Workspace) -and (Test-Path $Workspace)) {
 }
 
 Write-Host "`n============================================================" -ForegroundColor Cyan
-Write-Host "  [OK] XBoost v3.5.0 Installation Complete! All 15 /x* skills ready." -ForegroundColor Green
+Write-Host "  [OK] XBoost v3.6.0 Installation Complete! All 15 /x* skills ready." -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Cyan
