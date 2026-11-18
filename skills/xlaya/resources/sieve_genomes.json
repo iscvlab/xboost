@@ -1,5 +1,5 @@
 {
-  "schema_version": "2.3.0",
+  "schema_version": "2.4.0",
   "license": "Apache-2.0",
   "feature_names": [
     "bm25",
@@ -15,14 +15,17 @@
   "evolution_meta": {
     "device": "cuda",
     "gpu_name": "NVIDIA GeForce RTX 5060 Ti",
-    "training_regime": "repo_disjoint_base_commit_swe_lite_dev_plus_loc_bench_v1",
+    "optimizer": "wallacei_v27_nsga2",
+    "training_regime": "repo_disjoint_swe_lite_dev_plus_loc_bench_oof_v2",
     "zero_leakage_verified": true,
+    "val_blind_during_evolution": true,
     "train_tasks": 81,
     "val_tasks": 44,
+    "k_folds": 4,
     "total_generations": 5000,
     "population_size": 256,
     "total_genome_evaluations": 1280000,
-    "evolution_wall_sec": 74.8671,
+    "evolution_wall_sec": 931.2096,
     "seed": 42
   },
   "e4b_sniper_p1": {
@@ -46,12 +49,12 @@
       -0.151443,
       0.074983
     ],
-    "top_k": 3,
-    "token_budget": 800,
     "lambda_file_div": 0.35,
     "platt_T": 1.67,
     "platt_b": -0.795,
-    "conformal_q_hat": 0.5885
+    "conformal_q_hat": 0.5885,
+    "token_budget": 800,
+    "top_k": 3
   },
   "e4b_sniper_distilled": {
     "w_core": [
@@ -74,14 +77,14 @@
       -0.151591,
       0.053592
     ],
-    "top_k": 3,
-    "token_budget": 800,
     "lambda_file_div": 0.35,
     "platt_T": 1.67,
     "platt_b": -0.795,
-    "conformal_q_hat": 0.5885
+    "conformal_q_hat": 0.5885,
+    "token_budget": 800,
+    "top_k": 3
   },
-  "31b_deep": {
+  "min_ece_calibrated": {
     "w_core": [
       0.167068,
       0.296999,
@@ -93,22 +96,50 @@
       0.053592
     ],
     "w_halo": [
-      0.098415,
-      0.159503,
-      0.185096,
-      0.128404,
-      0.01622,
-      0.18358,
-      -0.178304,
-      0.050476
+      0.167068,
+      0.296999,
+      0.045851,
+      0.155435,
+      0.067317,
+      0.062147,
+      -0.151591,
+      0.053592
+    ],
+    "lambda_file_div": 0.35,
+    "platt_T": 1.67,
+    "platt_b": -0.795,
+    "conformal_q_hat": 0.5885,
+    "token_budget": 800,
+    "top_k": 3
+  },
+  "31b_deep": {
+    "w_core": [
+      0.276217,
+      0.254738,
+      0.057094,
+      0.155592,
+      0.015,
+      0.05,
+      -0.146359,
+      0.045
+    ],
+    "w_halo": [
+      0.417774,
+      0.021081,
+      0.032115,
+      0.118253,
+      0.022067,
+      0.069081,
+      -0.191083,
+      0.128546
     ],
     "anchor_slots": 3,
     "top_k": 8,
     "token_budget": 4096,
-    "lambda_file_div": 0.16,
-    "platt_T": 1.67,
-    "platt_b": -0.795,
-    "conformal_q_hat": 0.5885
+    "lambda_file_div": 0.14,
+    "platt_T": 1.2,
+    "platt_b": -0.5435,
+    "conformal_q_hat": 0.575
   },
   "tool_gate": {
     "schema": "factorized_2stage_v23",

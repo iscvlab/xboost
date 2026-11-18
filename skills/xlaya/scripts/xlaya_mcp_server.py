@@ -7,16 +7,16 @@ with strict MCP Wire Purity (`sys.stdout` redirected to `sys.stderr`, JSON-RPC f
 exclusively to `_JSONRPC_OUT`) and thread-safe idle VRAM auto-unload lifecycle management.
 """
 
+import ast
 import contextlib
+import importlib
 import json
 import os
 import sys
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-__version__ = "2.3.0"
-
-sys.dont_write_bytecode = True
+__version__ = "2.4.0"
 
 # Enforce HuggingFace / Transformers Wire Purity before any backend import.
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
@@ -32,17 +32,76 @@ if _SCRIPTS_DIR not in sys.path:
 _JSONRPC_OUT = sys.stdout
 _SERVER_LOCK = threading.RLock()
 _IDLE_TIMER: Optional[threading.Timer] = None
+_IDLE_GENERATION: int = 0
+_BACKEND_STAT: Optional[Tuple[int, int]] = None
 _DEFAULT_IDLE_TTL_SEC = 1800
 _DEFAULT_PATTERN = "*.md,*.html,*.txt,*.json,*.jsonl,*.csv"
 
 
-def _get_backend() -> Any:
-    """Lazily import `laya_triage` from the co-located `scripts/` directory."""
-    if _SCRIPTS_DIR not in sys.path:
-        sys.path.insert(0, _SCRIPTS_DIR)
-    import laya_triage
+def _stat_backend_file(backend_path: str) -> Optional[Tuple[int, int]]:
+    try:
+        st = os.stat(backend_path)
+        return (int(st.st_mtime_ns), int(st.st_size))
+    except OSError:
+        return None
 
-    return laya_triage
+
+def _get_backend() -> Any:
+    """Lazily import or safely AST-preflight hot-reload `laya_triage` on `(mtime_ns, size)` change."""
+    global _BACKEND_STAT
+    with _SERVER_LOCK:
+        target_dir = os.path.abspath(_SCRIPTS_DIR)
+        backend_path = os.path.join(target_dir, "laya_triage.py")
+        cur_stat = _stat_backend_file(backend_path)
+        existing = sys.modules.get("laya_triage")
+
+        if existing is not None:
+            ex_file = os.path.abspath(getattr(existing, "__file__", "") or "")
+            same_dir = bool(ex_file) and (
+                os.path.normcase(os.path.dirname(ex_file)) == os.path.normcase(target_dir)
+            )
+            if same_dir and (_BACKEND_STAT is None or cur_stat is None or cur_stat == _BACKEND_STAT):
+                if _BACKEND_STAT is None and cur_stat is not None:
+                    _BACKEND_STAT = cur_stat
+                return existing
+
+            try:
+                with open(backend_path, "r", encoding="utf-8") as fh:
+                    src = fh.read()
+                ast.parse(src, filename=backend_path)
+            except (OSError, SyntaxError, ValueError) as exc:
+                sys.stderr.write(f"[xlaya-mcp] reload skipped (AST/read check failed): {exc}\n")
+                sys.stderr.flush()
+                return existing
+
+            _cancel_idle_timer()
+            unload_fn = getattr(existing, "unload_models", None)
+            if callable(unload_fn):
+                try:
+                    with contextlib.redirect_stdout(sys.stderr):
+                        unload_fn()
+                except Exception as exc:
+                    sys.stderr.write(f"[xlaya-mcp] pre-reload unload warning: {exc}\n")
+                    sys.stderr.flush()
+
+            importlib.invalidate_caches()
+            if same_dir:
+                mod = importlib.reload(existing)
+            else:
+                if not sys.path or os.path.normcase(os.path.abspath(sys.path[0])) != os.path.normcase(target_dir):
+                    sys.path.insert(0, target_dir)
+                sys.modules.pop("laya_triage", None)
+                import laya_triage as mod  # type: ignore
+
+            _BACKEND_STAT = cur_stat
+            return mod
+
+        if not sys.path or os.path.normcase(os.path.abspath(sys.path[0])) != os.path.normcase(target_dir):
+            sys.path.insert(0, target_dir)
+        import laya_triage  # type: ignore
+
+        _BACKEND_STAT = cur_stat
+        return laya_triage
 
 
 def _get_idle_ttl_sec() -> int:
@@ -57,17 +116,20 @@ def _get_idle_ttl_sec() -> int:
 
 def _cancel_idle_timer() -> None:
     """Cancel any pending idle VRAM auto-unload timer under `_SERVER_LOCK`."""
-    global _IDLE_TIMER
+    global _IDLE_TIMER, _IDLE_GENERATION
     with _SERVER_LOCK:
+        _IDLE_GENERATION += 1
         if _IDLE_TIMER is not None:
             _IDLE_TIMER.cancel()
             _IDLE_TIMER = None
 
 
-def _on_idle_timeout() -> None:
+def _on_idle_timeout(expected_gen: Optional[int] = None) -> None:
     """Daemon timer callback: unload warm Laya/VegaML models after idle TTL expires."""
     global _IDLE_TIMER
     with _SERVER_LOCK:
+        if expected_gen is not None and expected_gen != _IDLE_GENERATION:
+            return
         _IDLE_TIMER = None
         backend = sys.modules.get("laya_triage")
         if backend is None or not hasattr(backend, "unload_models"):
@@ -82,14 +144,16 @@ def _on_idle_timeout() -> None:
 
 def _reset_idle_timer() -> None:
     """Arm or replace the replaceable daemon idle VRAM auto-unload timer if enabled."""
-    global _IDLE_TIMER
+    global _IDLE_TIMER, _IDLE_GENERATION
     with _SERVER_LOCK:
+        _IDLE_GENERATION += 1
         if _IDLE_TIMER is not None:
             _IDLE_TIMER.cancel()
             _IDLE_TIMER = None
         ttl_sec = _get_idle_ttl_sec()
         if ttl_sec > 0:
-            timer = threading.Timer(float(ttl_sec), _on_idle_timeout)
+            gen_token = _IDLE_GENERATION
+            timer = threading.Timer(float(ttl_sec), _on_idle_timeout, args=(gen_token,))
             timer.daemon = True
             timer.name = "xlaya-idle-unload-watchdog"
             _IDLE_TIMER = timer
@@ -270,7 +334,10 @@ MCP_TOOLS: List[Dict[str, Any]] = [
                 "pattern": {
                     "type": "string",
                     "default": _DEFAULT_PATTERN,
-                    "description": "Comma-separated glob patterns when scanning directories.",
+                    "description": (
+                        "Comma-separated glob patterns or preset alias (`web`, `code`, `default`) "
+                        "when scanning directories."
+                    ),
                 },
                 "lexical_prefilter": {
                     "type": "integer",
@@ -328,6 +395,16 @@ MCP_TOOLS: List[Dict[str, Any]] = [
                         "(`heads.npz`, `calibration.json`, `manifest.json`, `questions.json`)."
                     ),
                 },
+                "graph_path": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional NetworkX `node_link_data` call-graph JSON path for `shortlist`.",
+                },
+                "embeddings_path": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional symbol-keyed `.npz` embeddings sidecar path for `shortlist`.",
+                },
             },
             "required": ["paths"],
         },
@@ -336,8 +413,8 @@ MCP_TOOLS: List[Dict[str, Any]] = [
         "name": "xlaya_predict",
         "description": (
             "Execute raw typed System 1 decisions (`choice`, `score`, `noul`) over a single `state`, "
-            "batch `states`, or local multimodal input (`image`, `audio`, `video`) using warm Laya "
-            "(`en`, `multi`, `typed`, `ensemble`), multi-view debiasing, `policy_path`, and VegaML escalation."
+            "batch `states`, local multimodal input (`image`, `audio`, `video`), OR zero-torch conformal "
+            "tool-call routing (`tools` + `query` -> `triage_tool_call`) using warm Laya/VegaML."
         ),
         "inputSchema": {
             "type": "object",
@@ -405,6 +482,30 @@ MCP_TOOLS: List[Dict[str, Any]] = [
                         "`edge` single CPU encoder, `workstation` 16 GB GPU, `max` 40 GB+ / L4x4)."
                     ),
                 },
+                "agent_tier": {
+                    "type": "string",
+                    "enum": ["auto", "e4b-sniper", "31b-deep"],
+                    "default": "auto",
+                    "description": "Target agent tier (`auto`, `e4b-sniper`, `31b-deep`).",
+                },
+                "tools": {
+                    "type": "array",
+                    "items": {},
+                    "description": (
+                        "Optional tool schema objects (`{name, description, parameters}`) for zero-torch "
+                        "conformal tool routing (`triage_tool_call`); mutually exclusive with `questions`."
+                    ),
+                },
+                "query": {
+                    "type": "string",
+                    "default": "",
+                    "description": "User prompt for conformal tool-call routing when `tools` is supplied.",
+                },
+                "sieve_weights": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional path to evolved `sieve_genomes.json` policy bundle.",
+                },
                 "policy_path": {
                     "type": "string",
                     "default": "",
@@ -423,7 +524,7 @@ MCP_TOOLS: List[Dict[str, Any]] = [
                     "description": "Optional local video file path for local speech/contact-sheet decision evaluation.",
                 },
             },
-            "required": ["questions"],
+            "required": [],
         },
     },
     {
@@ -549,7 +650,10 @@ def dispatch_mcp_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
 
         if name == "xlaya_status":
             payload = _normalize_dict_payload(
-                backend.get_status(profile=_arg_str(args, "profile", "auto"))
+                backend.get_status(
+                    profile=_arg_str(args, "profile", "auto"),
+                    agent_tier=_arg_str(args, "agent_tier", "auto"),
+                )
             )
             payload["mcp_version"] = __version__
             payload["idle_ttl_sec"] = _get_idle_ttl_sec()
@@ -566,6 +670,7 @@ def dispatch_mcp_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
             if not paths_list:
                 raise ValueError("Parameter 'paths' requires at least one file or directory path.")
 
+            default_pattern = getattr(backend, "DEFAULT_PATTERN", _DEFAULT_PATTERN)
             _cancel_idle_timer()
             try:
                 res = backend.run_triage(
@@ -585,7 +690,7 @@ def dispatch_mcp_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                     top_k=None if args.get("top_k") is None else _arg_int(args, "top_k", 10),
                     threshold=_arg_float(args, "threshold", 0.55),
                     batch_size=_arg_int(args, "batch_size", 32),
-                    pattern=_arg_str(args, "pattern", _DEFAULT_PATTERN),
+                    pattern=_arg_str(args, "pattern", default_pattern),
                     lexical_prefilter=_arg_int(args, "lexical_prefilter", 0),
                     vega=_arg_bool(args, "vega", False),
                     vega_model=_arg_str(args, "vega_model", "auto"),
@@ -594,6 +699,8 @@ def dispatch_mcp_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                     thorough=_arg_bool(args, "thorough", False),
                     rubric_preset=_arg_str(args, "rubric_preset", "default"),
                     policy_path=_arg_str(args, "policy_path", ""),
+                    graph_path=_arg_str(args, "graph_path", "") or None,
+                    embeddings_path=_arg_str(args, "embeddings_path", "") or None,
                     profile=_arg_str(args, "profile", "auto"),
                     agent_tier=_arg_str(args, "agent_tier", "auto"),
                     sieve_weights=_arg_str(args, "sieve_weights", ""),
@@ -603,9 +710,31 @@ def dispatch_mcp_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                 _reset_idle_timer()
 
         if name == "xlaya_predict":
+            raw_tools = args.get("tools")
+            if raw_tools is not None:
+                if args.get("questions") is not None:
+                    raise ValueError("Parameters 'tools' and 'questions' are mutually exclusive; supply only one.")
+                if not isinstance(raw_tools, list) or not raw_tools:
+                    raise ValueError("Parameter 'tools' must be a non-empty array when provided.")
+                q_text = _arg_str(args, "query", "")
+                if not q_text.strip() and isinstance(args.get("state"), str):
+                    q_text = str(args.get("state"))
+                if not q_text.strip():
+                    raise ValueError("Tool-gate routing requires non-empty 'query' (or string 'state') with 'tools'.")
+                _cancel_idle_timer()
+                try:
+                    res = backend.triage_tool_call(
+                        query=q_text,
+                        tools=raw_tools,
+                        sieve_weights=_arg_str(args, "sieve_weights", "") or None,
+                    )
+                    return _normalize_dict_payload(res)
+                finally:
+                    _reset_idle_timer()
+
             raw_questions = args.get("questions")
             if not isinstance(raw_questions, dict) or not raw_questions:
-                raise ValueError("Parameter 'questions' must be a non-empty object.")
+                raise ValueError("Parameter 'questions' must be a non-empty object (or provide 'tools' + 'query').")
             raw_states = args.get("states")
             if raw_states is not None and not isinstance(raw_states, list):
                 raise ValueError("Parameter 'states' must be an array when provided.")
@@ -631,6 +760,7 @@ def dispatch_mcp_tool(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
                     audio=audio_arg,
                     video=video_arg,
                     profile=_arg_str(args, "profile", "auto"),
+                    agent_tier=_arg_str(args, "agent_tier", "auto"),
                 )
                 return _normalize_dict_payload(res)
             finally:
@@ -816,6 +946,33 @@ def run_self_check() -> Dict[str, Any]:
     if not unknown_resp or unknown_resp.get("error", {}).get("code") != -32601:
         raise RuntimeError("unknown method -32601 check failed")
 
+    st_res = dispatch_mcp_tool("xlaya_status", {"profile": "nano", "agent_tier": "31b-deep"})
+    if st_res.get("agent_tier") != "31b-deep":
+        raise RuntimeError("xlaya_status agent_tier dispatch parity failed")
+    tg_res = dispatch_mcp_tool(
+        "xlaya_predict",
+        {
+            "query": "What is the current weather forecast in Seattle in celsius?",
+            "tools": [
+                {
+                    "name": "get_current_weather",
+                    "description": "Get the current temperature and weather forecast for a given city.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "city": {"type": "string", "description": "City name, e.g. Seattle"},
+                            "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+                        },
+                        "required": ["city"],
+                    },
+                }
+            ],
+        },
+    )
+    if tg_res.get("decision") != "tool_call":
+        raise RuntimeError(f"xlaya_predict tool_gate self-check failed: {tg_res}")
+    _cancel_idle_timer()
+
     return {
         "ok": True,
         "server": "xlaya-mcp",
@@ -837,6 +994,7 @@ def _reconfigure_utf8(stream: Any) -> None:
 def main(argv: Optional[List[str]] = None) -> int:
     """Run the JSON-RPC 2.0 MCP server loop over `stdin`/`_JSONRPC_OUT` with Wire Purity."""
     global _JSONRPC_OUT
+    sys.dont_write_bytecode = True
     args = list(sys.argv[1:] if argv is None else argv)
 
     _JSONRPC_OUT = sys.stdout

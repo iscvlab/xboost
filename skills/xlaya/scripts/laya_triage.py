@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 laya_triage.py — 3-Stage System 1 → System 1.5 Semantic Triage, Adaptive Hardware Profile & Code-Graph Sieve Engine
-Part of the XBoost Agent Skill Framework (/xlaya v2.3.0).
+Part of the XBoost Agent Skill Framework (/xlaya v2.4.0).
 
 Architecture:
 - Stage 0 (Deterministic Chunker + Cross-Regime AST Code-Graph & Evolved Matrix Sieve):
@@ -31,6 +31,7 @@ import csv
 import ctypes
 import fnmatch
 import gc
+import hashlib
 import html
 import importlib.metadata
 import importlib.util
@@ -49,13 +50,24 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 
-sys.dont_write_bytecode = True
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
-if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8")
+
+def _ensure_utf8_stream(stream: Any) -> None:
+    """Upgrade non-UTF-8 text streams to UTF-8 while keeping `errors='replace'`."""
+    if stream is None or not hasattr(stream, "reconfigure"):
+        return
+    enc = str(getattr(stream, "encoding", "") or "").lower().replace("_", "-")
+    if enc in ("utf-8", "utf8"):
+        return
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+_ensure_utf8_stream(sys.stdout)
+_ensure_utf8_stream(sys.stderr)
 
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
@@ -104,6 +116,14 @@ EXCLUDED_DIRS = frozenset(
 
 DEFAULT_PATTERN = "*.md,*.html,*.txt,*.json,*.jsonl,*.csv"
 CODE_PATTERN = "*.md,*.html,*.txt,*.json,*.jsonl,*.csv,*.py,*.pyi,*.toml,*.yaml,*.yml"
+WEB_CODE_PATTERN = (
+    "*.md,*.html,*.txt,*.json,*.jsonl,*.csv,"
+    "*.py,*.pyi,*.js,*.jsx,*.ts,*.tsx,*.mjs,*.css,*.sql,*.toml,*.yaml,*.yml"
+)
+_BRACE_CODE_EXTS = frozenset(
+    {".js", ".jsx", ".ts", ".tsx", ".mjs", ".css", ".cs", ".go", ".rs", ".sql"}
+)
+DEFAULT_CONFORMAL_Q_HAT = 0.5885
 XLAYA_PROFILES = ("auto", "nano", "edge", "workstation", "max")
 XLAYA_AGENT_TIERS = ("auto", "e4b-sniper", "31b-deep")
 SIEVE_FEATURE_NAMES = (
@@ -119,7 +139,7 @@ SIEVE_FEATURE_NAMES = (
 SIEVE_NEG_INDICES = frozenset({6})  # test_file_penalty is non-positive on the L1 simplex
 
 DEFAULT_SIEVE_GENOMES: Dict[str, Any] = {
-    "schema_version": "2.3.0",
+    "schema_version": "2.4.0",
     "feature_names": list(SIEVE_FEATURE_NAMES),
     "gamma_max": 1.45,
     "e4b_sniper_p1": {
@@ -142,14 +162,24 @@ DEFAULT_SIEVE_GENOMES: Dict[str, Any] = {
         "token_budget": 800,
         "top_k": 3,
     },
-    "31b_deep": {
+    "min_ece_calibrated": {
         "w_core": [0.167068, 0.296999, 0.045851, 0.155435, 0.067317, 0.062147, -0.151591, 0.053592],
-        "w_halo": [0.098415, 0.159503, 0.185096, 0.128404, 0.01622, 0.18358, -0.178304, 0.050476],
-        "anchor_slots": 3,
-        "lambda_file_div": 0.16,
+        "w_halo": [0.167068, 0.296999, 0.045851, 0.155435, 0.067317, 0.062147, -0.151591, 0.053592],
+        "lambda_file_div": 0.35,
         "platt_T": 1.67,
         "platt_b": -0.795,
         "conformal_q_hat": 0.5885,
+        "token_budget": 800,
+        "top_k": 3,
+    },
+    "31b_deep": {
+        "w_core": [0.276217, 0.254738, 0.057094, 0.155592, 0.015, 0.05, -0.146359, 0.045],
+        "w_halo": [0.417774, 0.021081, 0.032115, 0.118253, 0.022067, 0.069081, -0.191083, 0.128546],
+        "anchor_slots": 3,
+        "lambda_file_div": 0.14,
+        "platt_T": 1.2,
+        "platt_b": -0.5435,
+        "conformal_q_hat": 0.575,
         "token_budget": 4096,
         "top_k": 8,
     },
@@ -1037,6 +1067,7 @@ def get_status(profile: str = "auto", agent_tier: str = "auto") -> Dict[str, Any
         "version": __version__,
         "profile": hw["profile"],
         "agent_tier": hw["agent_tier"],
+        "agent_tier_explicit": hw["agent_tier_explicit"],
         "python": sys.version.split()[0],
         "laya_available": laya_ok,
         "laya_version": laya_ver,
@@ -1372,6 +1403,7 @@ def predict_direct(
     states: Optional[List[Any]] = None,
     model: str = "auto",
     profile: str = "auto",
+    agent_tier: str = "auto",
     vega: bool = False,
     vega_model: str = "auto",
     views: int = 1,
@@ -1387,7 +1419,7 @@ def predict_direct(
     if not questions or not isinstance(questions, dict):
         raise ValueError("predict_direct requires a non-empty 'questions' dictionary.")
 
-    hw = _resolve_hardware_profile(profile=profile, agent_tier="auto", device=device)
+    hw = _resolve_hardware_profile(profile=profile, agent_tier=agent_tier, device=device)
     eff_views = max(1, min(3, int(views or 1)))
     if hw["profile"] == "max" and vega and int(views or 1) == 1:
         eff_views = 3
@@ -1450,6 +1482,8 @@ def predict_direct(
             "ok": True,
             "stage": "stage0_nano",
             "profile": "nano",
+            "agent_tier": hw["agent_tier"],
+            "agent_tier_explicit": hw["agent_tier_explicit"],
             "model": "pure-python-nano",
             "device": "cpu",
             "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
@@ -1503,6 +1537,8 @@ def predict_direct(
         payload: Dict[str, Any] = {
             "ok": True,
             "stage": "stage2_vega",
+            "agent_tier": hw["agent_tier"],
+            "agent_tier_explicit": hw["agent_tier_explicit"],
             "model": f"vega:{eff_vega}",
             "views": eff_views,
             "calibrated": bool(getattr(v_agent, "calibration", None) is not None),
@@ -1544,6 +1580,8 @@ def predict_direct(
         payload = {
             "ok": True,
             "stage": "stage1_laya",
+            "agent_tier": hw["agent_tier"],
+            "agent_tier_explicit": hw["agent_tier_explicit"],
             "model": "typed-decisions",
             "language_routing": {
                 "english": 0,
@@ -1625,6 +1663,8 @@ def predict_direct(
     payload = {
         "ok": True,
         "stage": "stage1_laya",
+        "agent_tier": hw["agent_tier"],
+        "agent_tier_explicit": hw["agent_tier_explicit"],
         "model": used_model,
         "language_routing": {
             "english": len(en_indices),
@@ -2228,7 +2268,21 @@ def _chunk_json(
             )
             if limit_hint > 0 and len(chunks) >= limit_hint:
                 break
+        if len(raw_text) > 102400 and len(chunks) > 16:
+            chunks = chunks[:16]
         return chunks
+
+    if len(raw_text) > 102400:
+        cap_chars = max(max_chars * 8, 12000)
+        if isinstance(data, dict):
+            sample_dict = {k: data[k] for k in list(data.keys())[:24]}
+            pretty = (
+                f"// [XLaya JSON >100 KB preview: {len(data)} keys, {len(raw_text)} bytes]\n"
+                + json.dumps(sample_dict, indent=2, ensure_ascii=False)[:cap_chars]
+            )
+        else:
+            pretty = json.dumps(data, indent=2, ensure_ascii=False)[:cap_chars]
+        return _chunk_markdown_or_text(file_path, pretty, rel_prefix, max_chars)[:16]
 
     pretty = json.dumps(data, indent=2, ensure_ascii=False)
     return _chunk_markdown_or_text(file_path, pretty, rel_prefix, max_chars)
@@ -2704,7 +2758,207 @@ def _chunk_python_ast(
     return chunks
 
 
-_AST_CHUNK_CACHE: Dict[Tuple[str, int, int], List[Dict[str, Any]]] = {}
+_AST_CHUNK_CACHE: Dict[Tuple[str, int, int, str, int, int], List[Dict[str, Any]]] = {}
+
+_JS_TS_DECL_RE = re.compile(
+    r"^(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)"
+    r"|^(?:export\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)"
+    r"|^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*"
+    r"(?:async\s+)?(?:\([^)]*\)|[A-Za-z_$][A-Za-z0-9_$]*)\s*=>"
+)
+_GO_RUST_DECL_RE = re.compile(
+    r"^func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)"
+    r"|^type\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:struct|interface)"
+    r"|^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:fn|struct|enum|trait|impl)\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
+_CS_DECL_RE = re.compile(
+    r"^\s*(?:public|private|protected|internal|static|async|virtual|override|sealed|partial|\s)+"
+    r"(?:class|struct|interface|enum|record)\s+([A-Za-z_][A-Za-z0-9_]*)"
+    r"|^\s*(?:public|private|protected|internal|static|async|virtual|override|\s)+"
+    r"[A-Za-z_][A-Za-z0-9_<>,\[\]\s?]*\s+([A-Za-z_][A-Za-z0-9_]*)\s*\("
+)
+_CSS_SEL_RE = re.compile(r"^\s*([.#@A-Za-z_*:\[][^{;\n]{0,79})\{\s*(?:/\*.*)?$")
+_SQL_DECL_RE = re.compile(
+    r"(?i)^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|VIEW|MATERIALIZED\s+VIEW|FUNCTION|PROCEDURE|TRIGGER)\s+"
+    r"([A-Za-z0-9_.\"`]+)"
+)
+
+
+def _net_brace_delta(
+    line: str,
+    in_block_comment: bool = False,
+    is_sql: bool = False,
+) -> Tuple[int, bool, bool]:
+    opens = 0
+    closes = 0
+    quote: Optional[str] = None
+    last_sig_ch = ""
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if in_block_comment:
+            if ch == "*" and i + 1 < n and line[i + 1] == "/":
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if quote is not None:
+            last_sig_ch = ch
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and line[i + 1] == "*":
+            in_block_comment = True
+            i += 2
+            continue
+        if not is_sql and ch == "/" and i + 1 < n and line[i + 1] == "/":
+            break
+        if is_sql and ch == "-" and i + 1 < n and line[i + 1] == "-":
+            break
+        if ch in ("'", '"', "`"):
+            quote = ch
+            last_sig_ch = ch
+        elif ch == "{":
+            opens += 1
+            last_sig_ch = "{"
+        elif ch == "}":
+            closes += 1
+            last_sig_ch = "}"
+        elif not ch.isspace():
+            last_sig_ch = ch
+        i += 1
+    return opens - closes, in_block_comment, bool(is_sql and last_sig_ch == ";")
+
+
+def _match_brace_decl(stripped: str, ext: str, depth: int) -> Optional[str]:
+    if not stripped or stripped.startswith(("//", "/*", "*", "--", "#")):
+        return None
+    m = None
+    if ext == ".css":
+        if depth == 0:
+            m = _CSS_SEL_RE.match(stripped)
+    elif ext == ".sql":
+        m = _SQL_DECL_RE.match(stripped)
+    elif ext in (".js", ".jsx", ".ts", ".tsx", ".mjs") and depth <= 1:
+        m = _JS_TS_DECL_RE.match(stripped)
+    elif ext in (".go", ".rs") and depth <= 1:
+        m = _GO_RUST_DECL_RE.match(stripped)
+    elif ext == ".cs" and depth <= 2:
+        m = _CS_DECL_RE.match(stripped)
+    if m is None:
+        return None
+    for grp in m.groups():
+        if grp and grp.strip():
+            return grp.strip()
+    return None
+
+
+def _chunk_brace_code(
+    file_path: Path,
+    raw_text: str,
+    rel_prefix: str,
+    max_chars: int,
+    limit_hint: int = 0,
+) -> List[Dict[str, Any]]:
+    """Lightweight stdlib brace/selector declaration chunker for JS/TS/CSS/C#/Go/Rust/SQL."""
+    lines = raw_text.splitlines()
+    if not lines:
+        return []
+    ext = file_path.suffix.lower()
+    is_sql = ext == ".sql"
+    mod_label = rel_prefix
+    chunks: List[Dict[str, Any]] = []
+    buf: List[str] = []
+    buf_start = 1
+    cur_sym = ""
+    cur_decl = ""
+    depth = 0
+    in_block_comment = False
+
+    def _flush(end_ln: int) -> None:
+        if not buf or not any(ln.strip() for ln in buf):
+            return
+        label = f"{mod_label} > {cur_sym}" if cur_sym else mod_label
+        sub = _split_section_lines(
+            file_path=file_path,
+            rel_prefix=rel_prefix,
+            full_breadcrumb=label,
+            parent_breadcrumb=mod_label,
+            start_ln=buf_start,
+            s_lines=buf,
+            max_chars=max_chars,
+            is_code=True,
+        )
+        meta: Dict[str, Any] = {
+            "symbol": cur_sym or "<module>",
+            "canonical_symbol": cur_sym or "<module>",
+            "node_kind": "decl" if cur_sym else "module",
+            "skeleton_header": cur_decl[:160],
+            "called_symbols": [],
+        }
+        for sc in sub:
+            sc["_ast_meta"] = meta
+            chunks.append(sc)
+
+    for idx_1, line in enumerate(lines, start=1):
+        decl = None if in_block_comment else _match_brace_decl(line.strip(), ext, depth)
+        if decl is not None and buf and any(ln.strip() for ln in buf):
+            _flush(idx_1 - 1)
+            if limit_hint > 0 and len(chunks) >= limit_hint:
+                return chunks[:limit_hint]
+            buf = [line]
+            buf_start = idx_1
+            cur_sym = decl
+            cur_decl = line.strip()
+        else:
+            if not buf:
+                buf_start = idx_1
+            if decl is not None and not cur_sym:
+                cur_sym = decl
+                cur_decl = line.strip()
+            buf.append(line)
+        delta, in_block_comment, sql_end = _net_brace_delta(
+            line, in_block_comment=in_block_comment, is_sql=is_sql
+        )
+        depth = max(0, depth + delta)
+        should_flush = (cur_sym and sql_end) if is_sql else (
+            not in_block_comment and cur_sym and depth == 0 and len(buf) >= 2
+        )
+        if should_flush:
+            _flush(idx_1)
+            if limit_hint > 0 and len(chunks) >= limit_hint:
+                return chunks[:limit_hint]
+            buf = []
+            cur_sym = ""
+            cur_decl = ""
+
+    _flush(len(lines))
+    if not chunks:
+        return _chunk_markdown_or_text(file_path, raw_text, rel_prefix, max_chars)
+    return chunks[:limit_hint] if limit_hint > 0 else chunks
+
+
+def _attach_file_sig(chunks: List[Dict[str, Any]], file_sig: str) -> List[Dict[str, Any]]:
+    if file_sig:
+        for ch in chunks:
+            ch["_file_sig"] = file_sig
+    return chunks
+
+
+def _resolve_file_stat(file_path: Path, stat_tuple: Optional[Tuple[int, int]]) -> Tuple[int, int]:
+    if stat_tuple is not None:
+        return stat_tuple
+    try:
+        st_res = file_path.stat()
+        return int(st_res.st_mtime_ns), int(st_res.st_size)
+    except OSError:
+        return 0, -1
 
 
 def chunk_file(
@@ -2713,20 +2967,18 @@ def chunk_file(
     whole_file: bool = False,
     rel_prefix: Optional[str] = None,
     limit_hint: int = 0,
+    stat_tuple: Optional[Tuple[int, int]] = None,
 ) -> List[Dict[str, Any]]:
     """Split a supported file into fence-safe, AST-aware, or structured chunks with line/item refs."""
     ref_base = rel_prefix if rel_prefix is not None else file_path.name
     ext = file_path.suffix.lower()
-    if not whole_file and ext in (".py", ".pyi"):
-        ckey = (str(file_path), max_chars, limit_hint)
+    is_cached_code = not whole_file and (ext in (".py", ".pyi") or ext in _BRACE_CODE_EXTS)
+    mtime_ns, size = _resolve_file_stat(file_path, stat_tuple) if is_cached_code else (0, -1)
+    if is_cached_code:
+        ckey = (str(file_path), max_chars, limit_hint, ref_base, mtime_ns, size)
         cached_chs = _AST_CHUNK_CACHE.get(ckey)
         if cached_chs is not None:
-            out_chs: List[Dict[str, Any]] = []
-            for c in cached_chs:
-                cp = dict(c)
-                cp["ref"] = f"{ref_base}#L{cp['start_line']}-L{cp['end_line']}"
-                out_chs.append(cp)
-            return out_chs
+            return [dict(c) for c in cached_chs]
 
     try:
         raw_text = file_path.read_text(encoding="utf-8", errors="replace")
@@ -2737,6 +2989,11 @@ def chunk_file(
     if not raw_text.strip():
         return []
 
+    raw_file_sig = (
+        hashlib.sha1(raw_text.encode("utf-8", errors="ignore")).hexdigest()
+        if len(raw_text.strip()) >= 64
+        else ""
+    )
     lines = raw_text.splitlines()
 
     if whole_file:
@@ -2752,11 +3009,11 @@ def chunk_file(
             body[:max_chars],
         )
         ch["_full_text"] = body[:240000]
-        return [ch]
+        return _attach_file_sig([ch], raw_file_sig)
 
     if ext in (".py", ".pyi"):
-        fp_str = str(file_path)
-        if fp_str not in _PRERANK_FILE_TOKEN_CACHE:
+        tok_key = f"{file_path}@{mtime_ns}:{size}"
+        if tok_key not in _PRERANK_FILE_TOKEN_CACHE:
             head_txt = raw_text[:20480]
             h_all = frozenset(_extract_lexical_tokens(head_txt))
             d_all: set[str] = set()
@@ -2765,23 +3022,62 @@ def chunk_file(
             ):
                 sym_nm = dm.group(1)
                 d_all.update({sym_nm.lower()} | set(_split_ident_parts(sym_nm)))
-            if len(_PRERANK_FILE_TOKEN_CACHE) > 16384:
-                _PRERANK_FILE_TOKEN_CACHE.clear()
-            _PRERANK_FILE_TOKEN_CACHE[fp_str] = (h_all, frozenset(d_all))
-        res_chs = _chunk_python_ast(file_path, raw_text, ref_base, max_chars, limit_hint=limit_hint)
-        if len(_AST_CHUNK_CACHE) > 4096:
-            _AST_CHUNK_CACHE.clear()
-        _AST_CHUNK_CACHE[(fp_str, max_chars, limit_hint)] = [dict(c) for c in res_chs]
+            while len(_PRERANK_FILE_TOKEN_CACHE) >= 16384:
+                _PRERANK_FILE_TOKEN_CACHE.pop(next(iter(_PRERANK_FILE_TOKEN_CACHE)))
+            _PRERANK_FILE_TOKEN_CACHE[tok_key] = (h_all, frozenset(d_all))
+        res_chs = _attach_file_sig(
+            _chunk_python_ast(file_path, raw_text, ref_base, max_chars, limit_hint=limit_hint),
+            raw_file_sig,
+        )
+        while len(_AST_CHUNK_CACHE) >= 4096:
+            _AST_CHUNK_CACHE.pop(next(iter(_AST_CHUNK_CACHE)))
+        _AST_CHUNK_CACHE[(str(file_path), max_chars, limit_hint, ref_base, mtime_ns, size)] = [
+            dict(c) for c in res_chs
+        ]
+        return res_chs
+    if ext in _BRACE_CODE_EXTS:
+        res_chs = _attach_file_sig(
+            _chunk_brace_code(file_path, raw_text, ref_base, max_chars, limit_hint=limit_hint),
+            raw_file_sig,
+        )
+        while len(_AST_CHUNK_CACHE) >= 4096:
+            _AST_CHUNK_CACHE.pop(next(iter(_AST_CHUNK_CACHE)))
+        _AST_CHUNK_CACHE[(str(file_path), max_chars, limit_hint, ref_base, mtime_ns, size)] = [
+            dict(c) for c in res_chs
+        ]
         return res_chs
     if ext in (".html", ".htm"):
-        return _chunk_html(file_path, raw_text, ref_base, max_chars)
+        return _attach_file_sig(_chunk_html(file_path, raw_text, ref_base, max_chars), raw_file_sig)
     if ext == ".jsonl":
-        return _chunk_jsonl(file_path, raw_text, ref_base, max_chars, limit_hint=limit_hint)
+        return _attach_file_sig(
+            _chunk_jsonl(file_path, raw_text, ref_base, max_chars, limit_hint=limit_hint),
+            raw_file_sig,
+        )
     if ext == ".json":
-        return _chunk_json(file_path, raw_text, ref_base, max_chars, limit_hint=limit_hint)
+        return _attach_file_sig(
+            _chunk_json(file_path, raw_text, ref_base, max_chars, limit_hint=limit_hint),
+            raw_file_sig,
+        )
     if ext == ".csv":
-        return _chunk_csv(file_path, raw_text, ref_base, max_chars, limit_hint=limit_hint)
-    return _chunk_markdown_or_text(file_path, raw_text, ref_base, max_chars)
+        return _attach_file_sig(
+            _chunk_csv(file_path, raw_text, ref_base, max_chars, limit_hint=limit_hint),
+            raw_file_sig,
+        )
+    return _attach_file_sig(
+        _chunk_markdown_or_text(file_path, raw_text, ref_base, max_chars),
+        raw_file_sig,
+    )
+
+
+def _resolve_pattern_alias(pattern: str) -> str:
+    norm = (pattern or "").strip().lower()
+    if norm == "web":
+        return WEB_CODE_PATTERN
+    if norm == "code":
+        return CODE_PATTERN
+    if norm == "default":
+        return DEFAULT_PATTERN
+    return pattern or DEFAULT_PATTERN
 
 
 def chunk_markdown_file(
@@ -2809,9 +3105,14 @@ def chunk_markdown_file(
     )
 
 
-def collect_target_files(paths: Sequence[str], pattern: str = DEFAULT_PATTERN) -> Tuple[List[Path], Optional[Path]]:
-    """Resolve input files/directories into sorted unique file paths and common scan root."""
-    globs = [g.strip().lower() for g in pattern.split(",") if g.strip()] or ["*.md"]
+def collect_target_files(
+    paths: Sequence[str],
+    pattern: str = DEFAULT_PATTERN,
+    stat_map: Optional[Dict[Path, Tuple[int, int]]] = None,
+) -> Tuple[List[Path], Optional[Path]]:
+    """Resolve input files/directories via `os.scandir` and capture `(mtime_ns, size)` with zero extra syscalls."""
+    eff_pattern = _resolve_pattern_alias(pattern)
+    globs = [g.strip().lower() for g in eff_pattern.split(",") if g.strip()] or ["*.md"]
     resolved_files: List[Path] = []
     seen: set[Path] = set()
     raw_resolved_inputs: List[Path] = []
@@ -2826,18 +3127,52 @@ def collect_target_files(paths: Sequence[str], pattern: str = DEFAULT_PATTERN) -
             if p not in seen:
                 seen.add(p)
                 resolved_files.append(p)
+                if stat_map is not None:
+                    try:
+                        st_f = p.stat()
+                        stat_map[p] = (int(st_f.st_mtime_ns), int(st_f.st_size))
+                    except OSError:
+                        pass
         elif p.is_dir():
             has_directory_input = True
-            for root_str, dirnames, filenames in os.walk(p):
-                dirnames[:] = sorted(d for d in dirnames if d not in EXCLUDED_DIRS)
-                root_path = Path(root_str)
-                for fname in sorted(filenames):
-                    fname_low = fname.lower()
-                    if any(fnmatch.fnmatch(fname_low, g) for g in globs):
-                        child = root_path / fname
-                        if child not in seen:
-                            seen.add(child)
-                            resolved_files.append(child)
+            stack: List[Path] = [p]
+            while stack:
+                cur_dir = stack.pop()
+                sub_dirs: List[Path] = []
+                cur_files: List[Tuple[str, Path, Optional[Tuple[int, int]]]] = []
+                try:
+                    with os.scandir(cur_dir) as it:
+                        for entry in it:
+                            ename = entry.name
+                            try:
+                                if entry.is_dir(follow_symlinks=False):
+                                    if ename not in EXCLUDED_DIRS:
+                                        sub_dirs.append(Path(entry.path))
+                                    continue
+                                if entry.is_file(follow_symlinks=False) or (
+                                    entry.is_symlink() and os.path.isfile(entry.path)
+                                ):
+                                    fname_low = ename.lower()
+                                    if any(fnmatch.fnmatch(fname_low, g) for g in globs):
+                                        st_tup: Optional[Tuple[int, int]] = None
+                                        if stat_map is not None:
+                                            st_e = entry.stat(follow_symlinks=entry.is_symlink())
+                                            st_tup = (int(st_e.st_mtime_ns), int(st_e.st_size))
+                                        cur_files.append((ename, Path(entry.path), st_tup))
+                            except OSError:
+                                continue
+                except OSError:
+                    continue
+                sub_dirs.sort(key=lambda d: d.name)
+                for sd in reversed(sub_dirs):
+                    stack.append(sd)
+                cur_files.sort(key=lambda item: item[0])
+                for _, child, st_tup in cur_files:
+                    if child not in seen:
+                        seen.add(child)
+                        resolved_files.append(child)
+                        if stat_map is not None and st_tup is not None:
+                            stat_map[child] = st_tup
 
     is_single_file = (
         not has_directory_input
@@ -2951,10 +3286,18 @@ def _extract_technical_anchors(text: str) -> List[str]:
     return anchors
 
 
+_CAD_SHEET_RE = re.compile(r"\b[A-Za-z]{1,4}-\d{2,5}(?:\.\d+)?\b")
+
+
 def _extract_code_anchors(text: str) -> List[str]:
     """Extract clean code/symbol anchors while stripping bare version decimals and prose hyphenations."""
     anchors: List[str] = []
     seen: set[str] = set()
+    for m in _CAD_SHEET_RE.finditer(text):
+        val = m.group(0).lower()
+        if val not in seen and val not in _CODE_ANCHOR_NOISE:
+            seen.add(val)
+            anchors.append(val)
     for is_bt, pat in ((True, BACKTICK_SPAN_RE), (True, CLI_FLAG_RE), (False, IDENT_RE)):
         for m in pat.finditer(text):
             raw_v = (m.group(1) if m.lastindex else m.group(0)).strip()
@@ -3241,19 +3584,32 @@ def _select_file_top_chunks(
     return [chs[i] for i in keep_idxs]
 
 
+def _stat_cache_suffix(fp: Path, stat_map: Optional[Mapping[Path, Tuple[int, int]]]) -> str:
+    if stat_map is not None:
+        st_tup = stat_map.get(fp)
+        if st_tup is not None:
+            return f"@{st_tup[0]}:{st_tup[1]}"
+    try:
+        st_res = fp.stat()
+        return f"@{int(st_res.st_mtime_ns)}:{int(st_res.st_size)}"
+    except OSError:
+        return ""
+
+
 def _prerank_repo_files(
     files: Sequence[Path],
     scan_root: Optional[Path],
     query: str,
+    stat_map: Optional[Mapping[Path, Tuple[int, int]]] = None,
 ) -> List[Path]:
     """
     2-Tier Source-First Lexical Pre-Ranker (F-08):
-      - Returns `files` untouched when 0 `.py`/`.pyi` files exist (preserving .md/.json parity).
+      - Returns `files` untouched when 0 `.py`/`.pyi`/brace-code files exist (preserving .md/.json parity).
       - Prioritizes Tier-1 core package modules over Tier-2 `docs_src/`, `tests/`, `examples/`, `scripts/`,
         while promoting explicitly referenced or high-overlap Tier-2 files so `max_chunks` never starves core source.
     """
-    py_exts = (".py", ".pyi")
-    if len(files) <= 48 or not any(f.suffix.lower() in py_exts for f in files):
+    code_exts = (".py", ".pyi") + tuple(_BRACE_CODE_EXTS)
+    if len(files) <= 48 or not any(f.suffix.lower() in code_exts for f in files):
         return list(files)
 
     q_low = query.lower()
@@ -3282,11 +3638,11 @@ def _prerank_repo_files(
     df_t1: Counter[str] = Counter()
 
     need_head_scan = len(files) > 90
-    if len(_PRERANK_FILE_TOKEN_CACHE) > 16384:
-        _PRERANK_FILE_TOKEN_CACHE.clear()
+    while len(_PRERANK_FILE_TOKEN_CACHE) >= 16384:
+        _PRERANK_FILE_TOKEN_CACHE.pop(next(iter(_PRERANK_FILE_TOKEN_CACHE)))
 
     for idx_f, fp in enumerate(files):
-        if fp.suffix.lower() not in py_exts:
+        if fp.suffix.lower() not in code_exts:
             other_files.append(fp)
             continue
         rel = _rel_ref_prefix(fp, scan_root).replace("\\", "/")
@@ -3311,13 +3667,15 @@ def _prerank_repo_files(
                 or (wants_docs and ("docs_src/" in rel_low or "examples/" in rel_low))
             )
             if do_t2_head and q_set:
-                ckey_t2 = f"t2:{fp}"
+                ckey_t2 = f"t2:{fp}{_stat_cache_suffix(fp, stat_map)}"
                 t2_toks = _PRERANK_FILE_TOKEN_CACHE.get(ckey_t2)
                 if t2_toks is None:
                     try:
                         with fp.open("rb") as fh:
                             head_txt = fh.read(6144).decode("utf-8", errors="ignore")
                         t2_toks = (frozenset(_extract_lexical_tokens(head_txt)), frozenset())
+                        while len(_PRERANK_FILE_TOKEN_CACHE) >= 16384:
+                            _PRERANK_FILE_TOKEN_CACHE.pop(next(iter(_PRERANK_FILE_TOKEN_CACHE)))
                         _PRERANK_FILE_TOKEN_CACHE[ckey_t2] = t2_toks
                     except OSError:
                         t2_toks = (frozenset(), frozenset())
@@ -3333,7 +3691,7 @@ def _prerank_repo_files(
             head_hits: set[str] = set()
             def_hits: set[str] = set()
             if need_head_scan and q_set and (wants_rubi or "integrals/rubi/" not in rel_low):
-                ckey = str(fp)
+                ckey = f"{fp}{_stat_cache_suffix(fp, stat_map)}"
                 cached_pair = _PRERANK_FILE_TOKEN_CACHE.get(ckey)
                 if cached_pair is None:
                     try:
@@ -3347,6 +3705,8 @@ def _prerank_repo_files(
                             sym_nm = dm.group(1)
                             d_all.update({sym_nm.lower()} | set(_split_ident_parts(sym_nm)))
                         cached_pair = (h_all, frozenset(d_all))
+                        while len(_PRERANK_FILE_TOKEN_CACHE) >= 16384:
+                            _PRERANK_FILE_TOKEN_CACHE.pop(next(iter(_PRERANK_FILE_TOKEN_CACHE)))
                         _PRERANK_FILE_TOKEN_CACHE[ckey] = cached_pair
                     except OSError:
                         cached_pair = (frozenset(), frozenset())
@@ -3397,7 +3757,7 @@ def _prerank_repo_files(
 
 def _whiten_symbol_vectors(raw_map: Mapping[str, Any]) -> Tuple[Dict[str, List[float]], float]:
     """
-    All-but-the-Mean + 5-step Top-1 Principal Component whitening (F-02 / F-11):
+    All-but-the-Mean + Top-4 Principal Component (6-step power iteration) whitening (F-02 / F-11):
     Collapses narrow-cone anisotropy (`rand_cos_p50 = 0.83..0.94 -> ~0.0`) and returns
     L2-normalized whitened vectors plus adaptive random-pair p75 floor.
     """
@@ -3417,13 +3777,7 @@ def _whiten_symbol_vectors(raw_map: Mapping[str, Any]) -> Tuple[Dict[str, List[f
             return {k: [float(x) for x in raw_map[k]] for k in keys}, 0.15
         mu = arr.mean(axis=0, keepdims=True)
         xc = arr - mu
-        # 5 deterministic power-iteration steps for Top-1 PC u_1
-        u = xc[0].copy()
-        u_norm = float(np_mod.linalg.norm(u))
-        if u_norm < 1e-8:
-            u = np_mod.ones((arr.shape[1],), dtype=np_mod.float32)
-            u_norm = float(np_mod.linalg.norm(u))
-        u = u / u_norm
+        # Top-4 Principal Components (6 deterministic power-iteration steps each)
         xw = xc
         for pc_idx in range(min(4, xc.shape[0] - 1)):
             u = xw[min(pc_idx, xw.shape[0] - 1)].copy()
@@ -3463,7 +3817,9 @@ def _whiten_symbol_vectors(raw_map: Mapping[str, Any]) -> Tuple[Dict[str, List[f
     xw_l = [[v[d] - mu_l[d] for d in range(dim)] for v in vecs]
     for pc_idx in range(min(4, n_v - 1)):
         u_l = list(xw_l[min(pc_idx, n_v - 1)])
-        un = math.sqrt(sum(x * x for x in u_l)) or 1.0
+        un = math.sqrt(sum(x * x for x in u_l))
+        if un < 1e-8:
+            break
         u_l = [x / un for x in u_l]
         for _ in range(6):
             proj_l = [sum(v[d] * u_l[d] for d in range(dim)) for v in xw_l]
@@ -3479,9 +3835,26 @@ def _whiten_symbol_vectors(raw_map: Mapping[str, Any]) -> Tuple[Dict[str, List[f
             xw_l[i] = [xw_l[i][d] - dot_u * u_l[d] for d in range(dim)]
     out_map: Dict[str, List[float]] = {}
     for i, k in enumerate(keys):
-        nrm = math.sqrt(sum(x * x for x in xw_l[i])) or 1.0
-        out_map[k] = [x / nrm for x in xw_l[i]]
-    return out_map, 0.12
+        nrm = math.sqrt(sum(x * x for x in xw_l[i]))
+        inv_n = (1.0 / nrm) if nrm >= 1e-8 else 1e8
+        out_map[k] = [x * inv_n for x in xw_l[i]]
+    step = max(1, n_v // 128)
+    idx_a = list(range(0, n_v - 1, step))[:128]
+    shift = max(1, n_v // 3)
+    sample_cos = sorted(
+        sum(out_map[keys[a]][d] * out_map[keys[(a + shift) % n_v]][d] for d in range(dim))
+        for a in idx_a
+    )
+    if sample_cos:
+        pos = 0.75 * (len(sample_cos) - 1)
+        lo_i = int(math.floor(pos))
+        hi_i = min(len(sample_cos) - 1, lo_i + 1)
+        frac = pos - lo_i
+        p75 = sample_cos[lo_i] + frac * (sample_cos[hi_i] - sample_cos[lo_i])
+    else:
+        p75 = 0.10
+    floor_c = max(0.08, min(0.35, p75))
+    return out_map, floor_c
 
 
 def _match_chunks_to_symbol_keys(
@@ -3895,7 +4268,7 @@ def extract_code_graph_features(
 
     # Feature 5 (F-02 / F-11):
     #   (a) Universal pure-stdlib Corpus-IDF Sub-Token Cosine Seed Propagation (`f_5_tfidf`)
-    #   (b) Monotonic All-but-the-Mean + Top-1 PC Whitened `.npz` Sidecar Upgrade (`max(f_5_tfidf, 0.85 * f_5_npz)`)
+    #   (b) Monotonic All-but-the-Mean + Top-4 PC Whitened `.npz` Sidecar Upgrade (`max(f_5_tfidf, 0.85 * f_5_npz)`)
     seed_pool = [
         i
         for i in range(m_len)
@@ -4168,6 +4541,10 @@ def _truncate_text_to_token_budget(text: str, budget_tokens: int) -> str:
     for ln in text.splitlines():
         ln_t = _estimate_tokens(ln) + 0.3
         if kept and (acc + ln_t) > float(budget_tokens):
+            if len(kept) <= 2:
+                rem_tok = float(budget_tokens) - acc
+                if rem_tok >= 8.0:
+                    kept.append(ln[:max(16, int(rem_tok * 3.0))])
             break
         if not kept and ln_t > float(budget_tokens):
             char_cap = max(16, int(budget_tokens * 3.0))
@@ -4216,6 +4593,27 @@ def _auto_discover_sidecar_path(
     return sidecar_arg
 
 
+def _is_mirror_aux_path(rel_or_file: str) -> bool:
+    parts = [p.lower() for p in rel_or_file.split("#", 1)[0].replace("\\", "/").split("/") if p]
+    return any(p in ("skills", "dist", "build", ".gemini", "site-packages", "_mirror") for p in parts[:-1])
+
+
+def _strip_chunk_breadcrumb(raw_text: str) -> str:
+    txt = raw_text.strip()
+    if txt.startswith("["):
+        first_nl = txt.find("\n")
+        if first_nl > 0 and txt[:first_nl].rstrip().endswith("]"):
+            txt = txt[first_nl + 1:].strip()
+    return txt
+
+
+def _chunk_body_sig(ch: Mapping[str, Any]) -> str:
+    txt = _strip_chunk_breadcrumb(str(ch.get("text") or ""))
+    if len(txt) < 128:
+        return ""
+    return hashlib.sha1(txt.encode("utf-8", errors="ignore")).hexdigest()
+
+
 def _select_sieve_slots(
     chunks: Sequence[Dict[str, Any]],
     feat_matrix: Sequence[Sequence[float]],
@@ -4225,6 +4623,7 @@ def _select_sieve_slots(
     top_k: Optional[int] = None,
     max_tokens: Optional[int] = None,
     m_avail: Optional[Sequence[float]] = None,
+    dedup_mirrors: bool = True,
 ) -> Tuple[List[int], List[float], List[float], int]:
     """Select ranked chunk indices under Conditional Residual Selection (UL-04), Span-IoU <= 0.30, and token wall."""
     m_len = len(chunks)
@@ -4259,8 +4658,42 @@ def _select_sieve_slots(
         sum(feat_matrix[i][d] * w_halo[d] for d in range(8)) for i in range(m_len)
     ]
     est_tokens = [_chunk_total_est_tokens(chunks[i]) for i in range(m_len)]
+    body_sigs = [_chunk_body_sig(chunks[i]) for i in range(m_len)] if dedup_mirrors else [""] * m_len
+    is_mirror_path = [
+        _is_mirror_aux_path(str(chunks[i].get("ref") or chunks[i].get("file") or ""))
+        for i in range(m_len)
+    ]
+    mirror_skip_idxs: set[int] = set()
+    if dedup_mirrors and m_len > 1:
+        by_file_idxs: Dict[str, List[int]] = {}
+        for i in range(m_len):
+            by_file_idxs.setdefault(str(chunks[i].get("file", "")), []).append(i)
+        seen_file_sigs: set[str] = set()
+        for fk in sorted(
+            by_file_idxs.keys(),
+            key=lambda fpath_k: (1 if is_mirror_path[by_file_idxs[fpath_k][0]] else 0, fpath_k),
+        ):
+            idxs_f = by_file_idxs[fk]
+            is_mir_f = is_mirror_path[idxs_f[0]]
+            raw_sig = str(chunks[idxs_f[0]].get("_file_sig") or "")
+            if raw_sig:
+                if is_mir_f and raw_sig in seen_file_sigs:
+                    mirror_skip_idxs.update(idxs_f)
+                else:
+                    seen_file_sigs.add(raw_sig)
+            else:
+                joined = "\n".join(
+                    _strip_chunk_breadcrumb(str(chunks[k].get("text") or "")) for k in idxs_f
+                ).strip()
+                if len(joined) >= 64:
+                    f_sig = hashlib.sha1(joined.encode("utf-8", errors="ignore")).hexdigest()
+                    if is_mir_f and f_sig in seen_file_sigs:
+                        mirror_skip_idxs.update(idxs_f)
+                    else:
+                        seen_file_sigs.add(f_sig)
 
     selected: List[int] = []
+    selected_sigs: set[str] = set()
     file_counts: Counter[str] = Counter()
     used_tokens = 0
     per_file_cap = 1 if eff_top_k <= 3 else 2
@@ -4268,13 +4701,20 @@ def _select_sieve_slots(
         "w_halo" in genome_cfg or "w_residual" in genome_cfg
     )
     anchor_slots = min(eff_top_k, int(genome_cfg.get("anchor_slots", 3))) if has_residual else eff_top_k
-    order_core = sorted(range(m_len), key=lambda idx: (-core_scores[idx], idx))
+    order_core = sorted(
+        range(m_len),
+        key=lambda idx: (-round(core_scores[idx], 6), 1 if is_mirror_path[idx] else 0, idx),
+    )
 
     for ii in order_core:
         if len(selected) >= anchor_slots:
             break
+        if ii in mirror_skip_idxs:
+            continue
         f_key = str(chunks[ii].get("file", ""))
         if file_counts[f_key] >= per_file_cap:
+            continue
+        if is_mirror_path[ii] and body_sigs[ii] and body_sigs[ii] in selected_sigs:
             continue
         if any(_span_iou(chunks[ii], chunks[prev_i]) > 0.30 for prev_i in selected):
             continue
@@ -4284,6 +4724,8 @@ def _select_sieve_slots(
         elif (used_tokens + tk) > eff_budget:
             continue
         selected.append(ii)
+        if body_sigs[ii]:
+            selected_sigs.add(body_sigs[ii])
         file_counts[f_key] += 1
         used_tokens += tk
 
@@ -4294,18 +4736,20 @@ def _select_sieve_slots(
             best_i = -1
             best_adj = -1e9
             for i in range(m_len):
-                if i in sel_set:
+                if i in sel_set or i in mirror_skip_idxs:
                     continue
                 f_key = str(chunks[i].get("file", ""))
                 cnt = file_counts[f_key]
                 if cnt >= per_file_cap:
+                    continue
+                if is_mirror_path[i] and body_sigs[i] and body_sigs[i] in selected_sigs:
                     continue
                 tk = est_tokens[i]
                 if (used_tokens + tk) > eff_budget:
                     continue
                 if any(_span_iou(chunks[i], chunks[prev_i]) > 0.30 for prev_i in selected):
                     continue
-                adj = halo_scores[i] - lam_div * float(cnt)
+                adj = halo_scores[i] - lam_div * float(cnt) - (0.01 if is_mirror_path[i] else 0.0)
                 if f_key not in anchor_file_set and cnt == 0:
                     adj += 0.045
                 if adj > best_adj:
@@ -4315,6 +4759,8 @@ def _select_sieve_slots(
                 break
             selected.append(best_i)
             sel_set.add(best_i)
+            if body_sigs[best_i]:
+                selected_sigs.add(body_sigs[best_i])
             bf_key = str(chunks[best_i].get("file", ""))
             file_counts[bf_key] += 1
             used_tokens += est_tokens[best_i]
@@ -4324,6 +4770,213 @@ def _select_sieve_slots(
         for i in range(m_len)
     ]
     return selected, core_scores, probs, used_tokens
+
+
+def _run_sieve_on_chunks(
+    chunks: Sequence[Dict[str, Any]],
+    query: str,
+    *,
+    agent_tier: str = "e4b-sniper",
+    sieve_weights: Optional[Union[str, Path, Mapping[str, Any]]] = None,
+    genome_key: Optional[str] = None,
+    graph_path: Optional[Union[str, Path]] = None,
+    embeddings_path: Optional[Union[str, Path, Mapping[str, Any]]] = None,
+    top_k: Optional[int] = None,
+    max_tokens: Optional[int] = None,
+    dedup_mirrors: bool = True,
+    scan_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Single-Source-of-Truth conformal sieve execution shared across file, in-memory, and triage entrypoints."""
+    norm_tier = (agent_tier or "e4b-sniper").strip().lower()
+    if norm_tier == "auto":
+        norm_tier = "e4b-sniper"
+    if norm_tier not in ("e4b-sniper", "31b-deep"):
+        raise ValueError(f"Unsupported agent_tier {agent_tier!r}; expected 'e4b-sniper' or '31b-deep'.")
+
+    genomes_bundle, genome_source = load_sieve_genomes(sieve_weights)
+    if "w_core" in genomes_bundle:
+        active_key = "custom_inline"
+        genome_cfg = dict(genomes_bundle)
+    else:
+        active_key = genome_key if genome_key else ("31b_deep" if norm_tier == "31b-deep" else "e4b_sniper_distilled")
+        if active_key not in genomes_bundle:
+            raise ValueError(f"Genome key {active_key!r} not found in {list(genomes_bundle.keys())}.")
+        genome_cfg = dict(genomes_bundle[active_key])
+        if "gamma_max" not in genome_cfg and "gamma_max" in genomes_bundle:
+            genome_cfg["gamma_max"] = genomes_bundle["gamma_max"]
+
+    eff_graph_path = _auto_discover_sidecar_path(graph_path, scan_root, ".json")
+    eff_emb_path = _auto_discover_sidecar_path(embeddings_path, scan_root, ".npz")
+
+    ext_stats: Dict[str, Any] = {}
+    feat_matrix = extract_code_graph_features(
+        chunks,
+        query,
+        graph_path=eff_graph_path if not isinstance(eff_graph_path, Mapping) else None,
+        embeddings_path=eff_emb_path,
+        out_stats=ext_stats,
+    )
+    m_avail = compute_channel_availability(chunks, feat_matrix)
+    eff_budget = int(
+        max_tokens if max_tokens is not None and max_tokens > 0 else genome_cfg.get("token_budget", 800)
+    )
+    sel_idxs, core_scores, probs, raw_used_tokens = _select_sieve_slots(
+        chunks,
+        feat_matrix,
+        genome_cfg,
+        agent_tier=norm_tier,
+        top_k=top_k,
+        max_tokens=eff_budget,
+        m_avail=m_avail,
+        dedup_mirrors=dedup_mirrors,
+    )
+
+    q_hat = float(genome_cfg.get("conformal_q_hat", DEFAULT_CONFORMAL_Q_HAT))
+    top1_prob = probs[sel_idxs[0]] if sel_idxs else 0.0
+    max_prob = max((probs[i] for i in sel_idxs), default=0.0)
+    abstain = bool(top1_prob < (1.0 - q_hat))
+    route = "review" if abstain else "auto"
+
+    out_items: List[Dict[str, Any]] = []
+    running_tok = 0
+    for slot_pos, idx in enumerate(sel_idxs, start=1):
+        ch = chunks[idx]
+        c_meta = ch.get("_ast_meta") or {}
+        skel = str(c_meta.get("skeleton_header") or "")
+        raw_txt = str(ch.get("text") or "")
+        rendered = f"{skel}\n{raw_txt}" if (skel and skel not in raw_txt) else raw_txt
+        rem_budget = max(1, eff_budget - running_tok)
+        rendered_clamped = _truncate_text_to_token_budget(rendered, rem_budget)
+        slot_tok = min(rem_budget, max(1, int(round(_estimate_tokens(rendered_clamped)))))
+        running_tok += slot_tok
+        out_items.append(
+            {
+                "slot": slot_pos,
+                "role": "sniper_core" if (norm_tier == "e4b-sniper" or slot_pos <= 3) else "residual_halo",
+                "ref": ch["ref"],
+                "file": ch["file"],
+                "name": ch["name"],
+                "heading": ch["heading"],
+                "symbol": c_meta.get("symbol", ""),
+                "canonical_symbol": c_meta.get("canonical_symbol", c_meta.get("symbol", "")),
+                "node_kind": c_meta.get("node_kind", ""),
+                "skeleton_header": skel,
+                "start_line": ch["start_line"],
+                "end_line": ch["end_line"],
+                "sieve_score": round(core_scores[idx], 4),
+                "probability": round(probs[idx], 4),
+                "est_tokens": slot_tok,
+                "features": {
+                    SIEVE_FEATURE_NAMES[d]: round(feat_matrix[idx][d], 4) for d in range(8)
+                },
+            }
+        )
+
+    return {
+        "sel_idxs": sel_idxs,
+        "core_scores": core_scores,
+        "probs": probs,
+        "feat_matrix": feat_matrix,
+        "m_avail": m_avail,
+        "raw_used_tokens": raw_used_tokens,
+        "results": out_items,
+        "meta": {
+            "version": __version__,
+            "engine": "xlaya-code-graph-sieve",
+            "agent_tier": norm_tier,
+            "genome_key": active_key,
+            "genome_source": genome_source,
+            "chunks_evaluated": len(chunks),
+            "selected_count": len(out_items),
+            "selected_tokens": running_tok,
+            "token_budget": eff_budget,
+            "top1_probability": round(top1_prob, 4),
+            "max_probability": round(max_prob, 4),
+            "conformal_q_hat": round(q_hat, 4),
+            "abstain": abstain,
+            "route": route,
+            "m_avail": [round(x, 4) for x in m_avail],
+            "external_graph_edges_matched": int(ext_stats.get("external_graph_edges_matched", 0)),
+            "npz_symbols_matched": int(ext_stats.get("npz_symbols_matched", 0)),
+        },
+    }
+
+
+def sieve_chunks(
+    chunks: Sequence[Mapping[str, Any]],
+    query: str,
+    *,
+    agent_tier: str = "e4b-sniper",
+    sieve_weights: Optional[Union[str, Path, Mapping[str, Any]]] = None,
+    genome_key: Optional[str] = None,
+    graph_path: Optional[Union[str, Path]] = None,
+    embeddings_path: Optional[Union[str, Path, Mapping[str, Any]]] = None,
+    top_k: Optional[int] = None,
+    max_tokens: Optional[int] = None,
+    dedup_mirrors: bool = True,
+) -> Dict[str, Any]:
+    """Zero-disk in-memory sieve entrypoint for pre-chunked spans."""
+    t0 = time.perf_counter()
+    norm_chunks: List[Dict[str, Any]] = []
+    for idx_c, raw_c in enumerate(chunks):
+        c = dict(raw_c)
+        f_val = str(c.get("file") or f"memory/chunk_{idx_c}.py")
+        c.setdefault("file", f_val)
+        c.setdefault("name", Path(f_val).name or f"chunk_{idx_c}.py")
+        c.setdefault("heading", c["name"])
+        s_ln = int(c.get("start_line", 1))
+        e_ln = int(c.get("end_line", s_ln))
+        c["start_line"] = s_ln
+        c["end_line"] = e_ln
+        c.setdefault("ref", f"{c['file']}#L{s_ln}-L{e_ln}")
+        c.setdefault("text", "")
+        norm_chunks.append(c)
+
+    sv = _run_sieve_on_chunks(
+        norm_chunks,
+        query,
+        agent_tier=agent_tier,
+        sieve_weights=sieve_weights,
+        genome_key=genome_key,
+        graph_path=graph_path,
+        embeddings_path=embeddings_path,
+        top_k=top_k,
+        max_tokens=max_tokens,
+        dedup_mirrors=dedup_mirrors,
+        scan_root=None,
+    )
+    meta = dict(sv["meta"])
+    meta["files_scanned"] = len({str(c.get("file", "")) for c in norm_chunks})
+    meta["elapsed_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
+    return {
+        "ok": True,
+        "meta": meta,
+        "feature_names": list(SIEVE_FEATURE_NAMES),
+        "results": sv["results"],
+    }
+
+
+def _count_warm_ast_hits(
+    probe_files: Sequence[Path],
+    max_chars: int,
+    stat_map: Mapping[Path, Tuple[int, int]],
+) -> int:
+    if not probe_files or not _AST_CHUNK_CACHE:
+        return 0
+    probe_targets: Dict[str, Optional[Tuple[int, int]]] = {
+        str(fp): stat_map.get(fp) for fp in probe_files
+    }
+    matched_paths: set[str] = set()
+    for ckey in _AST_CHUNK_CACHE.keys():
+        if len(ckey) < 6:
+            continue
+        p_str, c_chars, c_lim, _rel, mtime_ns, size = ckey
+        if c_chars != max_chars or c_lim != 0 or p_str not in probe_targets:
+            continue
+        exp_stat = probe_targets[p_str]
+        if exp_stat is None or (mtime_ns, size) == exp_stat:
+            matched_paths.add(p_str)
+    return len(matched_paths)
 
 
 def sieve_code_graph(
@@ -4339,46 +4992,30 @@ def sieve_code_graph(
     max_tokens: Optional[int] = None,
     max_chars: int = 1600,
     max_chunks: int = 4096,
+    max_files: Optional[int] = None,
+    dedup_mirrors: bool = True,
     pattern: str = CODE_PATTERN,
 ) -> Dict[str, Any]:
     """Run zero-torch Stage 0+ AST & cross-regime matrix sieve with Slot-1 calibrated conformal abstention."""
     t0 = time.perf_counter()
-    norm_tier = (agent_tier or "e4b-sniper").strip().lower()
-    if norm_tier == "auto":
-        norm_tier = "e4b-sniper"
-    if norm_tier not in ("e4b-sniper", "31b-deep"):
-        raise ValueError(f"Unsupported agent_tier {agent_tier!r}; expected 'e4b-sniper' or '31b-deep'.")
-
-    genomes_bundle, genome_source = load_sieve_genomes(sieve_weights)
-    if "w_core" in genomes_bundle:
-        active_key = "custom_inline"
-        genome_cfg = dict(genomes_bundle)
-    else:
-        if genome_key:
-            active_key = genome_key
-        else:
-            active_key = "31b_deep" if norm_tier == "31b-deep" else "e4b_sniper_distilled"
-        if active_key not in genomes_bundle:
-            raise ValueError(f"Genome key {active_key!r} not found in {list(genomes_bundle.keys())}.")
-        genome_cfg = dict(genomes_bundle[active_key])
-        if "gamma_max" not in genome_cfg and "gamma_max" in genomes_bundle:
-            genome_cfg["gamma_max"] = genomes_bundle["gamma_max"]
-
     str_paths = [str(p) for p in paths]
-    files, scan_root = collect_target_files(str_paths, pattern=pattern)
-    files = _prerank_repo_files(files, scan_root, query)
-
-    eff_graph_path = _auto_discover_sidecar_path(graph_path, scan_root, ".json")
-    eff_emb_path = _auto_discover_sidecar_path(embeddings_path, scan_root, ".npz")
+    stat_map: Dict[Path, Tuple[int, int]] = {}
+    files, scan_root = collect_target_files(str_paths, pattern=pattern, stat_map=stat_map)
+    files = _prerank_repo_files(files, scan_root, query, stat_map=stat_map)
 
     all_chunks: List[Dict[str, Any]] = []
     large_repo = len(files) > 60
-    warm_cache = bool(files) and ((str(files[0]), max_chars, 0) in _AST_CHUNK_CACHE)
-    max_file_scan = (
-        (128 if len(files) > 150 else len(files))
-        if warm_cache
-        else (20 if len(files) > 55 else len(files))
-    )
+    probe_files = files[: min(len(files), 20)]
+    warm_hits = _count_warm_ast_hits(probe_files, max_chars, stat_map)
+    warm_cache = bool(probe_files and warm_hits >= min(10, len(probe_files)))
+    if max_files is not None and max_files > 0:
+        max_file_scan = min(len(files), int(max_files))
+    else:
+        max_file_scan = (
+            (128 if len(files) > 150 else len(files))
+            if warm_cache
+            else (20 if len(files) > 55 else len(files))
+        )
     for f_rank, fpath in enumerate(files[:max_file_scan]):
         rel_pfx = _rel_ref_prefix(fpath, scan_root)
         rem = max(0, max_chunks - len(all_chunks))
@@ -4389,100 +5026,42 @@ def sieve_code_graph(
             if not large_repo
             else min(rem, (48 if f_rank < 12 else 28) if warm_cache else 24)
         )
-        f_chs = chunk_file(fpath, max_chars=max_chars, rel_prefix=rel_pfx, limit_hint=0)
+        f_chs = chunk_file(
+            fpath,
+            max_chars=max_chars,
+            rel_prefix=rel_pfx,
+            limit_hint=0,
+            stat_tuple=stat_map.get(fpath),
+        )
         all_chunks.extend(_select_file_top_chunks(f_chs, query, per_f_lim))
         if len(all_chunks) >= max_chunks:
             all_chunks = all_chunks[:max_chunks]
             break
 
-    ext_stats: Dict[str, Any] = {}
-    feat_matrix = extract_code_graph_features(
+    sv = _run_sieve_on_chunks(
         all_chunks,
         query,
-        graph_path=eff_graph_path if not isinstance(eff_graph_path, Mapping) else None,
-        embeddings_path=eff_emb_path,
-        out_stats=ext_stats,
-    )
-    m_avail = compute_channel_availability(all_chunks, feat_matrix)
-    eff_budget = int(
-        max_tokens if max_tokens is not None and max_tokens > 0 else genome_cfg.get("token_budget", 800)
-    )
-    sel_idxs, core_scores, probs, _raw_used = _select_sieve_slots(
-        all_chunks,
-        feat_matrix,
-        genome_cfg,
-        agent_tier=norm_tier,
+        agent_tier=agent_tier,
+        sieve_weights=sieve_weights,
+        genome_key=genome_key,
+        graph_path=graph_path,
+        embeddings_path=embeddings_path,
         top_k=top_k,
-        max_tokens=eff_budget,
-        m_avail=m_avail,
+        max_tokens=max_tokens,
+        dedup_mirrors=dedup_mirrors,
+        scan_root=scan_root,
     )
-
-    q_hat = float(genome_cfg.get("conformal_q_hat", 0.45))
-    top1_prob = probs[sel_idxs[0]] if sel_idxs else 0.0
-    max_prob = max((probs[i] for i in sel_idxs), default=0.0)
-    abstain = bool(top1_prob < (1.0 - q_hat))
-    route = "review" if abstain else "auto"
-
-    out_items: List[Dict[str, Any]] = []
-    running_tok = 0
-    for slot_pos, idx in enumerate(sel_idxs, start=1):
-        ch = all_chunks[idx]
-        meta = ch.get("_ast_meta") or {}
-        skel = str(meta.get("skeleton_header") or "")
-        raw_txt = str(ch.get("text") or "")
-        rendered = f"{skel}\n{raw_txt}" if (skel and skel not in raw_txt) else raw_txt
-        rem_budget = max(1, eff_budget - running_tok)
-        rendered_clamped = _truncate_text_to_token_budget(rendered, rem_budget)
-        slot_tok = min(rem_budget, max(1, int(round(_estimate_tokens(rendered_clamped)))))
-        running_tok += slot_tok
-        out_items.append(
-            {
-                "slot": slot_pos,
-                "role": "sniper_core" if (norm_tier == "e4b-sniper" or slot_pos <= 3) else "residual_halo",
-                "ref": ch["ref"],
-                "file": ch["file"],
-                "name": ch["name"],
-                "heading": ch["heading"],
-                "symbol": meta.get("symbol", ""),
-                "canonical_symbol": meta.get("canonical_symbol", meta.get("symbol", "")),
-                "node_kind": meta.get("node_kind", ""),
-                "skeleton_header": skel,
-                "start_line": ch["start_line"],
-                "end_line": ch["end_line"],
-                "sieve_score": round(core_scores[idx], 4),
-                "probability": round(probs[idx], 4),
-                "est_tokens": slot_tok,
-                "features": {
-                    SIEVE_FEATURE_NAMES[d]: round(feat_matrix[idx][d], 4) for d in range(8)
-                },
-            }
-        )
+    meta = dict(sv["meta"])
+    meta["files_scanned"] = len(files)
+    meta["file_scan_cap"] = int(max_file_scan)
+    meta["warm_cache"] = bool(warm_cache)
+    meta["elapsed_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
 
     return {
         "ok": True,
-        "meta": {
-            "version": __version__,
-            "engine": "xlaya-code-graph-sieve",
-            "agent_tier": norm_tier,
-            "genome_key": active_key,
-            "genome_source": genome_source,
-            "files_scanned": len(files),
-            "chunks_evaluated": len(all_chunks),
-            "selected_count": len(out_items),
-            "selected_tokens": running_tok,
-            "token_budget": eff_budget,
-            "top1_probability": round(top1_prob, 4),
-            "max_probability": round(max_prob, 4),
-            "conformal_q_hat": round(q_hat, 4),
-            "abstain": abstain,
-            "route": route,
-            "m_avail": [round(x, 4) for x in m_avail],
-            "external_graph_edges_matched": int(ext_stats.get("external_graph_edges_matched", 0)),
-            "npz_symbols_matched": int(ext_stats.get("npz_symbols_matched", 0)),
-            "elapsed_ms": round((time.perf_counter() - t0) * 1000.0, 2),
-        },
+        "meta": meta,
         "feature_names": list(SIEVE_FEATURE_NAMES),
-        "results": out_items,
+        "results": sv["results"],
     }
 
 
@@ -5699,6 +6278,8 @@ def run_triage(
     thorough: bool = False,
     rubric_preset: str = "default",
     policy_path: Optional[str] = None,
+    graph_path: Optional[str] = None,
+    embeddings_path: Optional[str] = None,
     resident_cache: bool = True,
 ) -> Dict[str, Any]:
     """Execute the full 3-stage Stage 0 → Stage 1 → Stage 2 semantic triage cascade."""
@@ -5754,12 +6335,14 @@ def run_triage(
     ):
         eff_pattern = CODE_PATTERN
 
-    files, scan_root = collect_target_files(paths, pattern=eff_pattern)
+    stat_map: Dict[Path, Tuple[int, int]] = {}
+    files, scan_root = collect_target_files(paths, pattern=eff_pattern, stat_map=stat_map)
     if not files and pattern == DEFAULT_PATTERN and eff_pattern != CODE_PATTERN:
         eff_pattern = CODE_PATTERN
-        files, scan_root = collect_target_files(paths, pattern=eff_pattern)
+        stat_map.clear()
+        files, scan_root = collect_target_files(paths, pattern=eff_pattern, stat_map=stat_map)
     if mode == "shortlist" and query.strip() and files:
-        files = _prerank_repo_files(files, scan_root, query)
+        files = _prerank_repo_files(files, scan_root, query, stat_map=stat_map)
 
     if not files:
         return {
@@ -5782,7 +6365,7 @@ def run_triage(
 
     all_chunks: List[Dict[str, Any]] = []
     truncated_chunks = 0
-    hard_cap = max(max_chunks + 1, max_chunks * 4)
+    hard_cap = max_chunks + 1
 
     for fpath in files:
         rel_pfx = _rel_ref_prefix(fpath, scan_root)
@@ -5793,6 +6376,7 @@ def run_triage(
             whole_file=whole_file,
             rel_prefix=rel_pfx,
             limit_hint=remaining_hint,
+            stat_tuple=stat_map.get(fpath),
         )
         all_chunks.extend(extracted)
         if len(all_chunks) >= hard_cap:
@@ -5868,37 +6452,37 @@ def run_triage(
     if not laya_ok:
         sieve_meta_extra: Dict[str, Any] = {}
         if mode == "shortlist":
-            genomes_bundle, g_src = load_sieve_genomes(sieve_weights)
-            g_key = "31b_deep" if hw["agent_tier"] == "31b-deep" else "e4b_sniper_distilled"
-            g_cfg = dict(genomes_bundle if "w_core" in genomes_bundle else genomes_bundle[g_key])
-            if "gamma_max" not in g_cfg and isinstance(genomes_bundle, Mapping) and "gamma_max" in genomes_bundle:
-                g_cfg["gamma_max"] = genomes_bundle["gamma_max"]
-            feat_mat = extract_code_graph_features(all_chunks, query)
-            m_avail = compute_channel_availability(all_chunks, feat_mat)
             sel_top = top_k if (top_k is not None and top_k > 0) else (
                 hw["default_top_k"] if (hw["agent_tier_explicit"] or hw["profile"] == "nano") else 10
             )
             sel_bud = hw["token_budget"] if (hw["agent_tier_explicit"] or hw["profile"] == "nano") else 100000
-            sel_idxs, core_sc, probs, used_tok = _select_sieve_slots(
+            sv0 = _run_sieve_on_chunks(
                 all_chunks,
-                feat_mat,
-                g_cfg,
+                query,
                 agent_tier=hw["agent_tier"],
+                sieve_weights=sieve_weights,
+                graph_path=graph_path,
+                embeddings_path=embeddings_path,
                 top_k=sel_top,
                 max_tokens=sel_bud,
-                m_avail=m_avail,
+                scan_root=scan_root,
             )
-            q_hat = float(g_cfg.get("conformal_q_hat", 0.45))
-            top1_prob = probs[sel_idxs[0]] if sel_idxs else 0.0
-            max_prob = max((probs[i] for i in sel_idxs), default=0.0)
-            abstain = bool(top1_prob < (1.0 - q_hat))
+            sel_idxs = sv0["sel_idxs"]
+            core_sc = sv0["core_scores"]
+            probs = sv0["probs"]
+            sv0_meta = sv0["meta"]
+            g_src = sv0_meta["genome_source"]
+            used_tok = sv0_meta["selected_tokens"]
             sieve_meta_extra = {
-                "top1_probability": round(top1_prob, 4),
-                "max_probability": round(max_prob, 4),
-                "conformal_q_hat": round(q_hat, 4),
-                "abstain": abstain,
-                "route": "review" if abstain else "auto",
-                "m_avail": [round(x, 4) for x in m_avail],
+                "genome_key": sv0_meta["genome_key"],
+                "top1_probability": sv0_meta["top1_probability"],
+                "max_probability": sv0_meta["max_probability"],
+                "conformal_q_hat": sv0_meta["conformal_q_hat"],
+                "abstain": sv0_meta["abstain"],
+                "route": sv0_meta["route"],
+                "m_avail": sv0_meta["m_avail"],
+                "external_graph_edges_matched": sv0_meta["external_graph_edges_matched"],
+                "npz_symbols_matched": sv0_meta["npz_symbols_matched"],
             }
             sel_rank = {idx: pos for pos, idx in enumerate(sel_idxs)}
             enriched = []
@@ -5907,6 +6491,7 @@ def run_triage(
                 ch = all_chunks[i]
                 pr_val = round(probs[i], 4)
                 exp_sc = round(4.0 * pr_val, 4)
+                c_meta = ch.get("_ast_meta") or {}
                 item = dict(ch)
                 item.update(
                     {
@@ -5921,12 +6506,17 @@ def run_triage(
                             4,
                         ),
                         "noul": 0.0,
+                        "sieve_probability": pr_val,
                         "confidence": pr_val,
                         "selected_slot": (sel_rank[i] + 1) if i in sel_rank else None,
+                        "symbol": c_meta.get("symbol", ""),
+                        "canonical_symbol": c_meta.get("canonical_symbol", c_meta.get("symbol", "")),
+                        "node_kind": c_meta.get("node_kind", ""),
+                        "skeleton_header": str(c_meta.get("skeleton_header") or ""),
                     }
                 )
                 enriched.append(item)
-            if hw["agent_tier_explicit"] or hw["profile"] == "nano":
+            if (top_k is None or top_k > 0) and (hw["agent_tier_explicit"] or hw["profile"] == "nano"):
                 top_k = len(sel_idxs)
         else:
             enriched = fallback_evaluate(all_chunks, mode, query, ssot, labels_dict, threshold=threshold)
@@ -5993,7 +6583,7 @@ def run_triage(
                 ens_ml_idxs = list(range(len(all_chunks)))
             else:
                 for idx, ch in enumerate(all_chunks):
-                    is_py = str(ch.get("name", "")).lower().endswith((".py", ".pyi"))
+                    is_py = str(ch.get("name", "")).lower().endswith((".py", ".pyi") + tuple(_BRACE_CODE_EXTS))
                     is_en_ch = (not NON_ENGLISH_SCRIPT_RE.search(ch["text"])) if is_py else _is_english_text(ch["text"])
                     if is_en_ch:
                         ens_en_idxs.append(idx)
@@ -6003,7 +6593,7 @@ def run_triage(
             ml_idxs = list(range(len(all_chunks)))
         else:
             for idx, ch in enumerate(all_chunks):
-                is_py = str(ch.get("name", "")).lower().endswith((".py", ".pyi"))
+                is_py = str(ch.get("name", "")).lower().endswith((".py", ".pyi") + tuple(_BRACE_CODE_EXTS))
                 is_en_ch = (not NON_ENGLISH_SCRIPT_RE.search(ch["text"])) if is_py else _is_english_text(ch["text"])
                 if is_en_ch:
                     en_idxs.append(idx)
@@ -6261,28 +6851,36 @@ def run_triage(
             meta["lexical_prefiltered_from"] = prefiltered_from
 
         if mode == "shortlist" and (hw["agent_tier_explicit"] or has_sieve_arg):
-            genomes_bundle, g_src = load_sieve_genomes(sieve_weights)
-            g_key = "31b_deep" if hw["agent_tier"] == "31b-deep" else "e4b_sniper_distilled"
-            g_cfg = genomes_bundle if "w_core" in genomes_bundle else genomes_bundle[g_key]
-            feat_mat = extract_code_graph_features(all_chunks, query)
             sel_top = top_k if (top_k is not None and top_k > 0) else hw["default_top_k"]
-            sel_idxs, core_sc, probs, used_tok = _select_sieve_slots(
+            sv1 = _run_sieve_on_chunks(
                 all_chunks,
-                feat_mat,
-                g_cfg,
+                query,
                 agent_tier=hw["agent_tier"],
+                sieve_weights=sieve_weights,
+                graph_path=graph_path,
+                embeddings_path=embeddings_path,
                 top_k=sel_top,
                 max_tokens=hw["token_budget"],
+                scan_root=scan_root,
             )
-            q_hat = float(g_cfg.get("conformal_q_hat", 0.15))
-            max_prob = max((probs[i] for i in sel_idxs), default=0.0)
-            abstain = bool(max_prob < (1.0 - q_hat))
+            sel_idxs = sv1["sel_idxs"]
+            core_sc = sv1["core_scores"]
+            probs = sv1["probs"]
+            sv1_meta = sv1["meta"]
             sel_rank = {idx: pos for pos, idx in enumerate(sel_idxs)}
             for idx_e, item in enumerate(enriched):
                 pr_v = probs[idx_e]
                 exp_v = float(item.get("expected_score", 0.0))
                 item["sieve_score"] = round(core_sc[idx_e], 4)
                 item["sieve_probability"] = round(pr_v, 4)
+                c_meta = all_chunks[idx_e].get("_ast_meta") or {}
+                item.setdefault("symbol", c_meta.get("symbol", ""))
+                item.setdefault(
+                    "canonical_symbol",
+                    c_meta.get("canonical_symbol", c_meta.get("symbol", "")),
+                )
+                item.setdefault("node_kind", c_meta.get("node_kind", ""))
+                item.setdefault("skeleton_header", str(c_meta.get("skeleton_header") or ""))
                 base_hyb = 0.55 * (exp_v / 4.0) + 0.45 * pr_v
                 if idx_e in sel_rank:
                     item["selected_slot"] = sel_rank[idx_e] + 1
@@ -6290,13 +6888,18 @@ def run_triage(
                 else:
                     item["selected_slot"] = None
                     item["hybrid_score"] = round(0.5 * base_hyb, 4)
-            meta["genome_source"] = g_src
-            meta["selected_tokens"] = used_tok
-            meta["max_probability"] = round(max_prob, 4)
-            meta["conformal_q_hat"] = round(q_hat, 4)
-            meta["abstain"] = abstain
-            meta["route"] = "review" if abstain else "auto"
-            if top_k is None or hw["agent_tier_explicit"]:
+            meta["genome_key"] = sv1_meta["genome_key"]
+            meta["genome_source"] = sv1_meta["genome_source"]
+            meta["selected_tokens"] = sv1_meta["selected_tokens"]
+            meta["top1_probability"] = sv1_meta["top1_probability"]
+            meta["max_probability"] = sv1_meta["max_probability"]
+            meta["conformal_q_hat"] = sv1_meta["conformal_q_hat"]
+            meta["abstain"] = sv1_meta["abstain"]
+            meta["route"] = sv1_meta["route"]
+            meta["m_avail"] = sv1_meta["m_avail"]
+            meta["external_graph_edges_matched"] = sv1_meta["external_graph_edges_matched"]
+            meta["npz_symbols_matched"] = sv1_meta["npz_symbols_matched"]
+            if top_k is None or (top_k > 0 and hw["agent_tier_explicit"]):
                 top_k = len(sel_idxs)
 
     # Mode-specific sorting (preserve selected_slot order strictly above non-selected items)
@@ -6376,10 +6979,23 @@ def run_triage(
     else:
         selected = enriched[:eff_top_k] if eff_top_k > 0 else enriched
 
-    clean_results = [
-        {k: v for k, v in item.items() if k not in ("text", "_full_text", "_ast_meta")}
-        for item in selected
-    ]
+    clean_results: List[Dict[str, Any]] = []
+    for item in selected:
+        cleaned = {
+            k: v
+            for k, v in item.items()
+            if k not in ("text", "_full_text", "_ast_meta", "_file_sig")
+        }
+        raw_meta = item.get("_ast_meta")
+        if isinstance(raw_meta, Mapping):
+            cleaned.setdefault("symbol", raw_meta.get("symbol", ""))
+            cleaned.setdefault(
+                "canonical_symbol",
+                raw_meta.get("canonical_symbol", raw_meta.get("symbol", "")),
+            )
+            cleaned.setdefault("node_kind", raw_meta.get("node_kind", ""))
+            cleaned.setdefault("skeleton_header", str(raw_meta.get("skeleton_header") or ""))
+        clean_results.append(cleaned)
     meta["results_returned"] = len(clean_results)
     meta["elapsed_ms"] = round((time.perf_counter() - t0) * 1000.0, 2)
 
@@ -6929,7 +7545,7 @@ def _print_human_report(payload: Dict[str, Any], args: argparse.Namespace) -> No
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "XBoost /xlaya v2.3.0 — 5-Tier Hardware-Adaptive System 1 → System 1.5 "
+            "XBoost /xlaya v2.4.0 — 5-Tier Hardware-Adaptive System 1 → System 1.5 "
             "Triage & Cross-Regime Code-Graph Sieve Engine"
         )
     )
@@ -6940,9 +7556,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=["rubric", "contradiction", "shortlist", "classify"],
+        choices=["rubric", "contradiction", "shortlist", "classify", "tool_gate"],
         default="rubric",
-        help="Evaluation mode (default: rubric)",
+        help="Evaluation mode (default: rubric; tool_gate routes tool calls via --tools-file)",
     )
     parser.add_argument("--query", default="", help="Target query/instructions for shortlist, rubric, or classify")
     parser.add_argument("--ssot", default="", help="Canonical SSOT statement to test for contradictions (noul)")
@@ -6992,6 +7608,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--sieve-weights",
         default="",
         help="Optional path to evolved JSON sieve_genomes.json policy file",
+    )
+    parser.add_argument(
+        "--tools-file",
+        default="",
+        help="Path to JSON tool schemas array (or {'tools': [...]}) for --mode tool_gate",
+    )
+    parser.add_argument(
+        "--graph-path",
+        default="",
+        help="Optional NetworkX node_link_data call-graph JSON path for shortlist code sieve",
+    )
+    parser.add_argument(
+        "--embeddings-path",
+        default="",
+        help="Optional symbol-keyed .npz embeddings sidecar path for shortlist code sieve",
     )
     parser.add_argument(
         "--max-chars",
@@ -7134,6 +7765,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    sys.dont_write_bytecode = True
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
@@ -7141,6 +7773,37 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         report = run_self_test()
         print(json.dumps(report, indent=2, ensure_ascii=False))
         return 0 if report.get("ok") else 1
+
+    if args.mode == "tool_gate":
+        if not args.tools_file:
+            print(
+                "[XLaya Error] --mode tool_gate requires --tools-file pointing to a JSON tool schema file.",
+                file=sys.stderr,
+            )
+            return 2
+        tools_path = Path(args.tools_file)
+        if not tools_path.is_file():
+            print(f"[XLaya Error] --tools-file not found: {tools_path}", file=sys.stderr)
+            return 2
+        try:
+            raw_tools = json.loads(tools_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"[XLaya Error] Failed parsing --tools-file: {exc}", file=sys.stderr)
+            return 2
+        tools_seq = raw_tools.get("tools") if isinstance(raw_tools, Mapping) else raw_tools
+        if not isinstance(tools_seq, list):
+            print(
+                "[XLaya Error] --tools-file must contain a JSON array or {'tools': [...]} object.",
+                file=sys.stderr,
+            )
+            return 2
+        gate_res = triage_tool_call(
+            query=args.query,
+            tools=tools_seq,
+            sieve_weights=args.sieve_weights or None,
+        )
+        print(json.dumps(gate_res, indent=2, ensure_ascii=False))
+        return 0 if gate_res.get("ok") else 1
 
     if args.fit_rows:
         if not args.policy_path:
@@ -7210,6 +7873,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             video=args.video or None,
             device=args.device,
             profile=args.profile,
+            agent_tier=args.agent_tier,
         )
         print(json.dumps(mm_res, indent=2, ensure_ascii=False))
         return 0 if mm_res.get("ok") else 1
@@ -7218,11 +7882,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("[XLaya Error] At least one target file or directory path is required.", file=sys.stderr)
         return 2
 
-    effective_top_k = (
-        args.top_k
-        if args.top_k is not None
-        else (0 if (args.mode == "classify" or args.thorough) else 10)
-    )
+    effective_top_k: Optional[int] = args.top_k
+    if effective_top_k is None and args.mode == "classify":
+        effective_top_k = 0
 
     try:
         payload = run_triage(
@@ -7254,6 +7916,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             profile=args.profile,
             agent_tier=args.agent_tier,
             sieve_weights=args.sieve_weights or None,
+            graph_path=args.graph_path or None,
+            embeddings_path=args.embeddings_path or None,
             resident_cache=False,
         )
     except ValueError as exc:

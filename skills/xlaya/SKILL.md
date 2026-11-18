@@ -7,9 +7,9 @@ description: >-
   Do NOT use for prose/code authoring (/xboost) or exact regex search.
 ---
 
-# XLaya Semantic Decision, Code-Graph Sieve & Conformal Triage Sidecar (`/xlaya` v2.3)
+# XLaya Semantic Decision, Code-Graph Sieve & Conformal Triage Sidecar (`/xlaya` v2.4)
 
-A 100% pure-local, non-autoregressive **5-profile System 1 → System 1.5 decision, regime-invariant AST code-graph sieve, 2-stage tool-schema gate & thorough scan sidecar** for agent workflows (`/xlaya`, alias `/laya`), powered by `laya 0.4.31+` (`convaiinnovations/laya` `en`, `subfolder="typed-decisions"`, `subfolder="multilingual"`, calibrated `0.45*en + 0.55*typed` ensemble, and `vega-U` conformal verifiers up to `27B`), the resident [`scripts/xlaya_mcp_server.py`](scripts/xlaya_mcp_server.py) MCP server (`6` tools, `~20–50 ms` warm inference), the standalone [`scripts/laya_triage.py`](scripts/laya_triage.py) CLI engine (`v2.3.0`), and the repo-disjoint CUDA-evolved [`resources/sieve_genomes.json`](resources/sieve_genomes.json) policy (`5,679 B` LF / `6,020 B` CRLF JSON).
+A 100% pure-local, non-autoregressive **5-profile System 1 → System 1.5 decision, regime-invariant AST + brace-code sieve, 2-stage tool-schema gate & thorough scan sidecar** for agent workflows (`/xlaya`, alias `/laya`), powered by `laya 0.4.31+` (`convaiinnovations/laya` `en`, `subfolder="typed-decisions"`, `subfolder="multilingual"`, calibrated `0.45*en + 0.55*typed` ensemble, and `vega-U` conformal verifiers up to `27B`), the resident [`scripts/xlaya_mcp_server.py`](scripts/xlaya_mcp_server.py) MCP server (`6` tools, `~20–50 ms` warm inference, safe AST-checked hot-reload), the standalone [`scripts/laya_triage.py`](scripts/laya_triage.py) CLI engine (`v2.4.0`), and the repo-disjoint Wallacei `v2.7` K-Fold OOF `NSGA-II` CUDA-evolved [`resources/sieve_genomes.json`](resources/sieve_genomes.json) policy (`6,237 B` LF JSON).
 
 Runs hardware-neutrally across **CUDA GPU**, **Apple MPS**, **multi-thread CPU**, and **deterministic `0 ms` pure-Python lexical fallback**, either standalone or chained with `/x*` skills (`/xsync /xlaya`, `/xbrief /xlaya`, `/xplan /xlaya`, `/xdeep-research /xlaya`, `/xpublish /xlaya`, `/xlaya /xultra`, `/xlearn /xlaya`, `/xocr /xlaya`).
 
@@ -25,7 +25,7 @@ Runs hardware-neutrally across **CUDA GPU**, **Apple MPS**, **multi-thread CPU**
 %%{init: {'theme': 'neutral'}}%%
 flowchart LR
     subgraph Canvas [" "]
-        In["Target Corpus or Local Media (.md .html .txt .json .jsonl .csv .png .wav .mp4)"] --> S0["Stage 0: Fence-Safe Sieve + BM25 and Thai 3-Gram"]
+        In["Target Corpus or Local Media (.md .html .txt .json .jsonl .csv .py .js .ts .css .png .wav .mp4)"] --> S0["Stage 0: Fence/Brace Sieve + BM25 and Thai 3-Gram"]
         S0 --> S1["Stage 1: Laya v0.4.31+ (en / typed / ensemble / multi, output_tokens: 0)"]
         S1 -->|"Top-K, Disagreement >= 0.15, or Thorough"| S2["Stage 2: vega-U (auto / 0.8b / 4b / 27b) + Views 1..3 + Policy TTTHead"]
         S1 -->|"Calibrated file#Lstart-Lend + file_summaries"| S3["System 2 Host Agent: Surgical read_file and edit_file"]
@@ -35,10 +35,10 @@ flowchart LR
     style Canvas fill:#ffffff,stroke:#cbd5e1,stroke-width:1.5px,color:#0f172a
 ```
 
-### Bucket 1 Architectural & Mathematical Invariants (`v2.3.0`)
+### Bucket 1 Architectural & Mathematical Invariants (`v2.4.0`)
 - **Stage 0 (`0 ms` Pure Python Structural, Regime-Invariant AST Code-Graph & Evolved Simplex Sieve)**:
-  - **2-Tier Source-First Pre-Ranker & Compact AST Chunker**: Parses `#{1,6}` Markdown headings with a 6-level breadcrumb stack and 4-backtick fence safety, pre-ranks Tier-1 core package `.py`/`.pyi` files ahead of Tier-2 `docs_src/`, `tests/`, `examples/`, and `scripts/`, and parses Python modules via `ast` into enclosing `def`, `async def`, and `class` spans with compact class/import `skeleton_header`s on split methods.
-  - **Regime-Invariant 8-Feature Code-Graph Sieve (`sieve_code_graph` + `triage_tool_call` + `resources/sieve_genomes.json`)**: Scores candidate chunks over `[bm25, ident_exact, ast_enclosing_def, call_graph_hop1, async_depends_hop2, emb_256d_cos, test_file_penalty, traceback_line_boost]` on the sign-constrained L1 simplex (`‖w‖₁ = 1`, `w_6 ≤ 0`) with universal Corpus-IDF seed propagation (`f_5_tfidf`), All-but-the-Mean Top-4 PC `.npz` whitening, isolated NetworkX `node_link_data` call edges, Smooth Channel Availability (`M_avail`, `gamma_max = 1.45`), Slot-1 Platt `(T = 1.67, b = -0.795)` calibration, split-conformal `conformal_q_hat = 0.5885` abstention, and a 2-Stage Causal Monotonic Tool-Schema Gate (`triage_tool_call`) in pure Python stdlib with zero `torch` or `numpy` dependency.
+  - **2-Tier Source-First Pre-Ranker & Compact AST + Brace-Code Chunker**: Parses `#{1,6}` Markdown headings with a 6-level breadcrumb stack and 4-backtick fence safety, pre-ranks Tier-1 core package `.py`/`.pyi`/web-code files ahead of Tier-2 `docs_src/`, `tests/`, `examples/`, and `scripts/`, parses Python modules via `ast` into enclosing `def`/`async def`/`class` spans (`skeleton_header`s), and chunks `.js`/`.jsx`/`.ts`/`.tsx`/`.mjs`/`.css`/`.cs`/`.go`/`.rs`/`.sql` via `_chunk_brace_code` (`--pattern web` excludes raw `.geojson`, `> 100 KB` JSON preview-capped).
+  - **Regime-Invariant 8-Feature Code-Graph Sieve (`sieve_code_graph` + `triage_tool_call` + `resources/sieve_genomes.json`)**: Scores candidate chunks over `[bm25, ident_exact, ast_enclosing_def, call_graph_hop1, async_depends_hop2, emb_256d_cos, test_file_penalty, traceback_line_boost]` on the sign-constrained L1 simplex (`‖w‖₁ = 1`, `w_6 ≤ 0`) with universal Corpus-IDF seed propagation (`f_5_tfidf`), All-but-the-Mean Top-4 PC `.npz` whitening, isolated NetworkX `node_link_data` call edges, Smooth Channel Availability (`M_avail`, `gamma_max = 1.45`), Slot-1 Platt calibration (`e4b_sniper_distilled`: `T = 1.67, b = -0.795, conformal_q_hat = 0.5885`; Stage B promoted `31b_deep`: `T = 1.2, b = -0.5435, conformal_q_hat = 0.575`; `min_ece_calibrated`), and a 2-Stage Causal Monotonic Tool-Schema Gate (`triage_tool_call`) in pure Python stdlib with zero `torch` or `numpy` dependency.
   - **5-Tier Hardware Profiles (`--profile auto|nano|edge|workstation|max`) & Dual SWE Agent Tiers (`--agent-tier auto|e4b-sniper|31b-deep`)**:
     - `nano`: Zero-torch / zero-numpy pure-Python AST + code-graph sieve (`"torch" not in sys.modules`, `ΔRSS ≤ 25 MB`, `~4 ms` warm query / fast cold repo scan).
     - `edge`: Single CPU encoder (`typed` / `en`, `batch_size ≤ 8`, `vega` disabled, `< 400 MB` RAM) for constrained `2 CPU / 4 GB RAM` containers.
@@ -95,10 +95,10 @@ When the `xlaya` MCP server ([`scripts/xlaya_mcp_server.py`](scripts/xlaya_mcp_s
 
 | MCP Tool | Exact Arguments & Defaults | Purpose |
 | :--- | :--- | :--- |
-| **`xlaya_triage`** | `paths` (`list[str]`, required), `mode="rubric"` (`"shortlist" \| "contradiction" \| "rubric" \| "classify"`), `query=""`, `ssot=""`, `true_desc=""`, `false_desc=""`, `labels_spec=""`, `noul_labels=""`, `lang="auto"` (`"auto" \| "en" \| "multi" \| "typed" \| "ensemble"`), `device="auto"` (`"auto" \| "cuda" \| "mps" \| "cpu"`), `profile="auto"` (`"auto" \| "nano" \| "edge" \| "workstation" \| "max"`), `agent_tier="auto"` (`"auto" \| "e4b-sniper" \| "31b-deep"`), `sieve_weights=""`, `max_chars=1600`, `whole_file=false`, `max_chunks=2048`, `top_k=None`, `threshold=0.55`, `batch_size=32`, `pattern="*.md,*.html,*.txt,*.json,*.jsonl,*.csv"`, `lexical_prefilter=0`, `vega=false`, `vega_model="auto"` (`"auto" \| "0.8b" \| "4b" \| "gemma-1b" \| "27b" \| "none"`), `vega_top_k=10`, `views=1` (`1 \| 2 \| 3`), `thorough=false`, `rubric_preset="default"` (`"default" \| "architecture" \| "code_audit" \| "doc_sync" \| "research"`), `policy_path=""` | End-to-end Stage 0 → Stage 1 → optional Stage 2 file/directory/Python-AST triage returning calibrated `#L<start>-L<end>` records, code-sieve probabilities, 4-facet breakdowns, and `file_summaries` |
-| **`xlaya_predict`** | `questions` (`dict`, required), `state` *(single payload)* or `states` (`list`, *batch*), `model="auto"` (`"auto" \| "en" \| "multi" \| "typed" \| "ensemble"`), `device="auto"`, `profile="auto"` (`"auto" \| "nano" \| "edge" \| "workstation" \| "max"`), `batch_size=32`, `group_size=16`, `vega=false`, `vega_model="auto"` (`"auto" \| "0.8b" \| "4b" \| "gemma-1b" \| "27b" \| "none"`), `views=1` (`1 \| 2 \| 3`), `policy_path=""`, `image=None`, `audio=None`, `video=None` | Direct in-memory or local multimodal `choice` / `score` / `noul` evaluation (supports zero-torch `profile="nano"`, Head-Language Guard, `sort_by_length=True`, `views` debiasing, and `predict_tournament` on `>20` labels) |
+| **`xlaya_triage`** | `paths` (`list[str]`, required), `mode="rubric"` (`"shortlist" \| "contradiction" \| "rubric" \| "classify"`), `query=""`, `ssot=""`, `true_desc=""`, `false_desc=""`, `labels_spec=""`, `noul_labels=""`, `lang="auto"` (`"auto" \| "en" \| "multi" \| "typed" \| "ensemble"`), `device="auto"` (`"auto" \| "cuda" \| "mps" \| "cpu"`), `profile="auto"` (`"auto" \| "nano" \| "edge" \| "workstation" \| "max"`), `agent_tier="auto"` (`"auto" \| "e4b-sniper" \| "31b-deep"`), `sieve_weights=""`, `graph_path=""`, `embeddings_path=""`, `max_chars=1600`, `whole_file=false`, `max_chunks=2048`, `top_k=None`, `threshold=0.55`, `batch_size=32`, `pattern="*.md,*.html,*.txt,*.json,*.jsonl,*.csv"` *(or `"web"`/`"code"`/`"default"` alias)*, `lexical_prefilter=0`, `vega=false`, `vega_model="auto"` (`"auto" \| "0.8b" \| "4b" \| "gemma-1b" \| "27b" \| "none"`), `vega_top_k=10`, `views=1` (`1 \| 2 \| 3`), `thorough=false`, `rubric_preset="default"` (`"default" \| "architecture" \| "code_audit" \| "doc_sync" \| "research"`), `policy_path=""` | End-to-end Stage 0 → Stage 1 → optional Stage 2 file/directory/AST/brace-code triage returning calibrated `#L<start>-L<end>` records, flat conformal `meta` (`conformal_q_hat=0.5885`, `top1_probability`, `m_avail`), `skeleton_header`s, mirror-deduped slots, and `file_summaries` |
+| **`xlaya_predict`** | `questions` (`dict`, required unless `tools` provided), `state` *(single payload)* or `states` (`list`, *batch*), `tools` (`list`, optional tool schemas for `triage_tool_call`), `query=""` *(with `tools`)*, `sieve_weights=""`, `model="auto"` (`"auto" \| "en" \| "multi" \| "typed" \| "ensemble"`), `device="auto"`, `profile="auto"` (`"auto" \| "nano" \| "edge" \| "workstation" \| "max"`), `agent_tier="auto"` (`"auto" \| "e4b-sniper" \| "31b-deep"`), `batch_size=32`, `group_size=16`, `vega=false`, `vega_model="auto"` (`"auto" \| "0.8b" \| "4b" \| "gemma-1b" \| "27b" \| "none"`), `views=1` (`1 \| 2 \| 3`), `policy_path=""`, `image=None`, `audio=None`, `video=None` | Direct in-memory, zero-torch conformal tool-call routing (`tools`+`query` → `triage_tool_call`), or local multimodal `choice` / `score` / `noul` evaluation (supports `profile="nano"`, Head-Language Guard, `sort_by_length=True`, `views` debiasing, and `predict_tournament` on `>20` labels) |
 | **`xlaya_fit`** | `rows` (`list[dict]` or `.csv`/`.jsonl` path, required), `questions` (`dict`, required), `policy_path` (`str`, required), `vega_model="0.8b"` (`"auto" \| "0.8b" \| "4b" \| "gemma-1b" \| "27b"`), `device="auto"`, `folds=5`, `calibrate=true`, `target_precision=0.95` | Fits and saves a persistent `VegaAgent` `TTTHead` + split-conformal calibration policy (`heads.npz`, `calibration.json`, `manifest.json`, `questions.json`) with OOD `outbound` centroid guard |
-| **`xlaya_status`** | `profile="auto"` (`"auto" \| "nano" \| "edge" \| "workstation" \| "max"`), `agent_tier="auto"` (`"auto" \| "e4b-sniper" \| "31b-deep"`) | Reports resident models (`en`, `multi`, `typed`, `ensemble`, `vegaml`), active hardware profile & agent tier, RAM/VRAM availability, MCP version (`2.3.0`), and `LAYA_IDLE_TTL_SEC` |
+| **`xlaya_status`** | `profile="auto"` (`"auto" \| "nano" \| "edge" \| "workstation" \| "max"`), `agent_tier="auto"` (`"auto" \| "e4b-sniper" \| "31b-deep"`) | Reports resident models (`en`, `multi`, `typed`, `ensemble`, `vegaml`), active hardware profile & agent tier (`agent_tier_explicit`), RAM/VRAM availability, MCP version (`2.4.0`), and `LAYA_IDLE_TTL_SEC` |
 | **`xlaya_preload`** | `models=["en"]` (`list` of `"en" \| "multi" \| "typed" \| "ensemble"`), `vega=false`, `vega_model="auto"` (`"auto" \| "0.8b" \| "4b" \| "gemma-1b" \| "27b"`), `device="auto"` | Eagerly pre-warms encoder and/or `vega-U` weights in RAM/VRAM prior to latency-critical sweeps |
 | **`xlaya_unload`** | *(none)* | Cancels any pending idle watchdog timer and unloads warm Laya/VegaML checkpoints from RAM/VRAM |
 
@@ -106,9 +106,12 @@ When the `xlaya` MCP server ([`scripts/xlaya_mcp_server.py`](scripts/xlaya_mcp_s
 Use [`scripts/laya_triage.py`](scripts/laya_triage.py) in CI pipelines, `2 CPU / 4 GB` containers (`--profile nano` / `edge`), or whenever MCP is unavailable (`<SKILL_DIR>` = directory containing this `SKILL.md`):
 
 ```bash
-# 0. Zero-torch (< 25 MB RAM) AST + 2-hop code-graph localization for E4B-Sniper (K=3) or 31B-Deep (K=8)
+# 0. Zero-torch (< 25 MB RAM) AST + brace-code + 2-hop code-graph localization for E4B-Sniper (K=3) or 31B-Deep (K=8)
 python "<SKILL_DIR>/scripts/laya_triage.py" <repo_dir> --mode shortlist --query "<issue or traceback>" --profile nano --agent-tier e4b-sniper --sieve-weights "<SKILL_DIR>/resources/sieve_genomes.json"
-python "<SKILL_DIR>/scripts/laya_triage.py" <repo_dir> --mode shortlist --query "<multi-file bug>" --profile workstation --agent-tier 31b-deep --sieve-weights "<SKILL_DIR>/resources/sieve_genomes.json"
+python "<SKILL_DIR>/scripts/laya_triage.py" <repo_dir> --mode shortlist --pattern web --query "<JS/TS/CSS/Python query>" --profile nano --agent-tier 31b-deep
+
+# 0b. Zero-torch 2-Stage Conformal Tool-Call Gate (triage_tool_call)
+python "<SKILL_DIR>/scripts/laya_triage.py" --mode tool_gate --tools-file tools.json --query "<user prompt>" --json
 
 # 1. Thorough 4-facet ensemble scan with file_summaries, disagreement gate, and preset rubric
 python "<SKILL_DIR>/scripts/laya_triage.py" <path> --mode rubric --thorough --rubric-preset architecture --top-k 10
@@ -135,7 +138,7 @@ python "<SKILL_DIR>/scripts/laya_triage.py" --self-test
 
 ---
 
-## 4. Core Python Primitives (`laya 0.4.31+` & `xlaya v2.3.0`)
+## 4. Core Python Primitives (`laya 0.4.31+` & `xlaya v2.4.0`)
 
 Every question entry in `questions` MUST define `"type"` (`"choice"`, `"score"`, or `"noul"`) and `"instructions"`:
 
