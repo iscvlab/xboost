@@ -103,7 +103,7 @@ Select the exact `/x...` slash command pipeline for the bottom of the Kickoff Pr
 #### B. Sidebar Title Rule (`2–3 Short Words, ≤ 22 Chars`) & 5-Part Kickoff Prompt Architecture
 
 To prevent IDE conversation sidebars from truncating titles at ~24 characters (`Phase 5 Architecture Plannin...`, `Phase 0 PR Sweep And Bottl...`):
-1. **Line 1 (`# [2–3 Short Word Title]`, `≤ 22 chars`)**: Put the **distinguishing subject/module noun first** in **2–3 short words** (`≤ 22 characters`). **NEVER** start Line 1 or `/xbrief "..."` with generic filler prefixes (`Objective:`, `Phase X`, `Architecture Planning`, `Forensic Audit`, `Comprehensive Study`). Good examples: `# DeepForest Walkthrough`, `# Group A Bottlenecks`, `# QuantEngine V6`, `# Ramintra Thesis`.
+1. **Line 1 (`# [2–3 Short Word Title]`, `≤ 22 chars`)**: Put the **distinguishing subject/module noun first** in **2–3 short words** (`≤ 22 characters`). **NEVER** start Line 1 or `/xbrief "..."` with generic filler prefixes (`Objective:`, `Phase X`, `Architecture Planning`, `Forensic Audit`, `Comprehensive Study`). Good examples: `# Auth Token Refresh`, `# Query Cache Fix`, `# Solver Grid Audit`, `# API Schema Sync`.
 2. **Line 2 (`**Objective**: ...`)**: Place the full 1-sentence task objective on Line 2 right below the short `#` title.
 3. **Bottom Command Sync**: Pass the **exact same 2–3 word title** inside `/xbrief "[2-3 Word Title]"` at the bottom of the prompt so the IDE's title generator locks onto the short name.
 

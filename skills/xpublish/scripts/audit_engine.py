@@ -1151,8 +1151,8 @@ def audit_skill_invariants(target: Path, result: AuditResult):
         )
 
     persona_pat = re.compile(
-        r"(?i)\b(asus\s+laptop|home\s+pc|windows\s+desktop\s+pc|on\s+nut|01_on_nut|"
-        r"161-rai|khlong\s+prawet|traffy|ON_v[0-9]|thesis_architecture\.html|slide_style_showcase_v2\.html)\b"
+        r"(?i)\b(my\s+(?:laptop|home\s+pc|desktop\s+pc|workstation|personal\s+pc|"
+        r"thesis|dissertation|vault)|home\s+pc|windows\s+desktop\s+pc|personal\s+desktop\s+pc)\b"
     )
     bucket3_pat = re.compile(
         r"(?i)(≤\s*150[- ]words?|150[- ]word\s+caveman|≤\s*12\s+lines|"

@@ -286,14 +286,12 @@ def discover_federated_context(ws_root: Path, include_obsidian: bool = False) ->
         playbook_scan_dirs = [
             cand,
             cand / "docs",
-            cand / "03_simulations" / "grasshopper_simulations" / "plant_studio",
         ]
         for s_dir in playbook_scan_dirs:
             if s_dir.is_dir():
                 for md_f in sorted(s_dir.glob("*.md")):
                     if (
                         md_f.is_file()
-                        and md_f.name.upper() != "UI_THEME_PROTOCOL.MD"
                         and any(k in md_f.name.upper() for k in ("PLAYBOOK", "PROTOCOL", "STANDARD"))
                     ):
                         extra_docs.append(md_f)
